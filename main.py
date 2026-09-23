@@ -1,5 +1,6 @@
 import os
 import asyncio
+import pytz
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -50,15 +51,24 @@ async def send_daily_prediction(context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⚽ 足球量化分析机器人已启动，等待定时推送...")
 
+async def test_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """手动触发一次推送，便于测试 Telegram 发送是否正常"""
+    try:
+        await send_daily_prediction(context)
+        await update.message.reply_text("✅ 测试消息已发送")
+    except Exception as e:
+        await update.message.reply_text(f"❌ 发送失败：{e}")
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
     
     # 指令
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("test", test_send))
     
-    # 调度器
-    scheduler = AsyncIOScheduler()
-    # 每天早上 8 点运行
+    # 调度器（需显式指定 pytz 时区，否则在部分环境下会因系统时区非 pytz 对象而报错崩溃）
+    scheduler = AsyncIOScheduler(timezone=pytz.utc)
+    # 每天早上 8 点（UTC）运行
     scheduler.add_job(send_daily_prediction, 'cron', hour=8, args=[app])
     scheduler.start()
     
