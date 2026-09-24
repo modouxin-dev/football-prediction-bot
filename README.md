@@ -1,322 +1,74 @@
-# ⚽ Football Prediction Bot - 足球量化预测机器人
+# ⚽ Football Prediction Bot
 
-一个基于 **泊松分布** 的足球比赛量化预测 Telegram 机器人，提供每日重点赛事分析、赔率评估和历史对阵数据。
+Telegram 足球量化预测机器人：用泊松模型估算比赛结果概率，并对照市场赔率找出「价值偏差」，每天定时推送，并支持按钮查看深度分析 / 历史交锋 / 赔率对比。部署在 Railway 上。
 
-## 🎯 核心功能
+> ⚠️ 模型只基于进球数据估算，**不构成投注建议**。市场赔率通常比简单模型更准，模型与市场差距大时，先怀疑模型。
 
-### 1. **量化预测分析** 
-- 基于泊松分布的数学模型
-- 实时计算胜平负概率
-- 预测最可能的比分
-- 预期进球数 (xG) 分析
+## 功能与命令
 
-### 2. **赔率价值评估**
-- 将模型概率与市场赔率对比
-- 识别高价值投注机会 (Value Bet)
-- 支持多个博彩公司赔率对比
+| 命令 | 说明 | 权限 |
+| --- | --- | --- |
+| `/start` `/help` | 欢迎信息、命令说明 | 所有人 |
+| `/test` | 立即生成并推送一次预测（与定时任务同一路径，失败会显示具体原因） | 管理员 |
+| `/status` | 版本、赛季、下次推送时间、数据源套餐与今日请求数 | 管理员 |
 
-### 3. **历史数据分析**
-- H2H 历史对阵统计
-- 球队进攻防守强度计算
-- 赔率走势追踪
+推送消息下方的按钮会**在原消息上切换视图**：📈 预测 · 🔍 深度分析（比分 Top5、大小球、双方进球、球队强度）· 📊 历史交锋 · 💰 赔率对比 · 🔄 刷新赔率。
 
-### 4. **自动推送**
-- 每日定时推送 (可配置时区)
-- 选择性推送前 N 场重点赛事
-- Telegram 消息分享和讨论
+## 环境变量
 
-### 5. **交互式界面**
-- 内联按钮快速查询
-- 深度分析报告
-- 错误处理和友好提示
+完整示例见 [`.env.example`](.env.example)。
 
----
+| 变量 | 必填 | 说明 |
+| --- | --- | --- |
+| `TELEGRAM_TOKEN` | ✅ | @BotFather 提供的 token |
+| `CHAT_ID` | 推送必填 | 接收推送的聊天；未设置时只停用定时推送 |
+| `RAPID_API_KEY` / `API_FOOTBALL_KEY` | ✅ 二选一 | RapidAPI 订阅 / api-football.com 官方直连（设置后优先） |
+| `ADMIN_ID` | | 管理员用户 ID，逗号分隔。默认等于私聊的 `CHAT_ID` |
+| `LEAGUE_ID` / `SEASON` | | 默认 39（英超）/ 按日期推算的当前赛季 |
+| `PUSH_TIME` / `TIMEZONE` | | 默认 `08:00` / `Asia/Shanghai`。也兼容 `SCHEDULED_HOUR`、`SCHEDULED_MINUTE` |
+| `MAX_MATCHES` / `LOOKAHEAD_HOURS` | | 每次最多 3 场 / 只推未来 36 小时内开赛的比赛 |
+| `LOG_LEVEL` | | 默认 `INFO` |
 
-## 📋 需求
+`DB_PATH`、`MONGODB_URI` 目前没有被使用，可以在 Railway 里删除。
 
-- Python 3.10+
-- Telegram Bot Token (从 [BotFather](https://t.me/botfather) 获取)
-- RapidAPI Football API Key (免费获取 [https://rapidapi.com/api-sports/api/api-football](https://rapidapi.com/api-sports/api/api-football))
-- Docker (可选，用于容器部署)
+## 部署到 Railway
 
----
+1. 服务连接到本仓库的 `main` 分支，构建方式为 Dockerfile。
+2. 在 Railway 的 Variables 里填上面的环境变量。
+3. **不要**给服务设置 Cron Schedule：这是长轮询的常驻进程，定时推送由程序内部完成。
+4. 推送到 `main` 后 Railway 会自动构建并部署。部署后在 Telegram 里发送 `/status` 检查，再发 `/test` 验证整条链路。
 
-## 🚀 快速开始
-
-### 1. 本地安装和运行
+## 本地运行与测试
 
 ```bash
-# 克隆仓库
-git clone https://github.com/modouxin-dev/football-prediction-bot.git
-cd football-prediction-bot
-
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# 或 venv\Scripts\activate  # Windows
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 复制环境模板并填入配置
-cp .env.example .env
-# 编辑 .env，填入你的 API Key 和 Bot Token
-
-# 运行机器人
+pip install -r requirements-dev.txt
+cp .env.example .env   # 填好之后
 python main.py
+pytest                 # 不联网，使用仿真的 API 响应
 ```
 
-### 2. Docker 部署
+## 模型说明
 
-```bash
-# 构建镜像
-docker build -t football-bot .
+- 用积分榜（一次请求）得到每支球队的主/客场场均进球与失球，除以联赛平均得到攻防强度，并向 1.0 收缩（相当于补 5 场平均水平的先验比赛），避免赛季初样本太少。
+- `λ主 = 主队主场进攻 × 客队客场防守 × 联赛主队场均进球`，`λ客` 同理；比分矩阵覆盖 0–10 球并归一化，汇总得到胜平负、最可能比分、大小球、双方进球概率。
+- 赔率取各博彩公司「胜平负」盘口的中位数。**价值偏差 = 模型概率 − 1/赔率**，大于 0 等价于期望收益为正；超过 5% 标记为 Value Bet。
+- 尚未考虑：伤停、赛程密度、Dixon-Coles 低比分修正、近期状态权重。
 
-# 运行容器
-docker run -d \
-  -e TELEGRAM_TOKEN=your_token \
-  -e RAPID_API_KEY=your_key \
-  -e LEAGUE_ID=39 \
-  -e SEASON=2024 \
-  -e CHAT_ID=your_chat_id \
-  -e TIMEZONE=UTC \
-  --name football-bot \
-  football-bot
+## 常见问题
+
+- **`HTTP 403`**：RapidAPI 通常表示这个 Key 没有订阅 API-Football，或填错了 Key。到 RapidAPI 控制台确认订阅，或改用官方直连并设置 `API_FOOTBALL_KEY`。
+- **`HTTP 429`**：请求太频繁或当日额度用尽。免费套餐额度很小，程序已对赛程、积分榜、赔率做了缓存。
+- **提示套餐不支持该赛季**：免费套餐可能不开放当前赛季，需要升级套餐。
+- **收不到定时推送**：发 `/status` 看「下次推送」时间；进程重启会重新计时，错过的时间点不会补发。
+
+## 项目结构
+
 ```
-
-### 3. Railway 部署
-
-```bash
-# 使用 Railway CLI
-railway up
-
-# 或在 Railway 仪表板配置环境变量后自动部署
+main.py         入口：命令、按钮、定时任务、日志
+config.py       环境变量解析与校验
+api_client.py   API-Football 异步客户端（超时、重试、缓存、错误翻译）
+analyzer.py     泊松模型与赔率工具（纯计算）
+service.py      赛程 + 积分榜 + 赔率 → 预测
+bot_handler.py  消息模板与按钮键盘
+tests/          单元测试
 ```
-
----
-
-## ⚙️ 配置
-
-编辑 `.env` 文件配置以下参数：
-
-```env
-# 必需：Telegram Bot Token
-TELEGRAM_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-
-# 必需：RapidAPI Football API Key
-RAPID_API_KEY=your_rapidapi_key_here
-
-# 可选：足球联赛 ID (默认=39 英超)
-LEAGUE_ID=39
-# 常见联赛代码：
-#   39 = 英超 (Premier League)
-#   140 = 西甲 (La Liga)
-#   135 = 意甲 (Serie A)
-#   78  = 德甲 (Bundesliga)
-#   61  = 法甲 (Ligue 1)
-
-# 可选：赛季 (默认=2024)
-SEASON=2024
-
-# 必需：接收消息的 Telegram Chat ID
-CHAT_ID=1234567890
-
-# 可选：时区 (默认=UTC)
-TIMEZONE=UTC
-# 示例：Asia/Shanghai, Europe/London, America/New_York
-```
-
-### 获取 Chat ID
-
-1. 将机器人添加到群组或直接聊天
-2. 给机器人发送任意消息
-3. 访问 `https://api.telegram.org/bot<TOKEN>/getUpdates`
-4. 查找 `chat.id` 字段
-
----
-
-## 💬 Telegram 命令
-
-- `/start` - 显示欢迎信息和功能介绍
-- `/test` - 手动测试推送（立即生成预测）
-- `/help` - 显示命令列表和预测解读指南
-- `/status` - 查看机器人运行状态和配置
-
-### 内联按钮功能
-消息中的按钮提供快速操作：
-- 🔍 **深度分析** - 显示比分概率矩阵和统计信息
-- 📊 **H2H对阵** - 历史对阵统计（近10场）
-- 📉 **赔率走势** - 多个博彩公司赔率对比
-- 🔄 **刷新数据** - 重新获取最新数据
-
----
-
-## 📊 预测解读指南
-
-### 核心指标
-
-#### 1. **胜平负概率** 
-基于泊松分布计算的历史概率分布
-
-#### 2. **预期比分** (Most Likely Score)
-概率矩阵中最可能发生的比分
-
-#### 3. **预期进球数** (Expected Goals / xG)
-- λ_home = 主队进攻强度 × 客队防守强度 × 联赛平均进球数
-- λ_away = 客队进攻强度 × 主队防守强度 × 联赛平均进球数
-
-#### 4. **价值度** (Value Bet)
-```
-Value = 模型概率 - 隐含概率
-      = P(Model) - 1/赔率
-
-Value > 5%  → 推荐投注
-Value > 10% → 强烈推荐
-```
-
-### 信心指数
-- ⭐⭐⭐⭐⭐ (极高) - 概率 > 75%
-- ⭐⭐⭐⭐ (高) - 概率 > 65%
-- ⭐⭐⭐ (中等) - 概率 > 50%
-- ⭐⭐ (低) - 概率 > 35%
-- ⭐ (极低) - 概率 ≤ 35%
-
-### 建议策略
-| 条件 | 建议 |
-|------|------|
-| Value > 10% | 🚀 强势主胜推荐 |
-| Value > 5% | 👍 主胜价值推荐 |
-| Win Prob > 65% | ✅ 主队不败 (1X) |
-| Win Prob > 50% | 📊 主队微弱优势 |
-| Draw Prob > 40% | 🤝 平局可能性大 |
-| 其他 | ⚠️ 观望/小注 |
-
----
-
-## 🔧 开发指南
-
-### 项目结构
-```
-football-prediction-bot/
-├── main.py              # 机器人主入口，事件处理
-├── analyzer.py          # 量化分析引擎（泊松分布）
-├── api_client.py        # RapidAPI 数据接口封装
-├── bot_handler.py       # Telegram 消息格式化
-├── requirements.txt     # Python 依赖
-├── Dockerfile           # Docker 容器配置
-├── .env.example         # 环境变量模板
-├── README.md            # 本文件
-└── bot.log              # 运行日志 (自动生成)
-```
-
-### 主要类和方法
-
-#### `MatchAnalyzer`
-```python
-# 计算预测结果
-analysis = analyzer.calculate_prediction(
-    home_stats={'attack': 1.2, 'defense': 0.8},
-    away_stats={'attack': 1.1, 'defense': 1.0}
-)
-# 返回：{'win_prob', 'draw_prob', 'loss_prob', 'best_score', 'lambda_*', ...}
-
-# 评估赔率价值
-value = analyzer.analyze_value(model_prob=0.55, odds=2.0)
-```
-
-#### `FootballAPI`
-```python
-# 获取赛程
-fixtures = api.get_fixtures(league_id=39, season=2024)
-
-# 获取球队统计
-stats = api.get_statistics(team_id=33, league_id=39, season=2024)
-
-# 获取H2H历史
-h2h = api.get_h2h(home_team_id=33, away_team_id=8)
-
-# 获取赔率
-odds = api.get_odds(fixture_id=123456)
-```
-
-#### `BotUI`
-```python
-# 格式化预测消息
-msg = ui.format_prediction(
-    match_data={'league': '英超', 'home': 'Arsenal', ...},
-    analysis={...},
-    value_bet=0.08
-)
-
-# 获取策略建议
-strategy = ui.get_strategy(analysis, value_bet)
-```
-
----
-
-## 🐛 常见问题
-
-### Q: 机器人没有发送消息
-**A:** 
-1. 检查 TELEGRAM_TOKEN 是否正确（使用 `/getMe` 测试）
-2. 确认 CHAT_ID 正确（查看 getUpdates 返回）
-3. 检查 bot.log 日志文件查看错误
-
-### Q: 赔率数据为空
-**A:**
-- RapidAPI 的赔率数据仅部分比赛有效
-- 某些赛事没有赔率覆盖
-- 高级账户获取更多赔率源
-
-### Q: API 频率限制
-**A:**
-- 免费层有请求限制
-- 设置合理的缓存时间 (默认 1 小时)
-- 考虑升级 API 计划
-
-### Q: 如何修改推送时间？
-**A:** 编辑 `main.py` 的定时任务配置：
-```python
-scheduler.add_job(
-    send_daily_prediction,
-    'cron',
-    hour=8,      # 改为想要的小时 (0-23)
-    minute=0,    # 改为想要的分钟
-    ...
-)
-```
-
----
-
-## 📈 改进计划
-
-- [ ] 数据库持久化（记录历史预测准确率）
-- [ ] Web 仪表板（可视化分析报告）
-- [ ] 多语言支持
-- [ ] 用户偏好设置（自定义推送时间、联赛）
-- [ ] 高级分析（进攻防守热区、关键球员数据）
-- [ ] 实时赔率监控和警报
-- [ ] Webhook 回调功能完整实现
-
----
-
-## 📜 许可证
-
-MIT License - 详见 LICENSE 文件
-
----
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📧 联系方式
-
-- GitHub Issues: 提交 Bug 报告和功能请求
-- 讨论：在 GitHub Discussions 中交流
-
----
-
-**最后更新**：2024年9月24日  
-**维护者**：modouxin-dev
-
