@@ -43,6 +43,9 @@ SEASON = int(os.getenv("SEASON", "2024"))
 CHAT_ID = os.getenv("CHAT_ID")
 TIMEZONE = pytz.timezone(os.getenv("TIMEZONE", "UTC"))
 
+# 全局调度器
+scheduler = None
+
 
 async def send_daily_prediction(context: ContextTypes.DEFAULT_TYPE):
     """定时任务：推送每日重点预测"""
@@ -218,9 +221,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()  # 移除加载动画
     
     try:
-        # 从消息获取原始数据（需要修改消息以保存 fixture_id）
-        # 简化实现：仅返回提示信息
-        
         if query.data == "deep_analysis":
             await query.edit_message_text(
                 text="🔬 <b>深度分析模块</b>\n"
@@ -258,8 +258,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
 
 
+async def post_init(app):
+    """应用启动时回调 - 启动定时任务"""
+    global scheduler
+    if scheduler is not None:
+        scheduler.start()
+        logger.info("APScheduler started")
+
+
 def main():
     """主函数 - 启动机器人"""
+    global scheduler
+    
     # 验证必需的环境变量
     if not CHAT_ID:
         logger.error("CHAT_ID environment variable is not set")
@@ -302,8 +312,8 @@ def main():
         name="Daily Football Prediction"
     )
     
-    # 启动定时器
-    app.post_init = lambda: scheduler.start()
+    # 注册应用启动回调
+    app.post_init = post_init
     
     logger.info("=" * 50)
     logger.info("🤖 Football Prediction Bot Starting...")
