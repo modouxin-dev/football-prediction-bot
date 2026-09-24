@@ -1,30 +1,20 @@
-# 使用官方 Python 镜像作为基础
-FROM python:3.10-slim
+FROM python:3.12-slim
 
-# 设置工作目录
+# PYTHONUNBUFFERED：日志实时输出到 Railway（否则 print/日志会被缓冲，看起来像“没有输出”）
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 WORKDIR /app
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制依赖文件
 COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-# 安装 Python 依赖
-RUN pip install --no-cache-dir -r requirements.txt
+# 以非 root 用户运行
+RUN useradd --create-home --uid 10001 bot
+COPY --chown=bot:bot . .
+USER bot
 
-# 复制应用代码
-COPY . .
-
-# 创建日志目录
-RUN mkdir -p /app/logs
-
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1 || true
-
-# 运行应用
+# 这是一个长轮询的 worker，不监听端口，也不需要 Railway 的 cron 设置
 CMD ["python", "main.py"]
-
