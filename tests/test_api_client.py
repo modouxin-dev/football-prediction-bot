@@ -141,3 +141,21 @@ def test_account_status_returns_object():
     body = {"errors": [], "response": {"subscription": {"plan": "Free"}, "requests": {"current": 3, "limit_day": 100}}}
     api = make_api(lambda request: httpx.Response(200, json=body))
     assert run(api.get_account_status())["requests"]["limit_day"] == 100
+
+
+def test_account_status_is_cached_to_save_quota():
+    """/status 反复排查时不应每次都消耗一次额度。"""
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(
+            200, json={"errors": [], "response": {"requests": {"current": len(calls), "limit_day": 100}}}
+        )
+
+    api = make_api(handler)
+    first = run(api.get_account_status())
+    second = run(api.get_account_status())
+    assert len(calls) == 1  # 第二次命中缓存，未发请求
+    assert first == second
+    assert first["requests"]["current"] == 1
