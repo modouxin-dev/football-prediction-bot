@@ -302,8 +302,13 @@ def main():
         name="Daily Football Prediction"
     )
     
-    # 启动定时器
-    app.post_init = lambda: scheduler.start()
+    # 定义 post_init 回调
+    async def post_init_callback(app_instance):
+        scheduler.start()
+        logger.info("APScheduler started")
+
+    # 注册回调
+    app.post_init = post_init_callback
     
     logger.info("=" * 50)
     logger.info("🤖 Football Prediction Bot Starting...")
