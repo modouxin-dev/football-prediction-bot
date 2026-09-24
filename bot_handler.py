@@ -1,216 +1,218 @@
-import logging
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+"""消息模板与按钮键盘（只负责排版，不做网络请求）。所有来自数据源的文本都会做 HTML 转义。"""
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+import html
+from datetime import datetime
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from analyzer import OUTCOMES, overround
+
+SEP = "━━━━━━━━━━━━━━━━━━"
+OUTCOME_LABEL = {"home": "主胜", "draw": "平局", "away": "客胜"}
+DISCLAIMER = "⚠️ 模型仅基于进球数据估算，不构成投注建议。"
+VALUE_FLAG = 0.05  # 价值偏差超过此值时打 🚀 标记
+VALUE_HIGH = 0.07
+VALUE_LOW = 0.03
+
+# 视图标签页：(callback 前缀, 按钮文字)
+TABS = (("home", "📈 预测"), ("deep", "🔍 深度分析"), ("h2h", "📊 历史交锋"), ("odds", "💰 赔率对比"))
+
+
+def esc(value) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def bar(prob: float, width: int = 10) -> str:
+    """概率条：▰▰▰▰▱▱▱▱▱▱"""
+    filled = max(0, min(width, round(prob * width)))
+    return "▰" * filled + "▱" * (width - filled)
 
 
 class BotUI:
-    """Telegram 消息格式化和 UI 处理"""
+    # ---- 通用 -----------------------------------------------------------------
+    @staticmethod
+    def tz_label(tz, when: datetime | None = None) -> str:
+        when = (when or datetime.now(tz)).astimezone(tz)
+        hours = when.utcoffset().total_seconds() / 3600
+        return f"UTC{hours:+g}"
 
     @staticmethod
-    def format_prediction(match_data, analysis, value_bet=0, odds=None):
-        """
-        格式化预测消息
-        
-        Args:
-            match_data: {'league': str, 'home': str, 'away': str, 'date': str}
-            analysis: 分析结果
-            value_bet: 价值偏差
-            odds: 赔率信息（可选）
-        """
-        # 策略建议
-        strategy = BotUI.get_strategy(analysis, value_bet)
-        confidence = BotUI.get_confidence(analysis["win_prob"])
-        
-        # 预期进球数
-        xg_home = f"{analysis['lambda_home']:.2f}"
-        xg_away = f"{analysis['lambda_away']:.2f}"
-        
-        msg = (
-            f"🏆 <b>{match_data['league']} | 重点赛事预测</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🏠 <b>{match_data['home']}</b> 🆚 <b>{match_data['away']}</b>\n"
-            f"📅 <code>{match_data['date']}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"📈 <b>量化分析报告</b>\n"
-            f"├ 预期比分：<code>{analysis['best_score']}</code>\n"
-            f"├ 预期进球：主 <code>{xg_home}</code> 客 <code>{xg_away}</code>\n"
-            f"├ 胜平负：<code>{analysis['win_prob']:.1%}</code> | "
-            f"<code>{analysis['draw_prob']:.1%}</code> | "
-            f"<code>{analysis['loss_prob']:.1%}</code>\n"
-        )
-        
-        if odds:
-            msg += f"├ 赔率：<code>{odds:.2f}</code>\n"
-            msg += f"└ 价值度：<code>{value_bet:+.2%}</code> "
-            msg += "🚀 <b>Value!</b>" if value_bet > 0.05 else ""
-            msg += "\n"
-        
-        msg += (
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 <b>建议</b>：{strategy}\n"
-            f"💎 <b>信心</b>：{confidence}\n"
-            f"━━━━━━━━━━━━━━━━━━"
-        )
-        
-        return msg
+    def fmt_time(dt: datetime, tz, pattern: str = "%m-%d %H:%M") -> str:
+        return dt.astimezone(tz).strftime(pattern)
 
     @staticmethod
-    def format_h2h(h2h_data, home_name, away_name):
-        """格式化 H2H 历史对阵"""
-        if not h2h_data:
-            return "❌ 暂无历史对阵数据"
-        
-        home_wins = 0
-        away_wins = 0
-        draws = 0
-        total_goals_home = 0
-        total_goals_away = 0
-        
-        for match in h2h_data[:10]:
-            if match["goals"]["home"] > match["goals"]["away"]:
-                home_wins += 1
-            elif match["goals"]["home"] < match["goals"]["away"]:
-                away_wins += 1
-            else:
-                draws += 1
-            
-            total_goals_home += match["goals"]["home"]
-            total_goals_away += match["goals"]["away"]
-        
-        games = len(h2h_data[:10])
-        avg_goals = (total_goals_home + total_goals_away) / games if games > 0 else 0
-        
-        msg = (
-            f"📊 <b>历史对阵（近10场）</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🏆 {home_name} 胜：<code>{home_wins}场</code>\n"
-            f"🤝 平局：<code>{draws}场</code>\n"
-            f"💔 {away_name} 胜：<code>{away_wins}场</code>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"⚽ 总进球：<code>{total_goals_home + total_goals_away}</code>\n"
-            f"📈 平均进球：<code>{avg_goals:.2f}</code>"
+    def matchup(p, tz) -> str:
+        """详情页顶部的一行比赛信息。"""
+        return (
+            f"🏠 <b>{esc(p.home)}</b> 🆚 <b>{esc(p.away)}</b> ✈️\n"
+            f"🕐 <code>{BotUI.fmt_time(p.kickoff, tz)}</code> ({BotUI.tz_label(tz, p.kickoff)})"
         )
-        
-        return msg
 
+    # ---- 键盘：标签页 + 刷新 -----------------------------------------------------
     @staticmethod
-    def format_odds_trend(fixture_data):
-        """格式化赔率走势"""
-        if not fixture_data:
-            return "❌ 暂无赔率数据"
-        
-        odds = fixture_data.get("odds", {})
-        if not odds:
-            return "❌ 暂无赔率数据"
-        
-        # 提取主流博彩公司赔率
-        msg = f"📉 <b>赔率走势</b>\n━━━━━━━━━━━━━━━━━━\n"
-        
-        bookmakers = [
-            ("1xbet", "1xBet"),
-            ("betfair", "Betfair"),
-            ("pinnacle", "Pinnacle")
+    def get_main_keyboard(fixture_id: int, active: str = "home") -> InlineKeyboardMarkup:
+        buttons = [
+            InlineKeyboardButton(("● " if key == active else "") + label, callback_data=f"{key}:{fixture_id}")
+            for key, label in TABS
         ]
-        
-        for book_key, book_name in bookmakers:
-            if book_key in odds:
-                bookmaker_odds = odds[book_key].get("bets", [])
-                if bookmaker_odds:
-                    bet = bookmaker_odds[0]
-                    values = bet.get("values", [])
-                    if len(values) >= 3:
-                        msg += (
-                            f"<b>{book_name}</b>\n"
-                            f"├ 主胜：<code>{values[0]['odd']}</code>\n"
-                            f"├ 平：<code>{values[1]['odd']}</code>\n"
-                            f"└ 客胜：<code>{values[2]['odd']}</code>\n"
-                        )
-        
-        msg += "━━━━━━━━━━━━━━━━━━"
-        return msg
-
-    @staticmethod
-    def format_deep_analysis(analysis):
-        """格式化深度分析"""
-        msg = (
-            f"🔬 <b>深度分析</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>比分概率矩阵 (前6行6列)</b>\n"
+        return InlineKeyboardMarkup(
+            [buttons[:2], buttons[2:], [InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}")]]
         )
-        
-        # 显示概率矩阵的一部分
-        prob_matrix = analysis.get("prob_matrix", [])
-        for h in range(min(3, len(prob_matrix))):
-            row_str = " | ".join(f"{prob_matrix[h][a]:.3f}" for a in range(min(4, len(prob_matrix[h]))))
-            msg += f"<code>{h}: {row_str}</code>\n"
-        
-        msg += f"━━━━━━━━━━━━━━━━━━\n"
-        msg += (
-            f"📊 统计信息\n"
-            f"├ 主队预期进球(λ)：<code>{analysis['lambda_home']:.3f}</code>\n"
-            f"├ 客队预期进球(λ)：<code>{analysis['lambda_away']:.3f}</code>\n"
-            f"└ 模型：泊松分布\n"
-        )
-        
-        return msg
 
+    # ---- 视图：预测主消息 ---------------------------------------------------------
     @staticmethod
-    def get_strategy(analysis, value):
-        """根据分析结果生成策略建议"""
-        win_prob = analysis.get("win_prob", 0)
-        
-        if value > 0.1:
-            return "🚀 <b>强势主胜推荐</b>"
-        elif value > 0.05:
-            return "👍 <b>主胜价值推荐</b>"
-        elif win_prob > 0.65:
-            return "✅ <b>主队不败(1X)</b>"
-        elif win_prob > 0.5:
-            return "📊 <b>主队微弱优势</b>"
-        elif analysis.get("draw_prob", 0) > 0.4:
-            return "🤝 <b>平局可能性大</b>"
-        else:
-            return "⚠️ <b>观望/小注策略</b>"
+    def format_prediction(p, tz) -> str:
+        a = p.analysis
+        probs = (("主胜", a["win_prob"]), ("平局", a["draw_prob"]), ("客胜", a["loss_prob"]))
+        top = max(prob for _, prob in probs)
 
-    @staticmethod
-    def get_confidence(prob):
-        """根据概率等级确定信心指数"""
-        if prob > 0.75:
-            return "⭐⭐⭐⭐⭐ (极高置信度)"
-        elif prob > 0.65:
-            return "⭐⭐⭐⭐ (高置信度)"
-        elif prob > 0.5:
-            return "⭐⭐⭐ (中等置信度)"
-        elif prob > 0.35:
-            return "⭐⭐ (低置信度)"
-        else:
-            return "⭐ (极低置信度)"
+        title = f"🏆 <b>{esc(p.league)}</b>" + (f" · {esc(p.round_label)}" if p.round_label else "")
+        when = f"🕐 <code>{BotUI.fmt_time(p.kickoff, tz)}</code> ({BotUI.tz_label(tz, p.kickoff)})"
+        if p.venue:
+            when += f" · 🏟 {esc(p.venue)}"
 
-    @staticmethod
-    def get_main_keyboard():
-        """获取主菜单键盘"""
-        keyboard = [
-            [
-                InlineKeyboardButton("🔍 深度分析", callback_data="deep_analysis"),
-                InlineKeyboardButton("📊 H2H对阵", callback_data="h2h")
-            ],
-            [
-                InlineKeyboardButton("📉 赔率走势", callback_data="odds_trend"),
-                InlineKeyboardButton("🔄 刷新数据", callback_data="refresh")
-            ]
+        lines = [
+            title,
+            SEP,
+            f"🏠 <b>{esc(p.home)}</b>",
+            "      🆚",
+            f"✈️ <b>{esc(p.away)}</b>",
+            when,
+            SEP,
+            "📈 <b>胜平负概率</b>",
         ]
-        return InlineKeyboardMarkup(keyboard)
+        for label, prob in probs:
+            pct = f"<b>{prob:.1%}</b>" if prob == top else f"{prob:.1%}"
+            lines.append(f"{label} <code>{bar(prob)}</code> {pct}")
+        lines += [
+            SEP,
+            f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code> · 预期比分 <code>{a['best_score']}</code>",
+        ]
+        if p.best:
+            key, o = p.best
+            flag = " 🚀 <b>Value Bet</b>" if o["edge"] > VALUE_FLAG else ""
+            lines.append(
+                f"💰 赔率 <code>{p.odds['home']:.2f} | {p.odds['draw']:.2f} | {p.odds['away']:.2f}</code>（{p.odds['n']} 家中位数）"
+            )
+            lines.append(f"🔎 价值偏差 <b>{OUTCOME_LABEL[key]}</b> <code>{o['edge']:+.2%}</code>{flag}")
+        else:
+            lines.append("💰 赔率：暂无（本场仅提供模型概率）")
+        lines += [
+            SEP,
+            f"🎯 <b>建议</b>：{esc(BotUI.get_strategy(p))}",
+            f"💎 <b>信心</b>：{BotUI.get_confidence(p)}",
+            SEP,
+            DISCLAIMER,
+        ]
+        return "\n".join(lines)
 
     @staticmethod
-    def get_error_message(error_type, error_detail=""):
-        """生成错误消息"""
-        errors = {
-            "api": f"❌ API 错误：{error_detail}",
-            "stats": "❌ 数据获取失败，请重试",
-            "odds": "❌ 赔率数据暂不可用",
-            "general": f"❌ 出错：{error_detail}"
-        }
-        return errors.get(error_type, "❌ 未知错误")
+    def get_strategy(p) -> str:
+        if not p.best:
+            return "仅供参考（暂无赔率）"
+        key, o = p.best
+        if o["edge"] >= VALUE_HIGH:
+            return f"{OUTCOME_LABEL[key]}（价值较高）"
+        if o["edge"] >= VALUE_LOW:
+            return f"{OUTCOME_LABEL[key]}（小幅价值）"
+        return "无明显价值，观望"
 
+    @staticmethod
+    def get_confidence(p) -> str:
+        a = p.analysis
+        top = max(a["win_prob"], a["draw_prob"], a["loss_prob"])
+        stars = "⭐⭐⭐⭐⭐" if top > 0.7 else "⭐⭐⭐" if top > 0.5 else "⭐⭐"
+        return stars + "（样本较少）" if p.low_sample else stars
+
+    # ---- 视图：深度分析 ---------------------------------------------------------
+    @staticmethod
+    def format_deep_analysis(p, tz) -> str:
+        a, hs, aws = p.analysis, p.home_strength, p.away_strength
+        lines = [
+            "🔍 <b>深度分析</b>",
+            BotUI.matchup(p, tz),
+            SEP,
+            f"⚙️ 预期进球 λ：<code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>",
+            "🎯 <b>最可能比分 Top 5</b>",
+        ]
+        for score, prob in a["top_scores"]:
+            lines.append(f"<code>{score:<5}</code> <code>{bar(prob / a['top_scores'][0][1], 8)}</code> {prob:.1%}")
+        lines += [
+            SEP,
+            f"📊 大 2.5 球 <code>{a['over_2_5']:.1%}</code> · 小 2.5 球 <code>{1 - a['over_2_5']:.1%}</code>",
+            f"🤝 双方都进球 <code>{a['btts']:.1%}</code>",
+            SEP,
+            "🧮 <b>球队强度</b>（1.00 = 联赛平均）",
+            f"🏠 {esc(p.home)} 主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
+            f"✈️ {esc(p.away)} 客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
+            "攻击 &gt;1：进球高于平均；防守 &lt;1：失球低于平均（防守更好）。",
+            SEP,
+            DISCLAIMER,
+        ]
+        return "\n".join(lines)
+
+    # ---- 视图：赔率对比 ---------------------------------------------------------
+    @staticmethod
+    def format_odds_detail(p, tz) -> str:
+        title = "💰 <b>赔率对比</b>"
+        if not p.odds:
+            return f"{title}\n{BotUI.matchup(p, tz)}\n{SEP}\n暂无赔率数据（该场比赛可能尚未开盘）。"
+        a = p.analysis
+        probs = {"home": a["win_prob"], "draw": a["draw_prob"], "away": a["loss_prob"]}
+        table = [f"{'博彩公司':<12}{'主':>6}{'平':>6}{'客':>6}"]
+        for row in sorted(p.bookmakers, key=lambda r: str(r["bookmaker"]))[:6]:
+            table.append(f"{str(row['bookmaker'])[:12]:<12}{row['home']:>6.2f}{row['draw']:>6.2f}{row['away']:>6.2f}")
+        o = p.odds
+        table.append(f"{'中位数':<10}{o['home']:>6.2f}{o['draw']:>6.2f}{o['away']:>6.2f}")
+        lines = [
+            title,
+            BotUI.matchup(p, tz),
+            SEP,
+            f"<pre>{esc(chr(10).join(table))}</pre>",
+            "📐 <b>模型 vs 市场</b>（含抽水的隐含概率）",
+        ]
+        for key in OUTCOMES:
+            entry = p.outcomes.get(key)
+            if entry:
+                lines.append(
+                    f"{OUTCOME_LABEL[key]}：模型 <code>{probs[key]:.1%}</code> | 市场 <code>{1 / o[key]:.1%}</code>"
+                    f" | 偏差 <code>{entry['edge']:+.1%}</code>"
+                )
+        lines += [f"庄家抽水约 <code>{overround(o):.1%}</code>（共 {o['n']} 家公司）", SEP, DISCLAIMER]
+        return "\n".join(lines)
+
+    # ---- 视图：历史交锋 ---------------------------------------------------------
+    @staticmethod
+    def format_h2h(p, matches: list[dict], tz) -> str:
+        title = "📊 <b>历史交锋</b>"
+        finished = [m for m in matches if (m.get("goals") or {}).get("home") is not None]
+        if not finished:
+            return f"{title}\n{BotUI.matchup(p, tz)}\n{SEP}\n暂无历史交锋记录。"
+        finished.sort(key=lambda m: (m.get("fixture") or {}).get("date") or "", reverse=True)
+
+        win = draw = loss = gf = ga = 0
+        rows = []
+        for m in finished:
+            teams, goals = m.get("teams") or {}, m.get("goals") or {}
+            home_side = (teams.get("home") or {}).get("id") == p.home_id
+            ours = goals["home"] if home_side else goals["away"]
+            theirs = goals["away"] if home_side else goals["home"]
+            gf, ga = gf + ours, ga + theirs
+            win, draw, loss = win + (ours > theirs), draw + (ours == theirs), loss + (ours < theirs)
+            date = ""
+            raw = (m.get("fixture") or {}).get("date")
+            if raw:
+                try:
+                    date = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(tz).strftime("%Y-%m-%d")
+                except ValueError:
+                    date = str(raw)[:10]
+            mark = "🟢" if ours > theirs else "🟡" if ours == theirs else "🔴"
+            rows.append(
+                f"{mark} <code>{date}</code> {esc((teams.get('home') or {}).get('name', '?'))} "
+                f"<b>{goals['home']}-{goals['away']}</b> {esc((teams.get('away') or {}).get('name', '?'))}"
+            )
+        summary = f"近 {len(finished)} 次交锋（{esc(p.home)} 视角）：<b>{win} 胜 {draw} 平 {loss} 负</b>，进 {gf} / 失 {ga}"
+        return "\n".join(
+            [title, BotUI.matchup(p, tz), SEP, summary, *rows, SEP, "🟢 胜 · 🟡 平 · 🔴 负；球队阵容与状态可能已大不相同，仅供参考。"]
+        )

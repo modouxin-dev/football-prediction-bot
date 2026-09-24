@@ -1,131 +1,215 @@
-import math
-import logging
+"""泊松模型与赔率工具（纯计算，不做网络请求，便于测试）。
 
-logger = logging.getLogger(__name__)
+模型（Maher 泊松模型）：
+    λ_主 = 主队主场进攻强度 × 客队客场防守强度 × 联赛主队场均进球
+    λ_客 = 客队客场进攻强度 × 主队主场防守强度 × 联赛客队场均进球
+强度 = 球队场均进球（失球）÷ 联赛平均，并向 1.0 收缩，避免赛季初样本太少时出现极端值。
+"""
+from __future__ import annotations
+
+import math
+import statistics
+from dataclasses import dataclass, field
+from typing import Any, Iterable
+
+MAX_GOALS = 10  # 比分矩阵覆盖 0~10 球，再整体归一化
+DEFAULT_AVG_HOME_GOALS = 1.5
+DEFAULT_AVG_AWAY_GOALS = 1.2
+PRIOR_GAMES = 5  # 收缩强度：相当于给每支球队补 5 场"联赛平均水平"的先验比赛
+OUTCOMES = ("home", "draw", "away")
+
+
+def poisson_pmf(lmbda: float, k: int) -> float:
+    return math.exp(-lmbda) * (lmbda**k) / math.factorial(k)
+
+
+def _num(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@dataclass(frozen=True)
+class TeamStrength:
+    attack_home: float = 1.0
+    defense_home: float = 1.0
+    attack_away: float = 1.0
+    defense_away: float = 1.0
+    games_home: int = 0
+    games_away: int = 0
+
+
+@dataclass(frozen=True)
+class LeagueModel:
+    avg_home_goals: float = DEFAULT_AVG_HOME_GOALS
+    avg_away_goals: float = DEFAULT_AVG_AWAY_GOALS
+    teams: dict[int, TeamStrength] = field(default_factory=dict)
+
+    def strength(self, team_id: int) -> TeamStrength:
+        return self.teams.get(team_id, TeamStrength())
+
+
+def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES) -> LeagueModel:
+    """由积分榜行（API-Football /standings）计算联赛均值与每队主客场攻防强度。"""
+    rows = list(rows)
+    home_games = home_for = away_games = away_for = 0.0
+    for row in rows:
+        home, away = row.get("home") or {}, row.get("away") or {}
+        home_games += _num(home.get("played"))
+        home_for += _num((home.get("goals") or {}).get("for"))
+        away_games += _num(away.get("played"))
+        away_for += _num((away.get("goals") or {}).get("for"))
+
+    avg_home = home_for / home_games if home_games else DEFAULT_AVG_HOME_GOALS
+    avg_away = away_for / away_games if away_games else DEFAULT_AVG_AWAY_GOALS
+    avg_home, avg_away = max(avg_home, 0.1), max(avg_away, 0.1)
+
+    def shrink(goals: float, games: float, league_avg: float) -> float:
+        """向联赛平均收缩后的场均进球（失球）÷ 联赛平均。"""
+        return (goals + prior_games * league_avg) / (games + prior_games) / league_avg
+
+    teams: dict[int, TeamStrength] = {}
+    for row in rows:
+        team_id = (row.get("team") or {}).get("id")
+        if team_id is None:
+            continue
+        home, away = row.get("home") or {}, row.get("away") or {}
+        hg, ag = _num(home.get("played")), _num(away.get("played"))
+        h_goals, a_goals = home.get("goals") or {}, away.get("goals") or {}
+        teams[team_id] = TeamStrength(
+            attack_home=shrink(_num(h_goals.get("for")), hg, avg_home),
+            defense_home=shrink(_num(h_goals.get("against")), hg, avg_away),
+            attack_away=shrink(_num(a_goals.get("for")), ag, avg_away),
+            defense_away=shrink(_num(a_goals.get("against")), ag, avg_home),
+            games_home=int(hg),
+            games_away=int(ag),
+        )
+    return LeagueModel(avg_home, avg_away, teams)
 
 
 class MatchAnalyzer:
-    """量化足球分析引擎 - 基于泊松分布"""
-    
-    # 联赛平均进球数（可根据实际联赛调整）
-    LEAGUE_AVERAGES = {
-        "premier_league": 2.8,
-        "la_liga": 2.7,
-        "serie_a": 2.5,
-        "bundesliga": 3.0,
-        "ligue_1": 2.6,
-        "default": 2.65
-    }
-
     @staticmethod
-    def poisson_prob(lmbda, x):
-        """泊松分布计算公式"""
-        if lmbda < 0 or x < 0:
-            return 0
-        try:
-            return (math.exp(-lmbda) * (lmbda**x)) / math.factorial(x)
-        except (ValueError, OverflowError):
-            logger.warning(f"Poisson calculation error: lambda={lmbda}, x={x}")
-            return 0
+    def poisson_prob(lmbda: float, x: int) -> float:
+        """泊松分布概率质量函数。"""
+        return poisson_pmf(lmbda, x)
 
-    @staticmethod
-    def extract_stats(team_stats_dict):
+    def predict_match(self, model: LeagueModel, home_id: int, away_id: int) -> dict:
+        h, a = model.strength(home_id), model.strength(away_id)
+        return self.calculate_prediction(
+            {"attack": h.attack_home, "defense": h.defense_home},
+            {"attack": a.attack_away, "defense": a.defense_away},
+            league_avg_home=model.avg_home_goals,
+            league_avg_away=model.avg_away_goals,
+        )
+
+    def calculate_prediction(
+        self,
+        home_stats: dict,
+        away_stats: dict,
+        league_avg_home: float = DEFAULT_AVG_HOME_GOALS,
+        league_avg_away: float = DEFAULT_AVG_AWAY_GOALS,
+        max_goals: int = MAX_GOALS,
+    ) -> dict:
         """
-        从 API 响应的球队统计数据中提取关键指标
-        返回: {'attack': float, 'defense': float}
+        home_stats: 主队主场 {'attack': 进攻强度, 'defense': 防守强度}
+        away_stats: 客队客场 {'attack': ..., 'defense': ...}
+        （强度 1.0 = 联赛平均；防守强度 <1 表示失球比平均少，防守更好）
         """
-        if not team_stats_dict:
-            return {"attack": 1.0, "defense": 1.0}
-        
-        try:
-            # 从 API 统计数据中提取
-            goals_for = team_stats_dict.get("goals", {}).get("for", {}).get("total", 1)
-            goals_against = team_stats_dict.get("goals", {}).get("against", {}).get("total", 1)
-            games = team_stats_dict.get("fixtures", {}).get("played", {}).get("total", 1)
-            
-            # 计算平均进攻和防守强度
-            attack_strength = goals_for / max(games, 1)
-            defense_strength = goals_against / max(games, 1)
-            
-            # 归一化（相对于平均值 2.65）
-            league_avg = 2.65
-            attack = attack_strength / league_avg if attack_strength > 0 else 1.0
-            defense = defense_strength / league_avg if defense_strength > 0 else 1.0
-            
-            return {
-                "attack": max(attack, 0.5),  # 防止异常值
-                "defense": max(defense, 0.5)
-            }
-        except (KeyError, TypeError) as e:
-            logger.warning(f"Stats extraction error: {e}")
-            return {"attack": 1.0, "defense": 1.0}
+        lambda_home = home_stats["attack"] * away_stats["defense"] * league_avg_home
+        lambda_away = away_stats["attack"] * home_stats["defense"] * league_avg_away
+        lambda_home = min(max(lambda_home, 0.05), 6.0)
+        lambda_away = min(max(lambda_away, 0.05), 6.0)
 
-    def calculate_prediction(self, home_stats, away_stats, league_avg_goals=None):
-        """
-        核心量化分析
-        Args:
-            home_stats: {'attack': float, 'defense': float}
-            away_stats: {'attack': float, 'defense': float}
-            league_avg_goals: 联赛平均进球数（可选）
-        
-        Returns:
-            分析结果字典
-        """
-        if league_avg_goals is None:
-            league_avg_goals = 2.65
-            
-        # 计算预期进球数 lambda
-        lambda_home = home_stats["attack"] * away_stats["defense"] * league_avg_goals
-        lambda_away = away_stats["attack"] * home_stats["defense"] * league_avg_goals
+        n = max_goals + 1
+        p_home = [poisson_pmf(lambda_home, k) for k in range(n)]
+        p_away = [poisson_pmf(lambda_away, k) for k in range(n)]
+        matrix = [[ph * pa for pa in p_away] for ph in p_home]
+        total = sum(sum(row) for row in matrix)
+        matrix = [[p / total for p in row] for row in matrix]  # 截断尾部后归一化，三项概率之和恒为 1
 
-        # 计算 0-6 球的比分矩阵
-        prob_matrix = []
-        for h in range(7):
-            row = []
-            for a in range(7):
-                row.append(self.poisson_prob(lambda_home, h) * self.poisson_prob(lambda_away, a))
-            prob_matrix.append(row)
-
-        # 汇总胜平负概率
-        win_prob = sum(prob_matrix[h][a] for h in range(7) for a in range(h))
-        draw_prob = sum(prob_matrix[i][i] for i in range(7))
-        loss_prob = sum(prob_matrix[h][a] for h in range(7) for a in range(h + 1, 7))
-
-        # 寻找最可能比分
-        max_val = -1
-        best_score = "0-0"
-        for h in range(7):
-            for a in range(7):
-                if prob_matrix[h][a] > max_val:
-                    max_val = prob_matrix[h][a]
-                    best_score = f"{h}-{a}"
+        win = sum(matrix[h][a] for h in range(n) for a in range(h))
+        draw = sum(matrix[i][i] for i in range(n))
+        loss = sum(matrix[h][a] for h in range(n) for a in range(h + 1, n))
+        scores = sorted(
+            ((f"{h}-{a}", matrix[h][a]) for h in range(n) for a in range(n)),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        over_2_5 = sum(matrix[h][a] for h in range(n) for a in range(n) if h + a >= 3)
+        btts = sum(matrix[h][a] for h in range(1, n) for a in range(1, n))
 
         return {
-            "win_prob": win_prob,
-            "draw_prob": draw_prob,
-            "loss_prob": loss_prob,
-            "best_score": best_score,
+            "win_prob": win,
+            "draw_prob": draw,
+            "loss_prob": loss,
+            "best_score": scores[0][0],
+            "top_scores": scores[:5],
+            "over_2_5": over_2_5,
+            "btts": btts,
             "lambda_home": lambda_home,
             "lambda_away": lambda_away,
-            "prob_matrix": prob_matrix,
         }
 
     @staticmethod
-    def analyze_value(model_prob, odds):
-        """计算价值偏差 (Value Bet)"""
-        if odds <= 0:
-            return 0
-        implied_prob = 1 / odds
-        value = model_prob - implied_prob
-        return value
+    def analyze_value(model_prob: float, odds: float) -> float:
+        """价值偏差 = 模型概率 − 赔率隐含概率(1/赔率)。为正当且仅当期望收益为正。"""
+        if not odds or odds <= 1.0:
+            return 0.0
+        return model_prob - 1 / odds
 
-    def get_top_scorelines(self, prob_matrix, top_n=5):
-        """获取最可能的前 N 个比分"""
-        scorelines = []
-        for h in range(len(prob_matrix)):
-            for a in range(len(prob_matrix[h])):
-                scorelines.append((f"{h}-{a}", prob_matrix[h][a]))
-        
-        scorelines.sort(key=lambda x: x[1], reverse=True)
-        return scorelines[:top_n]
+    def evaluate_outcomes(self, analysis: dict, odds: dict | None) -> dict:
+        """对主/平/客三个结果分别计算价值偏差与期望收益。"""
+        if not odds:
+            return {}
+        probs = {"home": analysis["win_prob"], "draw": analysis["draw_prob"], "away": analysis["loss_prob"]}
+        result = {}
+        for key in OUTCOMES:
+            price = odds.get(key)
+            if not price or price <= 1.0:
+                continue
+            result[key] = {
+                "prob": probs[key],
+                "odds": price,
+                "edge": self.analyze_value(probs[key], price),
+                "ev": probs[key] * price - 1,
+            }
+        return result
 
+
+# ---- 赔率工具 -------------------------------------------------------------
+_LABELS = {"home": "home", "draw": "draw", "away": "away", "1": "home", "x": "draw", "2": "away"}
+
+
+def collect_1x2_odds(odds_response: Iterable[dict] | None) -> list[dict]:
+    """从 /odds 响应提取各博彩公司的胜平负(Match Winner)赔率。"""
+    rows: list[dict] = []
+    for item in odds_response or []:
+        for bookmaker in item.get("bookmakers") or []:
+            for bet in bookmaker.get("bets") or []:
+                if bet.get("id") != 1 and str(bet.get("name", "")).strip().lower() != "match winner":
+                    continue
+                prices: dict[str, float] = {}
+                for value in bet.get("values") or []:
+                    key = _LABELS.get(str(value.get("value", "")).strip().lower())
+                    odd = _num(value.get("odd"))
+                    if key and odd > 1.0:
+                        prices[key] = odd
+                if len(prices) == 3:
+                    rows.append({"bookmaker": bookmaker.get("name") or "?", **prices})
+                break
+    return rows
+
+
+def consensus_odds(rows: list[dict]) -> dict | None:
+    """各博彩公司赔率的中位数（比平均值更抗异常报价）。"""
+    if not rows:
+        return None
+    result: dict[str, Any] = {k: statistics.median(r[k] for r in rows) for k in OUTCOMES}
+    result["n"] = len(rows)
+    return result
+
+
+def overround(odds: dict) -> float:
+    """庄家抽水：隐含概率之和 − 1。"""
+    return sum(1 / odds[k] for k in OUTCOMES) - 1

@@ -1,326 +1,344 @@
-import os
-import asyncio
+"""足球量化分析 Telegram 机器人入口。
+
+- 每天在 PUSH_TIME（时区 TIMEZONE）向 CHAT_ID 推送即将开赛的比赛预测
+- /test：手动触发一次推送（仅管理员）；/status：运行状态与数据源诊断（仅管理员）
+- 推送消息下方的按钮（预测 / 深度分析 / 历史交锋 / 赔率对比 / 刷新）在原消息上就地切换
+"""
+from __future__ import annotations
+
 import logging
-import pytz
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
-from telegram.error import TelegramError
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from api_client import FootballAPI, APIError
-from analyzer import MatchAnalyzer
-from bot_handler import BotUI
+import os
+import sys
+from dataclasses import dataclass
+
 from dotenv import load_dotenv
-from datetime import datetime
-
-load_dotenv()
-
-# 日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log'),
-        logging.StreamHandler()
-    ]
+from telegram import BotCommand, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest, TelegramError
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    Defaults,
 )
-logger = logging.getLogger(__name__)
 
-# 初始化组件
-api = FootballAPI(cache_ttl_seconds=3600)
-analyzer = MatchAnalyzer()
+from analyzer import MatchAnalyzer
+from api_client import APIError, FootballAPI
+from bot_handler import BotUI, esc
+from config import ConfigError, Settings, load_settings
+from service import Prediction, PredictionService
+
+log = logging.getLogger("bot")
 ui = BotUI()
 
-# 配置
-LEAGUE_ID = os.getenv("LEAGUE_ID", "39")  # 默认英超
-SEASON = int(os.getenv("SEASON", "2024"))
-CHAT_ID = os.getenv("CHAT_ID")
-TIMEZONE = pytz.timezone(os.getenv("TIMEZONE", "UTC"))
+DAILY_JOB = "daily_push"
+WIDE_HOURS = 24 * 14  # /test 在近期无比赛（如国际比赛日）时放宽到 14 天，方便看到示例消息
 
 
-async def send_daily_prediction(context: ContextTypes.DEFAULT_TYPE):
-    """定时任务：推送每日重点预测"""
-    try:
-        logger.info("Starting daily prediction task...")
-        
-        # 获取未来10场比赛
-        fixtures = api.get_fixtures(LEAGUE_ID, SEASON, next_matches=10)
-        
-        if not fixtures:
-            logger.warning("No fixtures found")
-            await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text="⚠️ 暂无未来赛程数据"
-            )
-            return
-        
-        # 分析前 3 场比赛
-        for idx, fixture in enumerate(fixtures[:3]):
-            try:
-                await process_fixture(context, fixture)
-                # 避免 API 频率限制
-                await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"Error processing fixture {idx}: {e}")
-                continue
-        
-        logger.info("Daily prediction task completed")
-        
-    except Exception as e:
-        logger.error(f"Daily prediction task failed: {e}")
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"❌ 预测任务失败：{str(e)[:100]}"
+# ---- 日志 -------------------------------------------------------------------
+class RedactingFormatter(logging.Formatter):
+    """把密钥从日志（含异常堆栈）里抹掉，避免泄露到 Railway 日志。"""
+
+    def __init__(self, fmt: str, secrets: list[str | None]) -> None:
+        super().__init__(fmt)
+        self._secrets = [s for s in secrets if s]
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        for secret in self._secrets:
+            text = text.replace(secret, "***")
+        return text
+
+
+def setup_logging(settings: Settings) -> None:
+    handler = logging.StreamHandler(sys.stdout)  # 输出到 stdout，Railway 才会按 info 级别显示
+    handler.setFormatter(
+        RedactingFormatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            [settings.telegram_token, settings.api_key],
         )
+    )
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(settings.log_level)
+    # httpx 在 INFO 级别会打印完整请求 URL，而 Telegram 的 URL 里包含 bot token
+    for noisy in ("httpx", "httpcore", "apscheduler"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-async def process_fixture(context: ContextTypes.DEFAULT_TYPE, fixture: dict):
-    """处理单场比赛的预测"""
-    try:
-        # 提取比赛信息
-        fixture_id = fixture["fixture"]["id"]
-        home_team = fixture["teams"]["home"]
-        away_team = fixture["teams"]["away"]
-        fixture_date = fixture["fixture"]["date"]
-        
-        logger.info(f"Processing: {home_team['name']} vs {away_team['name']}")
-        
-        # 获取球队统计
-        h_stats = api.get_statistics(home_team["id"], LEAGUE_ID, SEASON)
-        a_stats = api.get_statistics(away_team["id"], LEAGUE_ID, SEASON)
-        
-        # 提取强度指标
-        h_strength = analyzer.extract_stats(h_stats)
-        a_strength = analyzer.extract_stats(a_stats)
-        
-        logger.debug(f"Home: {h_strength}, Away: {a_strength}")
-        
-        # 执行分析
-        analysis = analyzer.calculate_prediction(h_strength, a_strength)
-        
-        # 获取赔率（可选）
-        odds_data = api.get_odds(fixture_id)
-        odds_value = None
-        value_bet = 0
-        
-        if odds_data and "bookmakers" in odds_data and len(odds_data["bookmakers"]) > 0:
-            try:
-                first_bet = odds_data["bookmakers"][0].get("bets", [])[0]
-                values = first_bet.get("values", [])
-                if values:
-                    odds_value = float(values[0]["odd"])
-                    value_bet = analyzer.analyze_value(analysis["win_prob"], odds_value)
-            except (IndexError, KeyError, ValueError):
-                pass
-        
-        # 格式化消息
-        match_info = {
-            "league": "英超",
-            "home": home_team["name"],
-            "away": away_team["name"],
-            "date": fixture_date
-        }
-        
-        message = ui.format_prediction(match_info, analysis, value_bet, odds_value)
-        
-        # 发送消息
-        await context.bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            parse_mode="HTML",
-            reply_markup=ui.get_main_keyboard()
+# ---- 工具 -------------------------------------------------------------------
+def is_admin(update: Update, settings: Settings) -> bool:
+    user = update.effective_user
+    return user is not None and user.id in settings.admin_ids
+
+
+def describe_error(exc: Exception) -> str:
+    if isinstance(exc, APIError):
+        return f"数据源错误：{exc}"
+    if isinstance(exc, TelegramError):
+        return f"Telegram 错误：{exc}"
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
+async def deny(update: Update) -> None:
+    uid = update.effective_user.id if update.effective_user else "未知"
+    await update.effective_message.reply_text(
+        f"🚫 仅管理员可用。你的 Telegram 用户 ID 是 {uid}，如需授权请把它加入 ADMIN_ID 环境变量。"
+    )
+
+
+async def notify_admins(app: Application, text: str) -> None:
+    for admin_id in app.bot_data["settings"].admin_ids:
+        try:
+            await app.bot.send_message(chat_id=admin_id, text=text)
+        except TelegramError as exc:
+            log.warning("通知管理员 %s 失败：%s", admin_id, exc)
+
+
+# ---- 推送 -------------------------------------------------------------------
+@dataclass
+class PushResult:
+    sent: int
+    note: str | None = None
+
+
+async def run_push(app: Application, *, widen: bool = False) -> PushResult:
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    if settings.chat_target is None:
+        raise RuntimeError("未设置 CHAT_ID，无法推送")
+
+    predictions = await service.build_predictions()
+    note = None
+    if not predictions and widen:
+        predictions = await service.build_predictions(lookahead_hours=WIDE_HOURS)
+        if predictions:
+            note = f"未来 {settings.lookahead_hours} 小时内没有未开赛的比赛，已放宽到 {WIDE_HOURS // 24} 天内用于测试。"
+
+    for p in predictions:
+        await app.bot.send_message(
+            chat_id=settings.chat_target,
+            text=ui.format_prediction(p, settings.timezone),
+            parse_mode=ParseMode.HTML,
+            reply_markup=ui.get_main_keyboard(p.fixture_id, "home"),
         )
-        
-        logger.info(f"✅ Prediction sent for {home_team['name']} vs {away_team['name']}")
-        
-    except APIError as e:
-        logger.error(f"API error: {e}")
-    except TelegramError as e:
-        logger.error(f"Telegram error: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error in process_fixture: {e}")
+    return PushResult(len(predictions), note)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /start 命令"""
-    await update.message.reply_text(
-        "⚽ <b>足球量化预测机器人</b>\n\n"
+async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
+    app = context.application
+    try:
+        result = await run_push(app)
+        log.info("每日推送完成，共 %d 场", result.sent)
+    except Exception as exc:  # 定时任务里的任何失败都要让管理员知道
+        log.exception("每日推送失败")
+        await notify_admins(app, f"❌ 每日推送失败：{describe_error(exc)}")
+
+
+# ---- 命令 -------------------------------------------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    s: Settings = context.application.bot_data["settings"]
+    await update.effective_message.reply_text(
+        "⚽ 足球量化预测机器人\n\n"
         "功能：\n"
         "├ 每日自动推送赛事预测\n"
         "├ 泊松分布量化分析\n"
         "├ 赔率价值评估\n"
-        "└ 历史对阵数据\n\n"
-        "使用 /test 进行测试推送\n"
-        "使用 /help 获取帮助",
-        parse_mode="HTML"
+        "└ 历史交锋数据\n\n"
+        f"推送时间：每天 {s.push_time:%H:%M}（{ui.tz_label(s.timezone)}）\n"
+        "发送 /help 查看命令"
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /help 命令"""
-    help_text = (
-        "📖 <b>命令列表</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "/start - 显示欢迎信息\n"
-        "/test - 手动测试推送\n"
-        "/help - 显示此帮助\n"
-        "/status - 查看机器人状态\n\n"
-        "<b>预测解读</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "• 预期比分：基于泊松分布计算\n"
-        "• 胜平负概率：历史数据驱动\n"
-        "• 价值度：模型概率 vs 赔率\n"
-        "• Value Bet：价值偏差 > 5%"
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        "📖 命令列表\n"
+        "/start  欢迎信息与推送时间\n"
+        "/help  显示本帮助\n"
+        "/test  立即生成并推送一次预测（管理员）\n"
+        "/status  运行状态与数据源诊断（管理员）\n\n"
+        "预测消息下方的按钮：预测 / 深度分析 / 历史交锋 / 赔率对比，点击后在原消息上切换；"
+        "「刷新赔率」会重新拉取最新赔率。"
     )
-    await update.message.reply_text(help_text, parse_mode="HTML")
 
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看机器人状态"""
-    status_msg = (
-        f"🤖 <b>机器人状态</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"✅ 在线\n"
-        f"⚙️ 联赛ID：{LEAGUE_ID}\n"
-        f"📅 赛季：{SEASON}\n"
-        f"🕐 时区：{TIMEZONE}\n"
-        f"📊 缓存状态：活跃\n"
-        f"⏰ 当前时间：{datetime.now(TIMEZONE).strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-    await update.message.reply_text(status_msg, parse_mode="HTML")
-
-
-async def test_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """手动触发一次推送"""
+async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """手动触发一次推送，走与定时任务完全相同的路径，用来验证 Telegram 与数据源都正常。"""
+    app = context.application
+    if not is_admin(update, app.bot_data["settings"]):
+        return await deny(update)
+    progress = await update.effective_message.reply_text("⏳ 正在获取数据并生成预测…")
     try:
-        await update.message.reply_text("⏳ 正在获取数据并生成预测...")
-        await send_daily_prediction(context)
-        await update.message.reply_text("✅ 测试推送完成")
-    except Exception as e:
-        logger.error(f"Test send failed: {e}")
-        await update.message.reply_text(
-            ui.get_error_message("general", str(e)[:100]),
-            parse_mode="HTML"
-        )
+        result = await run_push(app, widen=True)
+    except Exception as exc:
+        log.exception("/test 失败")
+        await progress.edit_text(f"❌ 发送失败：{describe_error(exc)}")
+        return
+    if result.sent == 0:
+        await progress.edit_text("ℹ️ 没有可推送的比赛（近期赛程为空或已全部开赛），未发送任何消息。")
+    else:
+        extra = f"\n{result.note}" if result.note else ""
+        await progress.edit_text(f"✅ 已向 CHAT_ID 发送 {result.sent} 条预测。{extra}")
 
 
-# ========== 回调处理函数 ==========
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    app = context.application
+    s: Settings = app.bot_data["settings"]
+    if not is_admin(update, s):
+        return await deny(update)
+    api: FootballAPI = app.bot_data["api"]
+    service: PredictionService = app.bot_data["service"]
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理内联按钮回调"""
+    jobs = app.job_queue.get_jobs_by_name(DAILY_JOB) if app.job_queue else []
+    next_run = jobs[0].next_t.astimezone(s.timezone).strftime("%m-%d %H:%M") if jobs and jobs[0].next_t else "未启用"
+    version = (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]
+    season_line = f"联赛/赛季：{s.league_id} / {s.season}"
+    if s.season != s.expected_season:
+        season_line += f"（⚠️ 按日期应为 {s.expected_season}，请更新 SEASON 变量；无赛程时会自动改用 {s.expected_season}）"
+
+    lines = [
+        "🤖 运行状态",
+        f"版本：{version}",
+        season_line,
+        f"推送：每天 {s.push_time:%H:%M}（{s.timezone.zone}），每次最多 {s.max_matches} 场，窗口 {s.lookahead_hours} 小时",
+        f"下次推送：{next_run}",
+        f"CHAT_ID：{'已配置' if s.chat_id else '未配置'}",
+        f"内存中的预测：{service.cached_predictions} 场",
+        f"数据源渠道：{'官方直连 (API-Sports)' if api.provider == 'apisports' else 'RapidAPI'}",
+    ]
+    try:
+        account = await api.get_account_status()
+        sub, req = account.get("subscription") or {}, account.get("requests") or {}
+        lines.append(f"套餐：{sub.get('plan', '未知')}（{'有效' if sub.get('active') else '未激活或未知'}）")
+        lines.append(f"今日请求：{req.get('current', '?')} / {req.get('limit_day', '?')}")
+        lines.append("数据源连通：✅")
+    except APIError as exc:
+        lines.append(f"数据源连通：❌ {exc}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+# ---- 按钮 -------------------------------------------------------------------
+def render_view(action: str, p: Prediction, settings: Settings, h2h: list[dict] | None = None) -> str:
+    tz = settings.timezone
+    if action == "deep":
+        return ui.format_deep_analysis(p, tz)
+    if action == "odds":
+        return ui.format_odds_detail(p, tz)
+    if action == "h2h":
+        return ui.format_h2h(p, h2h or [], tz)
+    return ui.format_prediction(p, tz)
+
+
+async def edit_view(query, text: str, keyboard: InlineKeyboardMarkup) -> None:
+    try:
+        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():  # 点击的正是当前页面时 Telegram 会报这个，忽略即可
+            raise
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()  # 移除加载动画
-    
+    action, _, raw_id = (query.data or "").partition(":")
+    settings: Settings = context.application.bot_data["settings"]
+    service: PredictionService = context.application.bot_data["service"]
+
     try:
-        # 从消息获取原始数据（需要修改消息以保存 fixture_id）
-        # 简化实现：仅返回提示信息
-        
-        if query.data == "deep_analysis":
-            await query.edit_message_text(
-                text="🔬 <b>深度分析模块</b>\n"
-                     "此功能需要消息中包含比赛ID。\n"
-                     "在下次推送时将包含该功能。",
-                parse_mode="HTML"
-            )
-        elif query.data == "h2h":
-            await query.edit_message_text(
-                text="📊 <b>H2H 历史对阵</b>\n"
-                     "此功能需要消息中包含比赛ID。\n"
-                     "在下次推送时将包含该功能。",
-                parse_mode="HTML"
-            )
-        elif query.data == "odds_trend":
-            await query.edit_message_text(
-                text="📉 <b>赔率走势</b>\n"
-                     "此功能需要消息中包含比赛ID。\n"
-                     "在下次推送时将包含该功能。",
-                parse_mode="HTML"
-            )
-        elif query.data == "refresh":
-            await query.edit_message_text(
-                text="🔄 数据已刷新\n"
-                     "预测信息保持不变（实时刷新需要消息ID）。",
-                parse_mode="HTML"
-            )
-            
-    except TelegramError as e:
-        logger.error(f"Callback error: {e}")
+        fixture_id = int(raw_id)
+        prediction = service.get(fixture_id)
+    except (KeyError, ValueError):
+        await query.answer("这条预测已过期（机器人重启过），请等待下一次推送或让管理员使用 /test。", show_alert=True)
+        return
+    await query.answer()  # 先应答，避免按钮一直转圈
+
+    view = "home" if action == "refresh" else action
+    try:
+        if action == "refresh":
+            prediction = await service.refresh(fixture_id)
+        h2h = await service.get_h2h(prediction) if view == "h2h" else None
+        text = render_view(view, prediction, settings, h2h)
+    except APIError as exc:
+        text = f"❌ <b>获取数据失败</b>\n{esc(exc)}"
+    await edit_view(query, text, ui.get_main_keyboard(fixture_id, view))
 
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理错误"""
-    logger.error(f"Update {update} caused error {context.error}")
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.error("处理更新时出错", exc_info=context.error)
 
 
-def main():
-    """主函数 - 启动机器人"""
-    # 验证必需的环境变量
-    if not CHAT_ID:
-        logger.error("CHAT_ID environment variable is not set")
-        exit(1)
-    
-    if not os.getenv("TELEGRAM_TOKEN"):
-        logger.error("TELEGRAM_TOKEN environment variable is not set")
-        exit(1)
-    
-    if not os.getenv("RAPID_API_KEY"):
-        logger.error("RAPID_API_KEY environment variable is not set")
-        exit(1)
-    
-    # 创建应用
-    app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).build()
-    
-    # 添加命令处理器
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("test", test_send))
-    
-    # 添加回调处理器
-    app.add_handler(CallbackQueryHandler(button_callback))
-    
-    # 添加错误处理器
-    app.add_error_handler(error_handler)
-    
-    # 配置定时任务
-    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-    
-    # 每天早上 8 点运行
-    scheduler.add_job(
-        send_daily_prediction,
-        "cron",
-        hour=8,
-        minute=0,
-        args=[app],
-        id="daily_prediction",
-        name="Daily Football Prediction"
+# ---- 应用装配 ---------------------------------------------------------------
+async def post_init(app: Application) -> None:
+    settings: Settings = app.bot_data["settings"]
+    api = FootballAPI(settings.api_key, provider=settings.api_provider)
+    app.bot_data["api"] = api
+    app.bot_data["service"] = PredictionService(settings, api, MatchAnalyzer())
+    try:
+        await app.bot.set_my_commands(
+            [
+                BotCommand("start", "欢迎信息与推送时间"),
+                BotCommand("help", "命令说明"),
+                BotCommand("test", "立即推送一次预测（管理员）"),
+                BotCommand("status", "运行状态与数据源诊断（管理员）"),
+            ]
+        )
+    except TelegramError as exc:
+        log.warning("设置命令菜单失败：%s", exc)
+
+
+async def post_shutdown(app: Application) -> None:
+    api = app.bot_data.get("api")
+    if api:
+        await api.aclose()
+
+
+def build_application(settings: Settings) -> Application:
+    app = (
+        ApplicationBuilder()
+        .token(settings.telegram_token)
+        .defaults(Defaults(tzinfo=settings.timezone))  # 定时任务按 TIMEZONE 计时
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
     )
-    
-    # 定义 post_init 回调
-    async def post_init_callback(app_instance):
-        scheduler.start()
-        logger.info("APScheduler started")
+    app.bot_data["settings"] = settings
 
-    # 注册回调
-    app.post_init = post_init_callback
-    
-    logger.info("=" * 50)
-    logger.info("🤖 Football Prediction Bot Starting...")
-    logger.info(f"League ID: {LEAGUE_ID}, Season: {SEASON}")
-    logger.info(f"Timezone: {TIMEZONE}")
-    logger.info(f"Daily prediction scheduled at 08:00 {TIMEZONE}")
-    logger.info("=" * 50)
-    
-    # 启动机器人
-    app.run_polling()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("test", test_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):\d+$"))
+    app.add_error_handler(on_error)
+
+    if app.job_queue is None:
+        raise RuntimeError('缺少定时任务依赖，请安装 "python-telegram-bot[job-queue]"')
+    if settings.chat_id:
+        app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
+    else:
+        log.warning("未设置 CHAT_ID：定时推送已停用（仍可使用命令）")
+    return app
+
+
+def main() -> None:
+    load_dotenv()
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        raise SystemExit(f"配置错误：{exc}") from None
+    setup_logging(settings)
+    log.info(
+        "机器人启动：league=%s season=%s 推送=%s(%s) 渠道=%s 管理员数=%d",
+        settings.league_id,
+        settings.season,
+        f"{settings.push_time:%H:%M}",
+        settings.timezone.zone,
+        settings.api_provider,
+        len(settings.admin_ids),
+    )
+    app = build_application(settings)
+    app.run_polling(drop_pending_updates=True, allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY])
 
 
 if __name__ == "__main__":
     main()
-
