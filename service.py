@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from analyzer import LeagueModel, MatchAnalyzer, TeamStrength, build_league_model, collect_1x2_odds, consensus_odds
 from api_client import APIError, FootballAPI
+from data_source import DataSourceError
 from config import Settings
 
 log = logging.getLogger(__name__)
@@ -19,8 +20,17 @@ LOW_SAMPLE_GAMES = 5  # 主/客场已赛场次低于此值时提示样本不足
 MODEL_VERSION = "poisson-v0.1"  # 展示给用户，便于判断结论来自哪套模型
 FORM_MATCHES = 5  # 深度分析取近期几场
 H2H_MATCHES = 10  # 历史交锋取几场
+SEASON_FALLBACK_STEPS = 3  # 赛季不可用时，最多再向下降级几个赛季（不硬编码具体年份）
 
 _FINISHED = {"FT", "AET", "PEN"}  # 已完场的状态缩写
+
+
+def is_season_error(exc: BaseException) -> bool:
+    """判断是否为「该赛季不可用」（套餐权限 / 赛季未开放），而不是 Key 无效或限流。"""
+    text = str(exc).lower()
+    if not text:
+        return False
+    return ("do not have access to this season" in text) or ("season" in text and "plan" in text)
 
 
 def _is_finished(m: dict) -> bool:
@@ -131,6 +141,7 @@ class Prediction:
     outcomes: dict = field(default_factory=dict)
     best: tuple[str, dict] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    source: str = "API-Football"  # 实际使用的数据源（主源或备用源），必须如实展示
 
     @property
     def low_sample(self) -> bool:
@@ -177,7 +188,13 @@ class PredictionService:
         self.api = api
         self.analyzer = analyzer or MatchAnalyzer()
         self.season_in_use: int = settings.season
+        self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
         self._store: OrderedDict[int, Prediction] = OrderedDict()
+
+    @property
+    def source_label(self) -> str:
+        """当前实际使用的数据源名称（主源 API-Football / 备用源 football-data.org）。"""
+        return getattr(self.api, "source_label", "API-Football")
 
     # ---- 预测 ---------------------------------------------------------------
     @staticmethod
@@ -200,19 +217,17 @@ class PredictionService:
         now = now or datetime.now(timezone.utc)
         end = now + timedelta(hours=lookahead_hours or s.lookahead_hours)
 
-        # SEASON 变量过期（例如仍是 2025）时，自动改用按日期推算出的赛季再试一次
-        seasons = [s.season] + ([s.expected_season] if s.expected_season != s.season else [])
-        upcoming: list[tuple[datetime, dict]] = []
-        for season in seasons:
-            fixtures = await self.api.get_fixtures(s.league_id, season, now.date(), end.date())
-            upcoming = self._upcoming(fixtures, now, end)
-            if upcoming:
-                if season != s.season:
-                    log.warning("SEASON=%s 下没有赛程，已改用 %s 赛季，请更新 SEASON 变量", s.season, season)
-                self.season_in_use = season
-                break
+        # 按候选赛季探测：SEASON 过期或套餐不支持当前赛季时，自动向下降级
+        fixtures, season, note = await self._fetch_fixtures(now.date(), end.date())
+        upcoming = self._upcoming(fixtures, now, end)
         upcoming = upcoming[: limit or s.max_matches]
         if not upcoming:
+            # 降级成功但旧赛季没有「未来」的比赛：必须说清原因，不能报成「今天没比赛」
+            self.last_note = note or (
+                f"ℹ️ {season} 赛季在 {s.lookahead_hours} 小时窗口内没有未开赛的比赛。"
+                if season != s.season
+                else None
+            )
             return []
 
         model = build_league_model(await self.api.get_standings(s.league_id, self.season_in_use))
@@ -226,12 +241,12 @@ class PredictionService:
     async def _predict_one(self, model: LeagueModel, kickoff: datetime, fx: dict, fresh: bool = False) -> Prediction:
         teams = fx.get("teams") or {}
         home, away = teams.get("home") or {}, teams.get("away") or {}
-        fixture_id = fx["fixture"]["id"]
+        fixture_id = fx["fixture"]["id"]  # 保持数据源原类型；_store 内部统一用 str key 查找
 
         analysis = self.analyzer.predict_match(model, home["id"], away["id"])
         try:
             odds_response = await self.api.get_odds(fixture_id, fresh=fresh)
-        except APIError as exc:  # 赔率缺失不应阻断整条预测
+        except (APIError, DataSourceError) as exc:  # 赔率缺失不应阻断整条预测
             log.warning("赔率获取失败（fixture=%s）：%s", fixture_id, exc)
             odds_response = []
         bookmakers = collect_1x2_odds(odds_response)
@@ -257,15 +272,93 @@ class PredictionService:
             fixture=fx,
             bookmakers=bookmakers,
             odds=odds,
+            source=self.source_label,
             outcomes=outcomes,
             best=best,
         )
 
-    # ---- 今日赛程 ---------------------------------------------------------------
-    def _season_candidates(self) -> list[int]:
-        """尝试赛季的顺序：配置的 SEASON 优先，其次按日期推算出的赛季。"""
+    # ---- 赛季探测与降级 ---------------------------------------------------------
+    async def resolve_season(self) -> tuple[int, bool]:
+        """确定实际使用的赛季，返回 (赛季, 是否发生了降级)。
+
+        先查账号可用赛季列表，再按「目标赛季 → 小于目标的最近可用赛季」排序；
+        列表不可用（接口报错/为空）时回退为逐年向下降级。
+        不硬编码任何年份，也不伪造赛季数据。
+        """
         s = self.settings
-        return [s.season] + ([s.expected_season] if s.expected_season != s.season else [])
+        requested = s.season
+        if not s.allow_season_fallback or s.season_mode == "fixed":
+            return requested, False
+
+        available: list[int] = []
+        try:
+            available = sorted({int(x) for x in (await self.api.get_available_seasons() or [])})
+        except Exception as exc:  # 列表接口失败不阻断，退回逐年降级
+            log.warning("获取可用赛季列表失败（%s），改用逐年降级", type(exc).__name__)
+
+        if available:
+            ordered: list[int] = []
+            if requested in available:
+                ordered.append(requested)
+            # 小于目标赛季的最近几个可用赛季，由近及远
+            below = [x for x in sorted(available, reverse=True) if x < requested]
+            ordered.extend(below[:SEASON_FALLBACK_STEPS])
+            if not ordered:  # 列表里没有也不小于目标的赛季：至少试一次目标赛季
+                ordered = [requested]
+            return ordered[0], ordered[0] != requested
+
+        # 列表不可用：按日期推算 + 逐年降级
+        tail = s.expected_season if s.expected_season != requested else requested
+        return tail, tail != requested
+
+    def _season_candidates(self) -> list[int]:
+        """实际尝试赛季的顺序（用于逐个请求验证，因为列表可能含无权访问的赛季）。"""
+        s = self.settings
+        requested = s.season
+        if not s.allow_season_fallback or s.season_mode == "fixed":
+            return [requested]
+        base = [requested]
+        if s.expected_season != requested:
+            base.append(s.expected_season)
+        tail = base[-1]
+        base.extend(tail - i for i in range(1, SEASON_FALLBACK_STEPS + 1))
+        seen, out = set(), []
+        for season in base:
+            if season not in seen:
+                seen.add(season)
+                out.append(season)
+        return out
+
+    async def _fetch_fixtures(self, date_from, date_to) -> tuple[list[dict], int, str | None]:
+        """按候选赛季依次请求赛程，遇到「赛季不可用」就自动降级。
+
+        返回 (赛程, 实际使用的赛季, 降级提示)。Key 无效 / 限流这类错误直接抛出，
+        不做无意义的重试与降级。
+        """
+        s = self.settings
+        first_error: APIError | None = None
+        for season in self._season_candidates():
+            try:
+                fixtures = await self.api.get_fixtures(s.league_id, season, date_from, date_to)
+            except APIError as exc:
+                if not is_season_error(exc):
+                    raise  # 非赛季问题（Key/限流/网络）不降级，直接暴露真实原因
+                if first_error is None:
+                    first_error = exc
+                log.warning("赛季 %s 不可用（%s），尝试向下降级", season, exc)
+                continue
+            if fixtures:
+                self.season_in_use = season
+                note = None
+                if season != s.season:
+                    note = (
+                        f"⚠️ 已自动降级到 {season} 赛季（配置的 {s.season} 赛季不可用）。"
+                        f"该赛季为历史数据，无法提供未来赛程预测。"
+                    )
+                return list(fixtures), season, note
+        if first_error is not None:
+            raise first_error
+        return [], s.season, None
 
     async def get_today_fixtures(self, now: datetime | None = None) -> list[dict]:
         """取「今天」（按 TIMEZONE，默认 Asia/Shanghai）的全部赛程。
@@ -277,22 +370,11 @@ class PredictionService:
         s = self.settings
         now = now or datetime.now(timezone.utc)
         day = now.astimezone(s.timezone).date()
-        first_error: APIError | None = None
-        for season in self._season_candidates():
-            try:
-                fixtures = await self.api.get_fixtures(s.league_id, season, day, day)
-            except APIError as exc:
-                if first_error is None:
-                    first_error = exc
-                continue
-            if fixtures:
-                if season != s.season:
-                    log.warning("今日赛程：SEASON=%s 无数据，已改用 %s 赛季", s.season, season)
-                self.season_in_use = season
-                return list(fixtures)
-        if first_error is not None:
-            raise first_error
-        return []
+        fixtures, season, note = await self._fetch_fixtures(day, day)
+        self.last_note = note
+        if note:
+            log.warning("今日赛程：%s", note)
+        return fixtures
 
     # ---- 单场比赛预测 ----------------------------------------------------------
     async def predict_fixture(self, fixture_id: int, fixtures: list[dict] | None = None) -> Prediction:
@@ -303,7 +385,7 @@ class PredictionService:
         """
         if fixtures is None:
             fixtures = await self.get_today_fixtures()
-        fx = next((f for f in fixtures if (f.get("fixture") or {}).get("id") == fixture_id), None)
+        fx = next((f for f in fixtures if str((f.get("fixture") or {}).get("id")) == str(fixture_id)), None)
         if fx is None:
             raise KeyError(fixture_id)
         kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
@@ -323,7 +405,7 @@ class PredictionService:
         """
         if fixtures is None:
             fixtures = await self.get_today_fixtures()
-        fx = next((f for f in fixtures if (f.get("fixture") or {}).get("id") == fixture_id), None)
+        fx = next((f for f in fixtures if str((f.get("fixture") or {}).get("id")) == str(fixture_id)), None)
         if fx is None:
             raise KeyError(fixture_id)
         kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
@@ -374,6 +456,7 @@ class PredictionService:
                 "avg_away_goals": model.avg_away_goals,
             },
             "errors": errors,
+            "source": self.source_label,
             "has_team_data": bool(model.teams) and home_id in model.teams and away_id in model.teams,
             "created_at": datetime.now(timezone.utc),
         }
@@ -384,16 +467,17 @@ class PredictionService:
 
     # ---- 存取（按钮回调用） -----------------------------------------------------
     def _remember(self, prediction: Prediction) -> None:
-        self._store[prediction.fixture_id] = prediction
-        self._store.move_to_end(prediction.fixture_id)
+        key = str(prediction.fixture_id)  # 主源数字 ID 与备用源 'fd-' ID 统一为字符串键
+        self._store[key] = prediction
+        self._store.move_to_end(key)
         while len(self._store) > STORE_LIMIT:
             self._store.popitem(last=False)
 
-    def get(self, fixture_id: int) -> Prediction:
+    def get(self, fixture_id) -> Prediction:
         """取不到（机器人重启过或已被淘汰）时抛 KeyError。"""
-        return self._store[fixture_id]
+        return self._store[str(fixture_id)]
 
-    async def refresh(self, fixture_id: int) -> Prediction:
+    async def refresh(self, fixture_id) -> Prediction:
         """重新拉取最新赔率并重算价值偏差（球队强度沿用当时的模型）。"""
         old = self.get(fixture_id)
         new = await self._predict_one(old.model, old.kickoff, old.fixture, fresh=True)
