@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 VALID_SEASON_MODES = {"auto", "fixed"}
 VALID_DATA_SOURCE_MODES = {"auto", "api-football", "football-data"}
+
+DEFAULT_DB_PATH = "/data/predictions.db"  # 机器人存储：Railway 持久化卷通常挂这里
 TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 
 
@@ -92,6 +94,7 @@ class Settings:
     football_data_enabled: bool
     football_data_timeout: float
     data_source_mode: str  # "auto" / "api-football" / "football-data"
+    db_path: str  # 预测落盘路径（SQLite）；目录不可写时自动回退内存存储
 
     @property
     def requested_season(self) -> int:
@@ -185,6 +188,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     football_data_enabled = parse_bool(_get(env, "FOOTBALL_DATA_ENABLED"), default=True)
     football_data_timeout = float(_get_int(env, "FOOTBALL_DATA_TIMEOUT", 10) or 10)
 
+    # 预测落盘：默认挂到机器人自己的持久化目录；设为 ':memory:' 可强制只用内存
+    db_path = (_get(env, "DB_PATH") or DEFAULT_DB_PATH).strip() or DEFAULT_DB_PATH
+
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
     if push_raw is None and (_get(env, "SCHEDULED_HOUR") or _get(env, "SCHEDULED_MINUTE")):
@@ -209,4 +215,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         football_data_enabled=football_data_enabled,
         football_data_timeout=football_data_timeout,
         data_source_mode=data_source_mode,
+        db_path=db_path,
     )
