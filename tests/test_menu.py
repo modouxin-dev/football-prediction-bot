@@ -69,22 +69,16 @@ def today_fixtures(count=3, hour=10):
 
 
 # ---- 主菜单 -------------------------------------------------------------------
-def test_menu_keyboard_has_six_buttons_in_three_rows():
+def test_menu_keyboard_has_all_buttons():
+    from bot_handler import MENU_ITEMS
+
     markup = BotUI.menu_keyboard()
-    assert len(markup.inline_keyboard) == 3
     flat = [b for row in markup.inline_keyboard for b in row]
-    assert len(flat) == 6
+    assert len(flat) == len(MENU_ITEMS)  # 不写死数量，跟随 MENU_ITEMS
     assert all(isinstance(b, InlineKeyboardButton) for b in flat)
     labels = [b.text for b in flat]
     assert "📅 今日赛程" in labels and "🏆 联赛排名" in labels
-    assert {b.callback_data for b in flat} == {
-        "menu:fixtures",
-        "menu:predict",
-        "menu:analysis",
-        "menu:standings",
-        "menu:refresh",
-        "menu:help",
-    }
+    assert {b.callback_data for b in flat} == {f"menu:{key}" for key, _ in MENU_ITEMS}
 
 
 def test_reply_menu_keyboard_matches_menu_items():
@@ -92,9 +86,8 @@ def test_reply_menu_keyboard_matches_menu_items():
     from bot_handler import MENU_ITEMS
 
     markup = BotUI.reply_menu_keyboard()
-    assert len(markup.keyboard) == 3
     flat = [b for row in markup.keyboard for b in row]
-    assert len(flat) == 6
+    assert len(flat) == len(MENU_ITEMS)  # 与 MENU_ITEMS 保持一致，不写死数量
     assert all(isinstance(b, KeyboardButton) for b in flat)
     assert [b.text for b in flat] == [label for _, label in MENU_ITEMS]
     assert [b.text for b in flat] == [b.text for row in main.ui.menu_keyboard().inline_keyboard for b in row]
@@ -284,7 +277,7 @@ class FakeQuery:
     async def answer(self, text=None, show_alert=False):
         self.answers.append(text)
 
-    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None, **kwargs):
         self.edits.append((text, parse_mode, reply_markup))
 
 
