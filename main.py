@@ -1047,6 +1047,15 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---- 应用装配 ---------------------------------------------------------------
 async def post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
+    # 若 Telegram 端残留 Webhook，getUpdates 会立刻 409 并让进程退出。
+    # 必须在 post_init（run_polling 的同一个 event loop 内）清理：
+    # 若在 main() 里用 asyncio.run(...) 单独清理，会关闭当前 loop，
+    # 导致随后 run_polling 抛 "There is no current event loop" 并使 Updater 协程永不 await。
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        log.info("已清理残留 Webhook，使用长轮询接收更新")
+    except Exception as exc:  # 清理失败不应中断启动
+        log.warning("清理 Webhook 失败（继续尝试轮询）：%s", exc)
     api = FootballAPI(settings.api_key, provider=settings.api_provider)
     # 备用源：仅在配置了 Token 且启用时创建，否则为 None（行为与改动前完全一致）
     fallback = None
@@ -1147,13 +1156,8 @@ def main() -> None:
         len(settings.admin_ids),
     )
     app = build_application(settings)
-    # 若 Telegram 端残留 Webhook，getUpdates 会立刻 409 并让进程退出（表现为启动几秒即停）。
-    # 启动时先主动清除，确保走长轮询；失败也不阻塞，交由后续轮询逻辑处理。
-    try:
-        asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
-        log.info("已清理残留 Webhook，使用长轮询接收更新")
-    except Exception as exc:  # 清理失败不应中断启动
-        log.warning("清理 Webhook 失败（继续尝试轮询）：%s", exc)
+    # 注意：不要在 run_polling 之前调用 asyncio.run(...)，那会关闭当前 event loop，
+    # 使 run_polling 内部 asyncio.get_event_loop() 抛错并导致 Updater 协程永不 await。
     app.run_polling(drop_pending_updates=True, allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY])
 
 
