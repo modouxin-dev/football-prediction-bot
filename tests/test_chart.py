@@ -172,7 +172,7 @@ class FakeQuery:
     async def answer(self, text=None, show_alert=False):
         self.answers.append((text, show_alert))
 
-    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None, **kwargs):
         pass
 
 
