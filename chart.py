@@ -17,17 +17,22 @@ matplotlib.use("Agg")  # 必须在 pyplot 之前设置
 
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
+from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 log = logging.getLogger(__name__)
 
-# Telegram 深色背景下的配色
-BG = "#17212B"
-FG = "#E8E8E8"
-ACCENT = "#5DADE2"
-WIN = "#2ECC71"
-DRAW = "#F5B041"
-LOSE = "#E74C3C"
-GRID = "#2C3A47"
+# 深色体育数据中心配色 / Dark sports data-center palette
+BG = "#07111F"        # 深海军蓝背景 / deep navy background
+CARD = "#101D2E"      # 玻璃卡片 / glass card
+FG = "#EAF2F8"        # 主文字 / primary text
+MUTED = "#7A93A8"     # 次要文字 / secondary text
+ACCENT = "#39E58C"    # 荧光绿主色 / neon green primary
+BLUE = "#4BA3FF"      # 电光蓝辅色 / electric blue secondary
+AMBER = "#FFB547"     # 琥珀风险色 / amber risk color
+WIN = "#39E58C"       # 主胜 / home win（沿用主色）
+DRAW = "#FFB547"      # 平局 / draw（琥珀）
+LOSE = "#4BA3FF"      # 客胜 / away win（电光蓝）
+GRID = "#1B2B3F"      # 极淡网格 / faint grid
 
 FONT_CANDIDATES = ["Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK TC", "WenQuanYi Zen Hei", "SimHei"]
 
@@ -78,6 +83,238 @@ def _finish(fig) -> bytes | None:
 
 def _footer(fig, text: str) -> None:
     fig.text(0.01, 0.01, text, color="#8FA3B0", fontsize=7)
+
+
+def schedule_chart(fixtures: list, tz, day_label: str = "", source: str = "") -> bytes | None:
+    """赛程总览图 / Fixtures overview chart.
+
+    同一天 → 按开赛小时分布；跨多天 → 按日期分布。
+    无比赛时不生成图（返回 None），由调用方显示文字说明。
+    """
+    from bot_handler import BotUI  # 局部导入避免循环依赖
+    from service import parse_kickoff
+
+    buckets: dict[str, int] = {}
+    for fx in fixtures:
+        kickoff = (fx.get("fixture") or {}).get("date")
+        dt = parse_kickoff(kickoff)
+        if dt is None:
+            continue
+        local = dt.astimezone(tz)
+        # 先按日期归集，稍后判断是否同一天（同一天则细化到小时）
+        buckets.setdefault(local.strftime("%Y-%m-%d"), []).append(local.hour)
+
+    if not buckets:
+        return None
+
+    days = sorted(buckets)
+    if len(days) == 1:
+        # 单日：按小时分布 / Single day → hourly distribution
+        hours = sorted(set(buckets[days[0]]))
+        labels = [f"{h:02d}:00" for h in hours]
+        values = [buckets[days[0]].count(h) for h in hours]
+        xlabel = "开赛时间（本地时区）"
+    else:
+        labels = [d[5:] for d in days]  # MM-DD
+        values = [len(buckets[d]) for d in days]
+        xlabel = "比赛日期"
+
+    if not any(v > 0 for v in values):
+        return None
+
+    fig, ax = _new_fig(7.4, 3.6)
+    bars = ax.bar(labels, values, color=ACCENT, width=0.6)
+    ax.set_ylabel("比赛场次")
+    ax.set_xlabel(xlabel)
+    ax.grid(axis="y", color=GRID, linestyle="--", alpha=0.5)
+    ax.set_axisbelow(True)
+    for bar, value in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, value + max(values) * 0.04,
+                str(value), ha="center", color=FG, fontweight="bold")
+    ax.set_ylim(0, max(values) * 1.3 + 0.6)
+    title = f"赛程分布 · {day_label}" if day_label else "赛程分布"
+    ax.set_title(title, pad=12)
+    _footer(fig, f"共 {sum(values)} 场 · {BotUI.tz_label(tz)}" + (f" · {source}" if source else ""))
+    return _finish(fig)
+
+
+def _card_frame(fig, left=0.045, right=0.955, bottom=0.06, top=0.93):
+    """玻璃卡片底衬 / Glass card backdrop（圆角矩形 + 低透明度蓝晕）。
+
+    返回卡片 axes 与圆角矩形 patch，供上层叠放内容。
+    """
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    rect = FancyBboxPatch(
+        (left, bottom), right - left, top - bottom,
+        boxstyle="round,pad=0,rounding_size=0.055",
+        linewidth=1.2, edgecolor="#1E3555", facecolor=CARD,
+        transform=ax.transAxes, zorder=0,
+    )
+    ax.add_patch(rect)
+    return ax
+
+
+def prob_ring(prediction, tz, model_version: str = "poisson-v0.1") -> bytes | None:
+    """胜平负概率环 / Win-draw-loss probability ring.
+
+    中心显示最大概率，外圈三段依次为主胜 / 平局 / 客胜；
+    数字不抢戏，突出"一个结论"而非三个大数字。
+    """
+    from bot_handler import BotUI
+
+    a = prediction.analysis
+    if not a:
+        return None
+    values = [a["win_prob"] * 100, a["draw_prob"] * 100, a["loss_prob"] * 100]
+    if not any(v > 0 for v in values):
+        return None
+
+    fig = plt.figure(figsize=(7.2, 3.9), dpi=150)
+    fig.patch.set_facecolor(BG)
+    _card_frame(fig)
+
+    ax = fig.add_axes([0.06, 0.16, 0.42, 0.62])
+    ax.set_facecolor(CARD)
+    colors = [WIN, DRAW, LOSE]
+    wedges, _ = ax.pie(
+        values, colors=colors, startangle=90, counterclock=False,
+        wedgeprops=dict(width=0.30, edgecolor=CARD, linewidth=2.5),
+    )
+    best = max(values)
+    ax.text(0, 0.10, f"{best:.0f}%", ha="center", va="center",
+            color=FG, fontsize=25, fontweight="bold")
+    ax.text(0, -0.22, "胜率峰值", ha="center", va="center", color=MUTED, fontsize=8.5)
+    ax.set_xlim(-1.25, 1.25)
+    ax.set_ylim(-1.25, 1.25)
+    ax.set_aspect("equal")
+
+    # 右侧图例：三段概率 + 标签
+    tx = fig.add_axes([0.55, 0.16, 0.38, 0.62])
+    tx.set_axis_off()
+    tx.set_xlim(0, 1)
+    tx.set_ylim(0, 1)
+    labels = ["主胜", "平局", "客胜"]
+    for i, (label, value, color) in enumerate(zip(labels, values, colors)):
+        y = 0.78 - i * 0.30
+        tx.add_patch(FancyBboxPatch(
+            (0.02, y - 0.055), 0.055, 0.055,
+            boxstyle="round,pad=0,rounding_size=0.02",
+            facecolor=color, edgecolor="none", transform=tx.transAxes,
+        ))
+        tx.text(0.13, y - 0.028, label, color=MUTED, fontsize=11, va="center")
+        tx.text(0.98, y - 0.028, f"{value:.1f}%", color=FG, fontsize=15,
+                fontweight="bold", va="center", ha="right")
+
+    title_ax = fig.add_axes([0.06, 0.80, 0.88, 0.12])
+    title_ax.set_axis_off()
+    title_ax.text(0, 0.5, "WIN / DRAW / LOSS", color=ACCENT, fontsize=9.5,
+                  fontweight="bold", va="center")
+    title_ax.text(1, 0.5, f"MODEL CERTAINTY {best:.0f}%", color=MUTED,
+                  fontsize=8.5, va="center", ha="right")
+    _footer(fig, f"{model_version} · {BotUI.fmt_time(prediction.created_at, tz, '%Y-%m-%d %H:%M')} · {BotUI.tz_label(tz)}")
+    return _finish(fig)
+
+
+def match_card(prediction, tz, level: dict, league_name: str = "",
+               matchday: str = "", source: str = "",
+               model_version: str = "poisson-v0.1") -> bytes | None:
+    """高级版比赛主卡 / Premium match card.
+
+    顶部赛事标签 + 队名 VS + 三段概率 + AI 结论 + 信心徽章 + xG。
+    """
+    from bot_handler import BotUI
+
+    a = prediction.analysis
+    if not a:
+        return None
+    home, away = str(prediction.home), str(prediction.away)
+    probs = [a["win_prob"] * 100, a["draw_prob"] * 100, a["loss_prob"] * 100]
+
+    fig = plt.figure(figsize=(7.4, 5.0), dpi=150)
+    fig.patch.set_facecolor(BG)
+    ax = _card_frame(fig, top=0.955, bottom=0.04)
+
+    # 顶部：联赛名 + 赛事标签 / header: league + status badge
+    badge = "PREDICTION"
+    ax.text(0.075, 0.905, (league_name or "MATCH").upper(), color=MUTED,
+            fontsize=9, fontweight="bold", va="center")
+    ax.text(0.925, 0.905, badge, color=ACCENT, fontsize=9, fontweight="bold",
+            va="center", ha="right")
+    if matchday:
+        ax.text(0.925, 0.862, matchday.upper(), color=MUTED, fontsize=8,
+                va="center", ha="right")
+
+    kickoff = BotUI.fmt_time(prediction.created_at, tz, "%d %b %Y · %H:%M")
+    ax.text(0.075, 0.855, kickoff.upper(), color=MUTED, fontsize=8.5, va="center")
+
+    # 分隔线 / divider
+    ax.plot([0.075, 0.925], [0.815, 0.815], color="#1E3555", linewidth=1.1)
+
+    # 队名 VS / teams
+    ax.text(0.30, 0.715, home, color=FG, fontsize=17, fontweight="bold",
+            ha="center", va="center")
+    ax.text(0.70, 0.715, away, color=FG, fontsize=17, fontweight="bold",
+            ha="center", va="center")
+    ax.text(0.50, 0.715, "VS", color=MUTED, fontsize=11, ha="center", va="center")
+
+    # 三段概率 / probabilities
+    for i, (value, label, color) in enumerate(zip(probs, ["主胜", "平", "客胜"], [WIN, DRAW, LOSE])):
+        x = 0.25 + i * 0.25
+        ax.text(x, 0.60, f"{value:.0f}%", color=color, fontsize=20,
+                fontweight="bold", ha="center", va="center")
+        ax.text(x, 0.545, label, color=MUTED, fontsize=9, ha="center", va="center")
+
+    ax.plot([0.075, 0.925], [0.505, 0.505], color="#1E3555", linewidth=1.1)
+
+    # AI 结论 / AI prediction
+    ax.text(0.075, 0.455, "AI PREDICTION", color=ACCENT, fontsize=8.5,
+            fontweight="bold", va="center")
+    top_name = ["主胜", "平局", "客胜"][probs.index(max(probs))]
+    score = a.get("scoreline") or ""
+    verdict = f"{top_name}" + (f" · 预计比分 {score}" if score else "")
+    ax.text(0.075, 0.395, verdict, color=FG, fontsize=13.5, fontweight="bold", va="center")
+
+    # 信心徽章 / confidence badge
+    lname = (level or {}).get("name", "")
+    lkey = (level or {}).get("key", "")
+    bcolor = {"high": WIN, "medium": AMBER, "low": LOSE}.get(lkey, AMBER)
+    ax.add_patch(FancyBboxPatch(
+        (0.075, 0.30), 0.30, 0.062,
+        boxstyle="round,pad=0,rounding_size=0.03",
+        facecolor=bcolor, alpha=0.16, edgecolor=bcolor, linewidth=1.1,
+        transform=ax.transAxes,
+    ))
+    ax.text(0.225, 0.331, f"{lname} CONFIDENCE".strip(), color=bcolor,
+            fontsize=9, fontweight="bold", ha="center", va="center")
+
+    # xG / expected goals
+    hg = a.get("home_xg") or a.get("lambda_home")
+    ag = a.get("away_xg") or a.get("lambda_away")
+    if hg is not None and ag is not None:
+        ax.text(0.075, 0.225, f"xG  {float(hg):.2f}", color=BLUE, fontsize=11, va="center")
+        ax.text(0.925, 0.225, f"xG  {float(ag):.2f}", color=BLUE, fontsize=11,
+                va="center", ha="right")
+
+    ax.plot([0.075, 0.925], [0.175, 0.175], color="#1E3555", linewidth=1.1)
+    _footer(fig, f"{model_version} · {source or 'API'} · {BotUI.tz_label(tz)}")
+    return _finish(fig)
+
+
+def empty_state(title: str = "NO FIXTURE IN THIS WINDOW",
+                subtitle: str = "当前时间范围暂无比赛") -> bytes | None:
+    """高级空状态图 / Premium empty state（空数据时不再是一片空白）。"""
+    fig = plt.figure(figsize=(7.0, 2.8), dpi=150)
+    fig.patch.set_facecolor(BG)
+    ax = _card_frame(fig, top=0.94, bottom=0.06)
+    ax.text(0.5, 0.62, title, color=MUTED, fontsize=13, fontweight="bold",
+            ha="center", va="center")
+    ax.text(0.5, 0.40, subtitle, color=FG, fontsize=11, ha="center", va="center")
+    # 装饰：一道荧光绿细线
+    ax.plot([0.42, 0.58], [0.26, 0.26], color=ACCENT, linewidth=2.2)
+    return _finish(fig)
 
 
 def prob_chart(prediction, tz, model_version: str = "poisson-v0.1") -> bytes | None:
