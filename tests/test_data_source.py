@@ -370,3 +370,412 @@ def test_fallback_has_no_odds_and_no_h2h():
     fd = make_fd(ok_matches)
     assert run(fd.get_odds("fd-5001")) == []
     assert run(fd.get_h2h("fd-65", "fd-64")) == []
+
+
+# ==============================================================================
+# 回归：主源赛季不可用 + 备用源当日确实无比赛 → 应显示「今日暂无比赛」，不能报数据源故障
+# ==============================================================================
+def test_fallback_empty_matches_is_not_a_failure():
+    """备用源正常响应（HTTP 200）但没有比赛 = 今天确实没比赛，不是故障。"""
+    primary = StubPrimary(error=APIError("plan: Free plans do not have access to this season"))
+
+    def empty_matches(request):
+        return httpx.Response(200, json={"matches": []})
+
+    router = DataSourceRouter(primary, make_fd(empty_matches), mode="auto")
+    result = run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert result == []
+    assert router.using_fallback is True          # 确实在用备用源
+    assert router.last_error("api-football")      # 主源的赛季原因被保留，供提示使用
+
+
+def test_today_fixtures_empty_shows_reason_not_error():
+    """端到端：主源赛季不可用 + 备用源无比赛 → 返回空并给出说明，不抛异常。"""
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+
+    class SeasonBlockedPrimary(StubPrimary):
+        async def get_fixtures(self, *a, **k):
+            raise APIError("plan: Free plans do not have access to this season")
+
+        async def get_available_seasons(self):
+            return [2026, 2025, 2024]
+
+    def empty_matches(request):
+        return httpx.Response(200, json={"matches": []})
+
+    router = DataSourceRouter(SeasonBlockedPrimary(), make_fd(empty_matches), mode="auto")
+    svc = PredictionService(settings, router)
+    fixtures = run(svc.get_today_fixtures())
+    assert fixtures == []
+    assert svc.last_note and "备用数据源" in svc.last_note and "暂无比赛" in svc.last_note
+
+
+def test_fallback_real_failure_still_raises():
+    """备用源自身报错（如 403）才是真的故障，必须抛错而不是假装没比赛。"""
+    primary = StubPrimary(error=APIError("plan: Free plans do not have access to this season"))
+
+    def boom(request):
+        return httpx.Response(403, json={"message": "restricted"})
+
+    router = DataSourceRouter(primary, make_fd(boom), mode="auto")
+    with pytest.raises(DataSourceError) as exc:
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert "均不可用" in str(exc.value)
+
+
+# ==============================================================================
+# 今日无比赛 → 自动扩展到未来几天（避免给用户一片空白）
+# ==============================================================================
+def _future_match(mid, utc_date, home="Man City", away="Liverpool"):
+    return {
+        "id": mid, "utcDate": utc_date, "status": "SCHEDULED", "matchday": 7,
+        "competition": {"id": 2021, "name": "Premier League"},
+        "homeTeam": {"id": 65, "name": home}, "awayTeam": {"id": 64, "name": away},
+        "score": {"fullTime": {"home": None, "away": None}},
+    }
+
+
+def test_today_empty_expands_to_upcoming_days():
+    """今日无比赛时，应自动拉取未来几天赛程，而不是返回空。"""
+    from config import load_settings
+    from service import PredictionService, UPCOMING_DAYS
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+
+    class SeasonBlocked(StubPrimary):
+        async def get_fixtures(self, *a, **k):
+            raise APIError("plan: Free plans do not have access to this season")
+
+        async def get_available_seasons(self):
+            return [2026, 2025, 2024]
+
+    seen_ranges = []
+
+    def handler(request):
+        params = request.url.params
+        df, dt = params.get("dateFrom"), params.get("dateTo")
+        seen_ranges.append((df, dt))
+        if df == dt:  # 只查今天 → 空
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [_future_match(6001, "2026-09-27T14:00:00Z")]})
+
+    router = DataSourceRouter(SeasonBlocked(), make_fd(handler), mode="auto")
+    svc = PredictionService(settings, router)
+    fixtures = run(svc.get_today_fixtures())
+
+    assert len(fixtures) == 1, "今日无比赛时应返回未来赛程"
+    assert svc.using_upcoming is True
+    assert "~" in svc.fixture_day_label  # 日期范围
+    assert svc.last_note and "暂无比赛" in svc.last_note and str(UPCOMING_DAYS) in svc.last_note
+    # 确认确实先查了「今天」，再查了「今天~未来」
+    assert seen_ranges[0][0] == seen_ranges[0][1]
+
+
+def test_upcoming_fixtures_are_sorted_by_kickoff():
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+
+    class SeasonBlocked(StubPrimary):
+        async def get_fixtures(self, *a, **k):
+            raise APIError("plan: Free plans do not have access to this season")
+
+        async def get_available_seasons(self):
+            return [2026, 2025, 2024]
+
+    matches = [
+        _future_match(6002, "2026-09-29T18:30:00Z"),  # 较晚
+        _future_match(6001, "2026-09-27T14:00:00Z"),  # 较早
+    ]
+
+    def handler(request):
+        p = request.url.params
+        if p.get("dateFrom") == p.get("dateTo"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": matches})
+
+    router = DataSourceRouter(SeasonBlocked(), make_fd(handler), mode="auto")
+    svc = PredictionService(settings, router)
+    fixtures = run(svc.get_today_fixtures())
+    ids = [str((f.get("fixture") or {}).get("id")) for f in fixtures]
+    assert ids == ["fd-6001", "fd-6002"], f"未来赛程应按开赛时间升序，实际 {ids}"
+
+
+def test_multi_day_page_shows_date_and_recent_title():
+    """跨天时标题应为「近期赛程」，且每行显示日期，避免误以为是今天的比赛。"""
+    from bot_handler import BotUI
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+    raw = [_future_match(6001, "2026-09-27T14:00:00Z")]
+    fixtures = [FootballDataAPI._to_fixture(m, 39, 2026) for m in raw]  # 经协议转换后才排版
+    text, _, _, _ = BotUI.format_fixtures_page(
+        fixtures, settings.timezone, 0, 5, "2026-09-25 ~ 2026-10-02", multi_day=True
+    )
+    assert "近期赛程" in text
+    assert "09-27" in text  # 每行带日期
+    assert "今日赛程" not in text
+
+
+def test_today_with_matches_keeps_today_title():
+    """今日有比赛时不触发扩展，标题仍是「今日赛程」且不带日期前缀。"""
+    from bot_handler import BotUI
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+    raw = [_future_match(6001, "2026-09-25T10:00:00Z")]
+    fixtures = [FootballDataAPI._to_fixture(m, 39, 2026) for m in raw]
+    text, _, _, _ = BotUI.format_fixtures_page(
+        fixtures, settings.timezone, 0, 5, "2026-09-25", multi_day=False
+    )
+    assert "今日赛程" in text
+    assert "近期赛程" not in text
+
+
+# ==============================================================================
+# 回归：菜单 key 必须是 "predict"（与 MENU_ITEMS 一致），否则按钮落进「开发中」
+# ==============================================================================
+def test_menu_predict_key_matches_handler_branch():
+    from bot_handler import MENU_ITEMS
+
+    keys = {key for key, _ in MENU_ITEMS}
+    assert "predict" in keys
+    # main.py 的分支应覆盖 MENU_ITEMS 里每一个 key，避免按钮点了没反应
+    source = open("main.py", encoding="utf-8").read()
+    for key in keys:
+        if key in ("predict", "fixtures", "standings", "analysis", "refresh", "help", "web"):
+            assert f'elif key == "{key}"' in source, f"菜单 {key} 缺少处理分支"
+
+
+# ==============================================================================
+# 备用源全局端点回退：联赛端点返回空时改用 /v4/matches 并按竞赛过滤
+# ==============================================================================
+def test_fallback_uses_global_endpoint_when_competition_empty():
+    paths = []
+
+    def handler(request):
+        path = str(request.url.path)
+        paths.append(path)
+        if path.startswith("/v4/competitions/"):
+            return httpx.Response(200, json={"matches": []})  # 联赛端点为空
+        return httpx.Response(200, json={"matches": [FD_MATCH, FD_FINISHED]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert len(fixtures) == 2, "联赛端点为空时应回退到全局端点"
+    assert any(p == "/v4/matches" for p in paths)
+
+
+def test_global_endpoint_filters_other_competitions():
+    """全局端点会返回所有竞赛，必须只保留目标联赛，不能混入其他联赛的比赛。"""
+    other = dict(FD_MATCH, id=9001, competition={"id": 2014, "name": "La Liga", "code": "PD"})
+
+    def handler(request):
+        if str(request.url.path).startswith("/v4/competitions/"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [FD_MATCH, other]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert len(fixtures) == 1
+    assert fixtures[0]["league"]["name"] == "Premier League"
+
+
+# ==============================================================================
+# 第三级兜底：带日期过滤为空 → 不带日期参数拉整季 → 本地按日期筛选
+# ==============================================================================
+def _match_on(utc_date, mid=7001):
+    return _future_match(mid, utc_date)
+
+
+def test_third_fallback_filters_season_matches_locally():
+    """前两级都为空时，拉取整季赛程并在本地按日期筛选。"""
+    paths, seen_params = [], []
+
+    def handler(request):
+        paths.append(str(request.url.path))
+        seen_params.append(dict(request.url.params))
+        # 带日期参数的请求一律为空（模拟免费层日期过滤不可用）
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        # 不带日期参数 → 返回整季（含窗口内 1 场、窗口外 1 场）
+        return httpx.Response(200, json={"matches": [
+            _match_on("2026-09-20T14:00:00Z", 1),   # 窗口外（早于 09-25）
+            _match_on("2026-09-27T14:00:00Z", 2),   # 窗口内
+            _match_on("2026-12-01T14:00:00Z", 3),   # 窗口外（远晚于 10-02）
+        ]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert len(fixtures) == 1, "应只保留窗口内的 1 场"
+    assert str(fixtures[0]["fixture"]["id"]) == "fd-2"
+    # 确认最后一次请求不带日期参数
+    assert seen_params[-1] == {}
+
+
+def test_probe_reports_count_when_data_exists():
+    def handler(request):
+        return httpx.Response(200, json={"matches": [FD_MATCH], "competition": {"name": "Premier League"}})
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is True
+    assert info["count"] == 1
+    assert "Premier League" in info["competition"]
+
+
+def test_probe_includes_raw_snippet_when_empty():
+    """HTTP 200 但 matches 为空 → 带出原始响应片段，便于判断是账号限制还是真没数据。"""
+    def handler(request):
+        return httpx.Response(200, json={"matches": []})
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is False
+    assert info["count"] == 0
+    assert "matches" in info["raw"]  # 原始内容可见，不再只显示「0 场」
+
+
+def test_probe_reports_api_message_as_detail():
+    """响应里的 message 字段是接口报错，应作为原因展示。"""
+    def handler(request):
+        return httpx.Response(200, json={"matches": [], "message": "restricted resource"})
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is False
+    assert "restricted resource" in info["detail"]
+
+
+def test_probe_never_raises():
+    """诊断接口不能因为请求失败而影响主流程。"""
+    def handler(request):
+        raise httpx.ConnectError("boom")
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is False
+    assert "detail" in info
+
+
+# ==============================================================================
+# 窗口内无比赛 → 回退展示最近比赛日（用真实数据，不伪造）
+# ==============================================================================
+def test_shift_to_nearest_matchday_when_window_empty():
+    """请求窗口内没有比赛时，展示数据源里最近的真实比赛日，并说明原因。"""
+    def handler(request):
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [
+            _match_on("2026-10-05T14:00:00Z", 11),
+            _match_on("2026-10-05T18:30:00Z", 12),
+            _match_on("2026-10-18T14:00:00Z", 13),
+        ]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert len(fixtures) == 2, "应展示 10-05 那天的 2 场"
+    assert fd.last_shifted_date == date(2026, 10, 5)
+    assert "10-05" in fd.last_note or "2026-10-05" in fd.last_note
+
+
+def test_shift_note_explains_the_shift():
+    """必须说明这是「回退展示」，不能让用户误以为是请求日期的比赛。"""
+    def handler(request):
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [_match_on("2026-10-05T14:00:00Z", 11)]})
+
+    fd = make_fd(handler)
+    run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert "没有比赛" in fd.last_note
+    assert "最近的比赛日" in fd.last_note
+
+
+def test_no_shift_when_window_has_data():
+    """窗口内有比赛时不得触发回退（不能无事生非改日期）。"""
+    def handler(request):
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [
+            _match_on("2026-09-27T14:00:00Z", 21),
+            _match_on("2026-12-01T14:00:00Z", 22),
+        ]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert len(fixtures) == 1
+    assert fd.last_shifted_date is None  # 未回退
+
+
+# ==============================================================================
+# P0-4：请求日志与降级原因记录 / Request log & switch reason
+# ==============================================================================
+def _router(primary):
+    return DataSourceRouter(primary, make_fd(_fd_ok_handler()), mode="auto")
+
+
+def _fd_ok_handler():
+    def handler(request):
+        return httpx.Response(200, json={"matches": [dict(FD_MATCH)]})
+
+    return handler
+
+
+def test_request_log_contains_source_count_and_elapsed(caplog):
+    """每次请求必须记录：数据源、返回数量、耗时（技术细节留日志，用户看友好提示）。"""
+    import logging
+
+    router = _router(StubPrimary())
+    with caplog.at_level(logging.INFO, logger="data_source"):
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    msg = caplog.text
+    assert "源=api-football" in msg
+    assert "数量=" in msg
+    assert "耗时=" in msg
+
+
+def test_log_includes_league_and_date(caplog):
+    """日志要带联赛与日期，否则线上无法定位是哪个查询出问题。"""
+    import logging
+
+    router = _router(StubPrimary())
+    with caplog.at_level(logging.INFO, logger="data_source"):
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert "联赛=39" in caplog.text
+    assert "2026-09-25" in caplog.text
+
+
+def test_switch_is_recorded_with_reason():
+    """主源失败切换备用源时，必须记录切换原因，便于事后排查。"""
+    router = _router(StubPrimary(error=APIError("Free plans do not have access")))
+    run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    sw = router.last_switch
+    assert sw is not None
+    assert sw["from"] == "api-football"
+    assert sw["to"] == "football-data"
+    assert "Free plans" in sw["reason"]
+    assert router.using_fallback
+
+
+def test_no_switch_recorded_when_primary_ok():
+    """主源正常时不应产生降级记录（避免误导排查）。"""
+    router = _router(StubPrimary())
+    run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert router.last_switch is None

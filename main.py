@@ -7,14 +7,18 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 import os
+from pathlib import Path
+
+import paths
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
@@ -27,13 +31,22 @@ from telegram.ext import (
     filters,
 )
 
-from analyzer import MatchAnalyzer
+from analyzer import MatchAnalyzer, calculate_prediction_level
 from api_client import APIError, FootballAPI
 from data_source import DataSourceError, DataSourceRouter
 from football_data import FootballDataAPI
-from bot_handler import MENU_ITEMS, BotUI, esc
+from bot_handler import MENU_ITEMS, BotUI, esc, league_label, split_html_blocks
 from config import ConfigError, Settings, load_settings
-from service import Prediction, PredictionService
+from sync import SYNC_INTERVAL_HOURS
+from service import (
+    MODE_DATE,
+    ST_NO_DATA,
+    MODE_NEXT,
+    MODE_TODAY,
+    MODE_UPCOMING,
+    Prediction,
+    PredictionService,
+)
 
 try:  # 图表依赖缺失时机器人仍要能正常跑，只是不出图
     import chart
@@ -44,6 +57,25 @@ log = logging.getLogger("bot")
 ui = BotUI()
 
 DAILY_JOB = "daily_push"
+SETTLE_JOB = "settle_results"
+SYNC_JOB = "sync_matches"
+
+# 机器人指令表 / Bot command list
+# 每项为 (命令, 说明)；说明为中英双语，方便中文用户与英文用户各自识别。
+# Each item is (command, description); descriptions are bilingual (CN/EN).
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("start", "欢迎信息与推送时间 / Welcome & push time"),
+    ("menu", "打开功能菜单 / Open main menu"),
+    ("help", "命令说明 / Command help"),
+    ("fixtures", "今日赛程 / Today's fixtures"),
+    ("predict", "比赛预测 / Match prediction"),
+    ("standings", "联赛排名 / League standings"),
+    ("refresh", "刷新数据 / Refresh data"),
+    ("next", "下一场比赛 / Next match"),
+    ("web", "网页端入口 / Web app"),
+    ("test", "立即推送一次预测（管理员） / Push now (admin)"),
+    ("status", "运行状态与数据源诊断（管理员） / Status & diagnostics (admin)"),
+]
 WIDE_HOURS = 24 * 14  # /test 在近期无比赛（如国际比赛日）时放宽到 14 天，方便看到示例消息
 
 FX_PER_PAGE = 5  # 今日赛程每页比赛数
@@ -167,6 +199,36 @@ async def run_push(app: Application, *, widen: bool = False) -> PushResult:
     return PushResult(len(predictions), note)
 
 
+async def settle_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """定时任务：把已完场比赛的真实比分回写，供命中率统计（失败不影响机器人）。"""
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    try:
+        done = await service.sync_results()
+        if done:
+            log.info("定时结算完成：%d 场", done)
+    except Exception as exc:  # 结算失败绝不能影响主流程
+        log.warning("定时结算失败：%s", exc)
+
+
+async def sync_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """定时任务：把赛程拉到本地 SQLite（外部 API 只负责拉取，查询只读本地库）。
+
+    同步未来赛程 + 最近赛果；失败只记日志，绝不拖垮机器人。
+    """
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    try:
+        up = await service.sync.sync_upcoming()
+        recent = await service.sync.sync_recent()
+        log.info(
+            "赛程同步完成：未来 %d 场 / 最近 %d 场，本地库共 %d 场",
+            up.get("saved", 0), recent.get("saved", 0), service.repo.matches_count(),
+        )
+    except Exception as exc:  # 同步失败不能影响主流程
+        log.warning("赛程同步失败：%s", exc)
+
+
 async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
     app = context.application
     try:
@@ -180,29 +242,256 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---- 命令 -------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s: Settings = context.application.bot_data["settings"]
-    await update.effective_message.reply_text(
-        "⚽ 足球量化预测机器人\n\n"
-        "功能：\n"
-        "├ 每日自动推送赛事预测\n"
-        "├ 泊松分布量化分析\n"
-        "├ 赔率价值评估\n"
-        "└ 历史交锋数据\n\n"
-        f"推送时间：每天 {s.push_time:%H:%M}（{ui.tz_label(s.timezone)}）\n"
-        "发送 /help 查看命令",
-        reply_markup=ui.reply_menu_keyboard(),  # 底部常驻菜单
-    )
+    text = ui.format_welcome(s)
+    keyboard = ui.reply_menu_keyboard()
+    banner = chart.brand_banner() if chart else None
+    if banner:
+        # 品牌头图 + 文案说明（图片失败时降级为纯文字，不影响使用）
+        await update.effective_message.reply_photo(
+            photo=banner,
+            caption=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    else:
+        await update.effective_message.reply_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=keyboard
+        )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await reply_html(update.effective_message, ui.format_help(), ui.menu_keyboard())
+
+
+class _MessageQuery:
+    """把「新消息」伪装成 callback_query，让直接命令复用就地编辑逻辑。
+
+    Adapts a new message to the callback_query interface so direct commands
+    can reuse the same edit-based rendering path.
+    """
+
+    def __init__(self, message) -> None:
+        self.message = message
+
+    async def answer(self, *args, **kwargs) -> None:
+        return None
+
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None, **kwargs):
+        # 首次以新消息发出，后续编辑同一条（等价于按钮的就地切换体验）
+        if getattr(self, "_sent", False):
+            return await self.message.edit_text(
+                text, parse_mode=parse_mode, reply_markup=reply_markup, **kwargs
+            )
+        self._sent = True
+        return await self.message.reply_text(
+            text, parse_mode=parse_mode, reply_markup=reply_markup, **kwargs
+        )
+
+
+class _FakeUpdate:
+    """轻量 Update 包装：让直接命令走与按钮相同的 handler 签名。"""
+
+    def __init__(self, update: Update) -> None:
+        self._update = update
+        self.callback_query = _MessageQuery(update.effective_message)
+        self.effective_message = update.effective_message
+        self.effective_user = update.effective_user
+        self.effective_chat = update.effective_chat
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
+
+
+async def _dispatch_menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
+    """直接命令 → 菜单分发（与按钮共用 on_menu_key）。"""
+    await on_menu_key(_FakeUpdate(update), context, key)
+
+
+async def fixtures_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/fixtures — 直接打开今日赛程 / Open today's fixtures directly."""
+    await _dispatch_menu_cmd(update, context, "fixtures")
+
+
+async def predict_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/predict — 直接进入比赛预测 / Open match prediction directly."""
+    await _dispatch_menu_cmd(update, context, "predict")
+
+
+async def standings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/standings — 直接查看联赛排名 / Open league standings directly."""
+    await _dispatch_menu_cmd(update, context, "standings")
+
+
+async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/refresh — 清空缓存重新拉取 / Clear cache and refetch."""
+    await _dispatch_menu_cmd(update, context, "refresh")
+
+
+async def date_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/date YYYY-MM-DD — 查询指定日期的赛程 / fixtures on a given date."""
+    args = context.args or []
+    usage = "📆 请带上日期，例如：<code>/date 2026-10-10</code>"
+    if not args:
+        await update.effective_message.reply_text(usage, parse_mode="HTML")
+        return
+    try:
+        day = datetime.strptime(args[0].strip(), "%Y-%m-%d").date()
+    except ValueError:
+        await update.effective_message.reply_text(
+            f"❌ 日期格式不对（{esc(args[0])}），请用 YYYY-MM-DD，例如 /date 2026-10-10",
+            parse_mode="HTML",
+        )
+        return
+    context.user_data["fx_mode"] = MODE_DATE
+    context.user_data["fx_date"] = day
+    context.user_data["fx_page"] = 0
+    context.application.bot_data["fx_cache"] = None
+    await show_fixtures(_FakeUpdate(update), context, page=0)
+
+
+async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/next — 直接查看下一场比赛 / Show the next match directly."""
+    context.user_data["fx_mode"] = MODE_NEXT
+    context.user_data["fx_page"] = 0
+    context.application.bot_data["fx_cache"] = None
+    await _dispatch_menu_cmd(update, context, "fixtures")
+
+
+async def _dispatch_cmd_typing(update: Update) -> None:
+    """命令入口统一先发「正在输入」，让用户在等待时知道机器人已收到。
+
+    发送失败不影响主流程：这只是一个体验优化，不该让命令整体挂掉。
+    """
+    try:
+        await update.effective_chat.send_action(ChatAction.TYPING)
+    except Exception:
+        pass
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stats — 命中率统计（基于落盘到机器人存储的预测记录）。"""
+    s: Settings = context.application.bot_data["settings"]
+    if not is_admin(update, s):
+        return await deny(update)
+    service: PredictionService = context.application.bot_data["service"]
+    # 直接内联：不再依赖模块级辅助函数名解析，避免任何导入顺序/定义时机问题
+    try:
+        await update.effective_chat.send_action(ChatAction.TYPING)
+    except Exception:
+        pass
+    st = service.stats()
+    tz = s.timezone
+    rate = st["rate"]
+    lines = [
+        "📈 <b>预测命中率</b>",
+        f"已结算：<code>{st['total']}</code> 场 · 命中 <code>{st['hit']}</code> 场"
+        + (f" · 命中率 <code>{rate:.1%}</code>" if rate is not None else ""),
+        f"待结算：<code>{st['pending']}</code> 场",
+        f"存储：{'✅ 已落盘（重启不丢）' if st['persistent'] else '⚠️ 内存回退（重启会丢）'}",
+    ]
+    if st["total"] == 0:
+        lines += ["", "暂无已结算的预测，赛果会在比赛结束后自动同步。"]
+    else:
+        streak = st["streak"]
+        tail = f"连续命中 <code>{streak}</code>" if streak > 0 else (
+            f"连续未中 <code>{-streak}</code>" if streak < 0 else "")
+        if tail:
+            lines.append(tail)
+        if st["by_level"]:
+            lines += ["", "按信心等级："]
+            names = {"high": "🟢 高", "medium": "🟡 中", "low": "🔴 低", "unknown": "未知"}
+            for key in ("high", "medium", "low", "unknown"):
+                slot = st["by_level"].get(key)
+                if not slot:
+                    continue
+                r = slot["hit"] / slot["total"] if slot["total"] else 0
+                lines.append(f"│ {names.get(key, key)}：<code>{slot['hit']}/{slot['total']}</code>（{r:.0%}）")
     await update.effective_message.reply_text(
-        "📖 命令列表\n"
-        "/start  欢迎信息与推送时间\n"
-        "/help  显示本帮助\n"
-        "/test  立即生成并推送一次预测（管理员）\n"
-        "/status  运行状态与数据源诊断（管理员）\n\n"
-        "预测消息下方的按钮：预测 / 深度分析 / 历史交锋 / 赔率对比，点击后在原消息上切换；"
-        "「刷新赔率」会重新拉取最新赔率。"
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
     )
+
+
+async def storage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/storage — 存储自检：写入/读取/数据库/挂载/最后写入时间 五项。
+
+    核心用途：部署前跑一次，重新部署后再跑一次；
+    第二次若仍能看到第一次的标记文件及其时间，即证明 Volume 生效。
+    """
+    s: Settings = context.application.bot_data["settings"]
+    if not is_admin(update, s):
+        return await deny(update)
+    service: PredictionService = context.application.bot_data["service"]
+    # 直接内联：不再依赖模块级辅助函数名解析，避免任何导入顺序/定义时机问题
+    try:
+        await update.effective_chat.send_action(ChatAction.TYPING)
+    except Exception:
+        pass
+
+    probe = paths.probe_storage()
+    try:
+        tables = service.repo.tables()
+    except Exception:
+        tables = []
+    st = service.stats()
+
+    def mark(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
+    # 最后写入时间：数据库文件的 mtime，能直观看出数据是否真的落盘
+    last_write = "—"
+    try:
+        db_file = Path(service.repo.db_path)
+        if db_file.exists():
+            from datetime import datetime, timezone
+
+            mt = datetime.fromtimestamp(db_file.stat().st_mtime, timezone.utc)
+            last_write = BotUI.fmt_time(mt, s.timezone, "%m-%d %H:%M:%S")
+    except Exception:
+        pass
+
+    age = probe.get("age_seconds")
+    if age is None:
+        age_text = "—"
+    elif age < 60:
+        age_text = "刚刚写入（本次启动首次）"
+    elif age < 3600:
+        age_text = f"{int(age // 60)} 分钟前写入"
+    elif age < 86400:
+        age_text = f"{age / 3600:.1f} 小时前写入"
+    else:
+        age_text = f"{age / 86400:.1f} 天前写入"
+
+    mounted = probe["mounted"] and probe["age_seconds"] is not None and probe["age_seconds"] > 60
+    lines = [
+        "💾 <b>存储状态</b>",
+        f"数据目录：<code>{esc(paths.DATA_DIR)}</code>",
+        f"数据库：<code>{esc(service.repo.db_path)}</code>",
+        "",
+        f"{mark(probe['write'])} 写入测试：{'通过' if probe['write'] else '失败'}",
+        f"{mark(probe['read'])} 读取测试：{'通过（内容一致）' if probe['read'] else '失败'}",
+        f"{mark(bool(tables))} 数据库：<code>{esc(', '.join(tables) or '无表')}</code>",
+        f"{mark(mounted)} Volume 挂载：{'已生效（跨部署保留）' if mounted else '未确认——重新部署后再执行一次本命令'}",
+        f"🕑 标记文件：<code>{age_text}</code>",
+        f"🕑 最后写入：<code>{esc(last_write)}</code>",
+        "",
+        f"已预测：<code>{st['total'] + st['pending']}</code> 场 · 已结算 <code>{st['total']}</code> 场",
+    ]
+    if not probe["write"] or not probe["read"]:
+        lines += ["", "⚠️ 写入/读取失败，数据留在容器临时目录，<b>重新部署会丢失</b>。"]
+    elif not mounted:
+        lines += [
+            "",
+            "ℹ️ 首次执行属正常；请重新部署后再执行一次，若标记时间仍在即 Volume 生效。",
+            "未确认挂载前，预测与命中率数据<b>可能在重新部署后清空</b>。",
+        ]
+    await update.effective_message.reply_text(
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+    )
+
+
+async def web_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/web — 网页端入口 / Web app entry."""
+    await _dispatch_menu_cmd(update, context, "web")
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -240,10 +529,18 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
     try:
         tz = settings.timezone
         label = datetime.now(tz).strftime("%Y-%m-%d")
+        mode = context.user_data.get("fx_mode") or MODE_TODAY
+        target = context.user_data.get("fx_date")
         cache = app.bot_data.get("fx_cache")
-        if cache is None or cache.get("date") != label:
-            items = await service.get_today_fixtures()  # 失败会抛 APIError，错误不写入缓存
-            cache = {"date": label, "items": items}
+        ck = f"{label}|{mode}|{target}"
+        if cache is None or cache.get("date") != ck:
+            # 统一查询入口：区分「接口无数据」与「窗口内无比赛」
+            res = await service.query_fixtures(mode, target)
+            items = res["fixtures"]
+            cache = {"date": ck, "items": items, "status": res["status"],
+                     "note": res["note"], "season_range": res["season_range"],
+                     "error": res.get("error"),
+                     "day_label": res["day_label"], "mode": mode}
             app.bot_data["fx_cache"] = cache
         items = cache["items"]
     except APIError as exc:
@@ -254,7 +551,32 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
         text = f"❌ <b>获取今日赛程失败</b>\n{esc(describe_error(exc))}"
         markup = back_to_menu_markup()
     else:
-        text, markup, page, _ = ui.format_fixtures_page(items, tz, page, FX_PER_PAGE, label)
+        multi_day = bool(getattr(service, "using_upcoming", False))
+        day_label = cache.get("day_label") or getattr(service, "fixture_day_label", "") or label
+        text, markup, page, _ = ui.format_fixtures_page(
+            items, tz, page, FX_PER_PAGE, day_label, multi_day=multi_day,
+            empty_range=cache.get("season_range"),
+            empty_source_ok=cache.get("status") != ST_NO_DATA,
+        )
+        # 三态渲染：有数据不啰嗦；窗口无比赛给范围+下一步；接口无数据说清真实原因
+        note = cache.get("note")
+        if not items and note:
+            span = cache.get("season_range")
+            if cache.get("status") == ST_NO_DATA:
+                err = cache.get("error")
+                reason = esc(describe_error(err)) if err is not None else esc(note)
+                hint = ui.error_hint(err) if err is not None else ""
+                text = (
+                    "❌ <b>获取赛程失败</b>\n"
+                    f"{reason}\n\n{hint}"
+                )
+                markup = back_to_menu_markup()
+            else:
+                hint = ""
+                if span:
+                    hint = (f"\n\n📆 该赛季数据范围：<code>{span[0]}</code> ~ <code>{span[1]}</code>"
+                            f"\n可点「下一场」查看最近一场比赛。")
+                text = f"{text}\n\n{esc(note)}{hint}"
     finally:
         end_task(app.bot_data, user_id, "fixtures")
 
@@ -262,7 +584,7 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
     if query:
         await edit_view(query, text, markup)
     else:
-        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await reply_html(update.effective_message, text, markup)
 
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -273,9 +595,19 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """菜单按钮回调 / Inline menu callback."""
     query = update.callback_query
     _, _, key = (query.data or "").partition(":")
     await query.answer()
+    await on_menu_key(update, context, key)
+
+
+async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
+    """菜单业务分发：按钮回调与直接命令共用同一条路径（逻辑只写一份）。
+
+    Menu dispatcher shared by button callbacks and direct commands.
+    """
+    query = update.callback_query
     settings: Settings = context.application.bot_data["settings"]
     if key == "home":
         await edit_view(query, ui.format_menu(settings), ui.menu_keyboard())
@@ -286,12 +618,39 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show_fixtures(update, context, page=0)
     elif key == "help":
         await edit_view(query, ui.format_help(), ui.menu_keyboard())
+    elif key == "web":
+        await edit_view(query, ui.WEB_ENTRY_TEXT, ui.menu_keyboard())
     elif key == "standings":
         await show_standings(update, context)
     elif key == "analysis":
-        await show_fixtures(update, context, page=0)  # 深度分析要先选比赛
+        await show_fixtures(update, context, page=0)  # 深度分析要先选比赛 / pick a match first
+    elif key == "predict":
+        await show_fixtures(update, context, page=0)  # 比赛预测要先选比赛 / pick a match first
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
+
+
+async def on_fixtures_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """切换赛程查询模式：今日 / 未来 7 天 / 下一场。
+
+    Switch fixture query mode: today / upcoming / next.
+    """
+    query = update.callback_query
+    _, _, raw = (query.data or "").partition(":")
+    await query.answer()
+    if raw == "date":
+        # 指定日期需要参数，按钮无法携带，引导用命令输入
+        await query.edit_message_text(
+            "📆 查询指定日期，请发送命令并带上日期：\n"
+            "<code>/date 2026-10-10</code>",
+            parse_mode="HTML",
+        )
+        return
+    context.user_data["fx_mode"] = raw
+    context.user_data["fx_page"] = 0
+    # 清空缓存，强制按新模式重新查询（不同模式查询区间不同，不能复用）
+    context.application.bot_data["fx_cache"] = None
+    await show_fixtures(update, context, page=0)
 
 
 async def on_fixtures_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -336,7 +695,7 @@ async def show_standings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query:
         await edit_view(query, text, markup)
     else:
-        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await reply_html(update.effective_message, text, markup)
 
 
 async def on_analysis_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -407,7 +766,42 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         cache = app.bot_data.get("fx_cache")
         fixtures = cache["items"] if cache else None
-        if kind == "prob":
+        if kind == "schedule":
+            # 赛程总览图：用当前缓存的赛程，不针对单场比赛
+            if not fixtures:
+                await query.answer("暂无赛程数据，请先打开今日赛程", show_alert=True)
+                return
+            blob = chart.schedule_chart(
+                fixtures,
+                settings.timezone,
+                day_label=getattr(service, "fixture_day_label", "") or "",
+                source=service.source_label,
+            )
+            caption = f"📊 赛程分布 · 共 {len(fixtures)} 场"
+        elif kind == "ring":
+            try:
+                prediction = service.get(fixture_id)
+            except KeyError:
+                prediction = await service.predict_fixture(fixture_id, fixtures)
+            blob = chart.prob_ring(prediction, settings.timezone)
+            caption = f"🎯 胜平负概率环 · {esc(prediction.home)} vs {esc(prediction.away)}"
+        elif kind == "card":
+            try:
+                prediction = service.get(fixture_id)
+            except KeyError:
+                prediction = await service.predict_fixture(fixture_id, fixtures)
+            a = prediction.analysis or {}
+            lv = calculate_prediction_level({
+                "home_win": a.get("win_prob", 0), "draw": a.get("draw_prob", 0),
+                "away_win": a.get("loss_prob", 0),
+            })
+            blob = chart.match_card(
+                prediction, settings.timezone, lv,
+                league_name=league_label(settings.league_id),
+                source=service.source_label,
+            )
+            caption = f"🎴 比赛主卡 · {esc(prediction.home)} vs {esc(prediction.away)}"
+        elif kind == "prob":
             try:
                 prediction = service.get(fixture_id)
             except KeyError:
@@ -442,11 +836,12 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if blob is None:  # 数据不足：明确提示，不发误导性图片
         await query.answer("暂无足够数据生成该图表", show_alert=True)
         return
+    keyboard = None if kind == "schedule" else ui.chart_keyboard(fixture_id, kind)
     await query.message.reply_photo(
         photo=blob,
         caption=caption,
         parse_mode=ParseMode.HTML,
-        reply_markup=ui.chart_keyboard(fixture_id, kind),
+        reply_markup=keyboard,
     )
 
 
@@ -505,16 +900,19 @@ async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not key:
         return
     if key == "help":
-        await update.effective_message.reply_text(ui.format_help(), parse_mode=ParseMode.HTML)
+        await reply_html(update.effective_message, ui.format_help(), None)
+    elif key == "web":
+        await reply_html(update.effective_message, ui.WEB_ENTRY_TEXT, None)
     elif key == "refresh":
         context.application.bot_data["fx_cache"] = None
         await show_fixtures(update, context, page=0)
-    elif key == "fixtures" or key == "analysis":
+    elif key in ("fixtures", "analysis", "predict"):
+        # 这三个入口都需要先选一场比赛，统一落到赛程列表
         await show_fixtures(update, context, page=0)
     elif key == "standings":
         await show_standings(update, context)
     else:
-        await update.effective_message.reply_text(ui.format_coming(key), parse_mode=ParseMode.HTML)
+        await reply_html(update.effective_message, ui.format_coming(key), None)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -526,7 +924,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     service: PredictionService = app.bot_data["service"]
 
     jobs = app.job_queue.get_jobs_by_name(DAILY_JOB) if app.job_queue else []
-    next_run = jobs[0].next_t.astimezone(s.timezone).strftime("%m-%d %H:%M") if jobs and jobs[0].next_t else "未启用"
+    # apscheduler 3.x 属性名为 next_run_time（2.x 曾叫 next_t），兼容读取避免 AttributeError
+    _next = None
+    if jobs:
+        _next = getattr(jobs[0], "next_run_time", None) or getattr(jobs[0], "next_t", None)
+    next_run = _next.astimezone(s.timezone).strftime("%m-%d %H:%M") if _next else "未启用"
     version = (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]
     season_line = f"联赛/赛季：{s.league_id} / {s.season}"
     if s.season != s.expected_season:
@@ -542,19 +944,32 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"下次推送：{next_run}",
         f"CHAT_ID：{'已配置' if s.chat_id else '未配置'}",
         f"内存中的预测：{service.cached_predictions} 场",
+        f"存储：{paths.summary()}",
         f"数据源渠道：{'官方直连 (API-Sports)' if s.api_provider == 'apisports' else 'RapidAPI'}",
         f"数据源：{getattr(api, 'source_label', 'API-Football')}"
         + ("（备用源生效中）" if getattr(api, 'using_fallback', False) else ""),
         f"备用源 football-data.org：{'已配置' if s.football_data_available else '未配置'}",
     ]
+    # 备用源实测：真实请求一次，把结果/原因显示出来，便于管理员自查账号与套餐
+    if s.football_data_available and getattr(api, "fallback", None):
+        try:
+            probe = await api.fallback.probe(s.league_id)
+            if probe.get("ok"):
+                lines.append(f"备用源实测：✅ {probe['competition']} 共 {probe['count']} 场")
+            else:
+                lines.append(f"备用源实测：❌ {probe.get('count', 0)} 场｜{probe.get('raw') or probe.get('detail') or '无数据'}")
+        except Exception as exc:  # 诊断失败不影响状态页
+            lines.append(f"备用源实测：⚠️ {describe_error(exc)}")
     try:
         account = await api.get_account_status()
         sub, req = account.get("subscription") or {}, account.get("requests") or {}
         lines.append(f"套餐：{sub.get('plan', '未知')}（{'有效' if sub.get('active') else '未激活或未知'}）")
         lines.append(f"今日请求：{req.get('current', '?')} / {req.get('limit_day', '?')}")
         lines.append("数据源连通：✅")
-    except APIError as exc:
-        lines.append(f"数据源连通：❌ {exc}")
+    except Exception as exc:
+        # DataSourceError / 网络异常同样要吞掉：状态页是管理员自查入口，
+        # 数据源不可用时仍应显示版本与配置，否则连版本号都看不到。
+        lines.append(f"数据源连通：❌ {describe_error(exc)}")
     await update.effective_message.reply_text("\n".join(lines))
 
 
@@ -570,9 +985,31 @@ def render_view(action: str, p: Prediction, settings: Settings, h2h: list[dict] 
     return ui.format_prediction(p, tz)
 
 
+async def reply_html(message, text: str, markup) -> None:
+    """发送 HTML 消息：统一加无链接预览，超长时拆分（后续块不带键盘）。"""
+    blocks = split_html_blocks(text)
+    for idx, block in enumerate(blocks):
+        await message.reply_text(
+            block,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup if idx == len(blocks) - 1 else None,
+            disable_web_page_preview=True,
+        )
+
+
 async def edit_view(query, text: str, keyboard: InlineKeyboardMarkup) -> None:
+    """就地编辑上一条消息。文本过长时按行拆分，只编辑第一块（其余省略并记录日志）。"""
+    blocks = split_html_blocks(text)
+    if len(blocks) > 1:
+        log.warning("消息过长（%d 字符），已拆分为 %d 块，仅展示第一块", len(text), len(blocks))
+        text = blocks[0] + "\n\n…（内容过长，已省略部分）"
     try:
-        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await query.edit_message_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
     except BadRequest as exc:
         if "not modified" not in str(exc).lower():  # 点击的正是当前页面时 Telegram 会报这个，忽略即可
             raise
@@ -620,17 +1057,17 @@ async def post_init(app: Application) -> None:
         log.info("备用数据源 football-data.org 未配置或未启用，仅使用主数据源")
     api = DataSourceRouter(api, fallback, mode=settings.data_source_mode)
     app.bot_data["api"] = api
-    app.bot_data["service"] = PredictionService(settings, api, MatchAnalyzer())
+    service = PredictionService(settings, api, MatchAnalyzer())
+    app.bot_data["service"] = service
+    # 启动同步：先把未来 30 天赛程拉到本地库，机器人起来就有数据可展示
     try:
-        await app.bot.set_my_commands(
-            [
-                BotCommand("start", "欢迎信息与推送时间"),
-                BotCommand("menu", "打开功能菜单"),
-                BotCommand("help", "命令说明"),
-                BotCommand("test", "立即推送一次预测（管理员）"),
-                BotCommand("status", "运行状态与数据源诊断（管理员）"),
-            ]
-        )
+        first = await service.sync.run_startup()
+        log.info("启动同步：收到 %d 场，保存 %d 场（本地库共 %d 场）",
+                 first.get("received", 0), first.get("saved", 0), service.repo.matches_count())
+    except Exception as exc:  # 启动同步失败也要让机器人正常起来
+        log.warning("启动同步失败（将按需回源）：%s", exc)
+    try:
+        await app.bot.set_my_commands([BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS])
     except TelegramError as exc:
         log.warning("设置命令菜单失败：%s", exc)
 
@@ -657,11 +1094,22 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    # 直接命令：与菜单按钮共用同一套业务逻辑 / Direct commands reuse menu logic
+    app.add_handler(CommandHandler("fixtures", fixtures_cmd))
+    app.add_handler(CommandHandler("predict", predict_cmd))
+    app.add_handler(CommandHandler("standings", standings_cmd))
+    app.add_handler(CommandHandler("refresh", refresh_cmd))
+    app.add_handler(CommandHandler("web", web_cmd))
+    app.add_handler(CommandHandler("next", next_cmd))
+    app.add_handler(CommandHandler("date", date_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("storage", storage_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
-    app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\\d+$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_mode, pattern=r"^fxm:(today|upcoming|next|date)$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
     app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:.+$"))
-    app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|form|goals|h2h):.+$"))
+    app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|ring|card|form|goals|h2h|schedule):.+$"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):.+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
@@ -669,8 +1117,14 @@ def build_application(settings: Settings) -> Application:
 
     if app.job_queue is None:
         raise RuntimeError('缺少定时任务依赖，请安装 "python-telegram-bot[job-queue]"')
+    # 赛程同步：每 6 小时把未来赛程与最近赛果拉到本地库，
+    # 让 Telegram 命令只读 SQLite，不依赖外部接口
+    app.job_queue.run_repeating(sync_job, interval=SYNC_INTERVAL_HOURS * 3600,
+                                first=10, name=SYNC_JOB)
     if settings.chat_id:
         app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
+        # 每 6 小时同步一次赛果，保证命中率统计能及时更新
+        app.job_queue.run_repeating(settle_job, interval=6 * 3600, first=300, name=SETTLE_JOB)
     else:
         log.warning("未设置 CHAT_ID：定时推送已停用（仍可使用命令）")
     return app
@@ -693,6 +1147,13 @@ def main() -> None:
         len(settings.admin_ids),
     )
     app = build_application(settings)
+    # 若 Telegram 端残留 Webhook，getUpdates 会立刻 409 并让进程退出（表现为启动几秒即停）。
+    # 启动时先主动清除，确保走长轮询；失败也不阻塞，交由后续轮询逻辑处理。
+    try:
+        asyncio.run(app.bot.delete_webhook(drop_pending_updates=True))
+        log.info("已清理残留 Webhook，使用长轮询接收更新")
+    except Exception as exc:  # 清理失败不应中断启动
+        log.warning("清理 Webhook 失败（继续尝试轮询）：%s", exc)
     app.run_polling(drop_pending_updates=True, allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY])
 
 

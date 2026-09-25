@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -23,6 +23,13 @@ import httpx
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.football-data.org/v4"
+
+
+def resolve_base_url() -> str:
+    """基础地址：允许用 FOOTBALL_DATA_BASE_URL 覆盖（自代理 / 测试用）。"""
+    import os
+
+    return (os.getenv("FOOTBALL_DATA_BASE_URL") or BASE_URL).strip().rstrip("/") or BASE_URL
 
 # 缓存时长（秒）：免费层 10 次/分钟，必须缓存
 TTL_MATCHES = 10 * 60  # 今日赛程
@@ -46,6 +53,12 @@ LEAGUE_ID_TO_CODE: dict[int, str] = {
     71: "BSA",  # 巴甲
     1: "WC",  # 世界杯
     4: "EC",  # 欧洲杯
+}
+
+# competition code → football-data.org 的竞赛 id（全局 /v4/matches 端点过滤用）
+CODE_TO_ID: dict[str, int] = {
+    "PL": 2021, "PD": 2014, "BL1": 2002, "SA": 2019, "FL1": 2015, "CL": 2001,
+    "DED": 2003, "PPL": 2017, "ELC": 2016, "BSA": 2013, "WC": 2000, "EC": 2018,
 }
 
 # football-data.org 状态 → API-Football 的 status.short
@@ -94,11 +107,14 @@ class FootballDataAPI:
     ) -> None:
         self.token = api_token
         self._headers = {"X-Auth-Token": api_token}
-        self._base_url = (base_url or BASE_URL).rstrip("/")
+        self._base_url = (base_url or resolve_base_url()).rstrip("/")
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
         self._cache: dict[tuple, tuple[float, Any]] = {}
+        self.last_note: str | None = None           # 数据被回退展示时的说明 / note when shifted
+        self.last_shifted_date: date | None = None  # 实际展示的比赛日 / actually shown matchday
+        self.season_range: tuple[date, date] | None = None  # 赛季最早/最晚比赛日 / season span
         self.source = "football-data"
 
     @property
@@ -257,14 +273,121 @@ class FootballDataAPI:
         return list(by_team.values())
 
     # ---- 对外接口（与 FootballAPI 同名，便于统一调度） ----------------------------
+    @staticmethod
+    def _match_date(m: dict) -> date | None:
+        """取出比赛的 UTC 日期（无有效时间时返回 None）。"""
+        raw = m.get("utcDate") or ""
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        except (ValueError, AttributeError):
+            return None
+
+    def _record_season_range(self, matches: list[dict]) -> None:
+        """记录该赛季最早与最晚的比赛日，便于排查「窗口内为何 0 场」。
+
+        Records the earliest/latest matchday of the season — helps diagnose
+        why a requested window returned nothing.
+        """
+        days = sorted({d for d in (self._match_date(m) for m in matches) if d})
+        if days:
+            self.season_range = (days[0], days[-1])
+
+    def _nearest_matchday(self, matches: list[dict], target: date) -> date | None:
+        """从整季赛程里找出离 target 最近的一个比赛日（优先取不早于 target 的）。"""
+        days = sorted({d for d in (self._match_date(m) for m in matches) if d})
+        if not days:
+            return None
+        after = [d for d in days if d >= target]
+        return after[0] if after else days[-1]  # 有未来场次取最近一场，否则取最后一场
+
+    @staticmethod
+    def _in_range(m: dict, date_from: date, date_to: date) -> bool:
+        """本地按开赛日期过滤（用于「不带日期参数」拉取全量赛程后的筛选）。"""
+        raw = m.get("utcDate") or ""
+        if not raw:
+            return False
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return date_from <= dt.date() <= date_to
     async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict]:
         code = _code_for(league_id)
         params = {"dateFrom": date_from.isoformat(), "dateTo": date_to.isoformat()}
         payload = await self._get(f"competitions/{code}/matches", params, ttl=TTL_MATCHES)
         matches = payload.get("matches") or []
+
+        if not matches:
+            # 免费层对部分竞赛的 dateFrom/dateTo 组合会返回空列表，
+            # 退回全局赛程端点 /v4/matches 再按竞赛过滤，避免误判为「没有比赛」。
+            log.info("备用源联赛端点返回空，改用全局端点 /v4/matches 重试（竞赛 %s）", code)
+            payload = await self._get("matches", params, ttl=TTL_MATCHES)
+            all_matches = payload.get("matches") or []
+            wanted_id = CODE_TO_ID.get(code)
+            matches = [
+                m for m in all_matches
+                if ((m.get("competition") or {}).get("code")) == code
+                or (wanted_id and ((m.get("competition") or {}).get("id")) == wanted_id)
+            ]
+            log.info("全局端点共 %d 场，过滤后 %d 场", len(all_matches), len(matches))
+
+        if not matches:
+            # 第三级兜底：部分免费层账号的 dateFrom/dateTo 过滤会返回空，
+            # 改为拉取该竞赛整季赛程（不带日期参数），再在本地按日期筛选。
+            log.info("备用源带日期过滤仍为空，改用不带日期参数拉取整季赛程（竞赛 %s）", code)
+            payload = await self._get(f"competitions/{code}/matches", {}, ttl=TTL_MATCHES)
+            season_matches = payload.get("matches") or []
+            self._record_season_range(season_matches)
+            matches = [m for m in season_matches if self._in_range(m, date_from, date_to)]
+            log.info("整季赛程共 %d 场，按 %s ~ %s 本地过滤后 %d 场",
+                     len(season_matches), date_from, date_to, len(matches))
+
+            if not matches and season_matches:
+                # 窗口内确实没有比赛（多为赛季尚未开始或已结束）。
+                # 不伪造数据，而是定位这批真实数据里「离请求窗口最近的一个比赛日」，
+                # 由上层明确标注日期后展示，总比一句「暂无赛程」更有用。
+                nearest = self._nearest_matchday(season_matches, date_from)
+                if nearest is not None:
+                    matches = [
+                        m for m in season_matches
+                        if self._match_date(m) == nearest
+                    ]
+                    self.last_note = (
+                        f"请求区间 {date_from} ~ {date_to} 内该联赛没有比赛，"
+                        f"以下展示数据源中最近的比赛日 {nearest}（真实数据，非预测）"
+                    )
+                    self.last_shifted_date = nearest
+                    log.info("窗口内无比赛，回退展示最近比赛日 %s（%d 场）",
+                             nearest, len(matches))
+
         if not matches:
             return []
         return [self._to_fixture(m, league_id, season) for m in matches]
+
+    async def probe(self, league_id: int) -> dict:
+        """连通性诊断：真实请求一次备用源，返回状态/条数/原始片段，供 /status 展示。
+
+        不抛异常（除网络层外的问题也一律转成文本），便于管理员自查账号与套餐。
+        """
+        code = _code_for(league_id)
+        result: dict[str, Any] = {"code": code}
+        try:
+            payload = await self._request(f"competitions/{code}/matches", {})
+        except Exception as exc:  # 诊断不能影响主流程
+            result.update(ok=False, detail=f"{type(exc).__name__}: {exc}")
+            return result
+        matches = (payload or {}).get("matches") or []
+        self._record_season_range(matches)
+        result.update(
+            ok=bool(matches),
+            count=len(matches),
+            competition=((payload or {}).get("competition") or {}).get("name", "-"),
+            season_range=self.season_range,
+        )
+        if not matches:
+            # 返回空时把原始响应片段带出来，便于判断是账号限制还是真的没数据
+            result["raw"] = str(payload)[:200]
+        return result
 
     async def get_standings(self, league_id: int, season: int) -> list[dict]:
         code = _code_for(league_id)

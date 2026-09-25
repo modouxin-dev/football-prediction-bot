@@ -11,6 +11,7 @@ from telegram.error import BadRequest
 import main
 from api_client import APIError
 from config import load_settings
+from data_source import DataSourceError
 from service import PredictionService
 from tests.sample_data import NOW, FakeAPI, default_fixtures
 
@@ -42,7 +43,7 @@ class FakeQuery:
     async def answer(self, text=None, show_alert=False):
         self.answers.append((text, show_alert))
 
-    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None, **kwargs):
         if self.edit_error:
             raise self.edit_error
         self.edits.append((text, parse_mode, reply_markup))
@@ -169,7 +170,28 @@ def test_status_surfaces_data_source_errors():
     app, _, _ = make_app(NoAccess({2026: []}))
     update, msg = command_update()
     run(main.status_cmd(update, SimpleNamespace(application=app)))
-    assert "数据源连通：❌ HTTP 403" in msg.replies[-1]
+    # 状态页对任何数据源异常都要给出结论，不得整体崩溃（含 DataSourceError）
+    assert "数据源连通：❌" in msg.replies[-1]
+    assert "HTTP 403" in msg.replies[-1]
+
+
+def test_status_survives_non_api_errors():
+    """数据源抛 DataSourceError（非 APIError）时，/status 仍要渲染出版本号与存储状态。
+
+    曾发生：get_account_status 只捕获 APIError，主备源皆不可用时抛 DataSourceError
+    导致整个状态页崩溃，管理员连版本号都看不到。
+    """
+
+    class NoSource(FakeAPI):
+        async def get_account_status(self):
+            raise DataSourceError("未配置可用的数据源。")
+
+    app, _, _ = make_app(NoSource({2026: []}))
+    update, msg = command_update()
+    run(main.status_cmd(update, SimpleNamespace(application=app)))
+    text = msg.replies[-1]
+    assert "运行状态" in text and "版本：" in text
+    assert "数据源连通：❌" in text
 
 
 def test_is_admin():

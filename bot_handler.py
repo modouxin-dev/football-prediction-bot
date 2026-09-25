@@ -6,10 +6,89 @@ from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from analyzer import OUTCOMES, overround
+from analyzer import OUTCOMES, calculate_prediction_level, overround
 from service import MODEL_VERSION, parse_kickoff
 
 SEP = "━━━━━━━━━━━━━━━━━━"
+THIN_SEP = "──────────────────"  # 次级分隔：用于分区内部，避免主分隔线过度重复
+BULLET = "▸"  # 列表符号
+
+# 联赛 ID → 中文名称（仅用于展示；未知 ID 直接显示数字，不猜测）
+# 品牌名 / Brand name（与 chart.BRAND_* 保持一致，头图与文案共用）
+BRAND_EN = "FOOTBALL INSIGHT"
+BRAND_CN = "Football Insight"
+
+LEAGUE_NAMES = {
+    39: "英格兰超级联赛",
+    140: "西班牙甲级联赛",
+    78: "德国甲级联赛",
+    135: "意大利甲级联赛",
+    61: "法国甲级联赛",
+    2: "欧洲冠军联赛",
+    88: "荷兰甲级联赛",
+    94: "葡萄牙超级联赛",
+    40: "英格兰冠军联赛",
+    71: "巴西甲级联赛",
+    1: "国际足联世界杯",
+    4: "欧洲足球锦标赛",
+}
+
+
+# 队名中英对照表 / Team name mapping (CN ↔ EN)
+# 说明 / Note: football-data.org 与 API-Football 返回的球队名均为英文原文，
+# 这里按官方名建立中文对照，供界面双语展示。未收录的球队只显示英文原名。
+# 队名中英对照表 / Team name mapping (CN ↔ EN)
+TEAM_NAMES: dict[str, str] = {
+    # 英超 / Premier League
+    "Manchester City FC": "曼城", "Liverpool FC": "利物浦", "Arsenal FC": "阿森纳",
+    "Manchester United FC": "曼联", "Chelsea FC": "切尔西", "Tottenham Hotspur FC": "托特纳姆热刺",
+    "Newcastle United FC": "纽卡斯尔联", "Brighton & Hove Albion FC": "布莱顿",
+    "Aston Villa FC": "阿斯顿维拉", "West Ham United FC": "西汉姆联",
+    "Crystal Palace FC": "水晶宫", "Everton FC": "埃弗顿", "Fulham FC": "富勒姆",
+    "Brentford FC": "布伦特福德", "Nottingham Forest FC": "诺丁汉森林",
+    "AFC Bournemouth": "伯恩茅斯", "Wolverhampton Wanderers FC": "狼队",
+    "Leeds United FC": "利兹联", "Sunderland AFC": "桑德兰", "Burnley FC": "伯恩利",
+    # 西甲 / La Liga
+    "Real Madrid CF": "皇家马德里", "FC Barcelona": "巴塞罗那",
+    "Club Atlético de Madrid": "马德里竞技", "Sevilla FC": "塞维利亚",
+    "Real Betis Balompié": "皇家贝蒂斯", "Valencia CF": "瓦伦西亚",
+    "Villarreal CF": "比利亚雷亚尔", "Athletic Club": "毕尔巴鄂竞技",
+    "Real Sociedad de Fútbol": "皇家社会", "RC Celta de Vigo": "塞尔塔",
+    # 德甲 / Bundesliga
+    "FC Bayern München": "拜仁慕尼黑", "Borussia Dortmund": "多特蒙德",
+    "RB Leipzig": "莱比锡红牛", "Bayer 04 Leverkusen": "勒沃库森",
+    "Eintracht Frankfurt": "法兰克福", "VfB Stuttgart": "斯图加特",
+    "Borussia Mönchengladbach": "门兴格拉德巴赫", "VfL Wolfsburg": "沃尔夫斯堡",
+    # 意甲 / Serie A
+    "Juventus FC": "尤文图斯", "FC Internazionale Milano": "国际米兰",
+    "AC Milan": "AC米兰", "SSC Napoli": "那不勒斯", "AS Roma": "罗马",
+    "SS Lazio": "拉齐奥", "Atalanta BC": "亚特兰大", "ACF Fiorentina": "佛罗伦萨",
+    # 法甲 / Ligue 1
+    "Paris Saint-Germain FC": "巴黎圣日耳曼", "Olympique de Marseille": "马赛",
+    "Olympique Lyonnais": "里昂", "AS Monaco FC": "摩纳哥", "LOSC Lille": "里尔",
+}
+
+
+def team_name(raw: str | None, bilingual: bool = True) -> str:
+    """队名展示 / Display team name.
+
+    双语模式返回「中文名 (English)」，未收录时只返回英文原名，绝不猜测或编造。
+    Bilingual mode returns "中文 (English)"; unknown teams fall back to the
+    original English name — never guessed or fabricated.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "?"
+    cn = TEAM_NAMES.get(raw)
+    if not cn or not bilingual:
+        return raw
+    return f"{cn} ({raw})"
+
+
+def league_label(league_id: int) -> str:
+    """展示用联赛名：已知 ID 显示中文名 + ID，未知则只显示 ID。"""
+    name = LEAGUE_NAMES.get(int(league_id))
+    return f"{name} · {league_id}" if name else f"联赛 {league_id}"
 OUTCOME_LABEL = {"home": "主胜", "draw": "平局", "away": "客胜"}
 DISCLAIMER = "⚠️ 模型仅基于进球数据估算，不构成投注建议。"
 VALUE_FLAG = 0.05  # 价值偏差超过此值时打 🚀 标记
@@ -27,6 +106,7 @@ MENU_ITEMS = (
     ("standings", "🏆 联赛排名"),
     ("refresh", "🔄 刷新数据"),
     ("help", "ℹ️ 使用帮助"),
+    ("web", "🌐 网页端"),
 )
 
 # API-Football 的比赛状态缩写 → 中文
@@ -52,6 +132,61 @@ STATUS_TEXT = {
 }
 
 NO_DATA = "暂无可靠数据，不参与本次分析（缺什么就说明缺什么，不做填充）。"
+
+
+def build_prediction_payload(p, tz) -> dict:
+    """统一预测结果数据结构（供格式化与未来的网页端复用）。"""
+    a = p.analysis
+    probabilities = {
+        "home_team": team_name(p.home),
+        "away_team": team_name(p.away),
+        "home_win": float(a["win_prob"]),
+        "draw": float(a["draw_prob"]),
+        "away_win": float(a["loss_prob"]),
+    }
+    level = calculate_prediction_level(probabilities)
+    probabilities.update(
+        {
+            "result": level["result"],
+            "level_key": level["key"],
+            "level_name": level["name"],
+            "level_emoji": level["emoji"],
+            "source": p.source,
+            "season": p.season,
+            "kickoff": BotUI.fmt_time(p.kickoff, tz),
+        }
+    )
+    return probabilities
+
+
+def split_html_blocks(text: str, limit: int = 3500) -> list[str]:
+    """按行拆分超长 HTML 文本，避免超过 Telegram 单条 4096 字符限制。
+
+    整段 <code>/<b> 标签不会被拆断（按行切分已足够安全，因为标签不跨行）。
+    """
+    if len(text) <= limit:
+        return [text]
+    blocks, current = [], ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > limit:
+            blocks.append(current.rstrip())
+            current = line + "\n"
+        else:
+            current += line + "\n"
+    if current.strip():
+        blocks.append(current.rstrip())
+    return blocks
+
+
+_WEB_ENTRY_TEXT = (
+    "🌐 <b>网页端</b>\n\n"
+    "网页查询界面正在规划中，当前阶段以 Telegram 机器人的数据稳定性为主。\n\n"
+    "开放后将支持：\n"
+    "· 在浏览器里查看今日赛程与预测\n"
+    "· 查询历史预测与命中情况\n"
+    "· 多联赛切换\n\n"
+    "目前请继续使用下方菜单功能。"
+)
 
 
 def _is_fallback(p) -> bool:
@@ -186,6 +321,9 @@ def bar(prob: float, width: int = 10) -> str:
 
 
 class BotUI:
+    # 网页端入口文案：main.py 通过 ui.WEB_ENTRY_TEXT 调用，必须是类属性
+    WEB_ENTRY_TEXT = _WEB_ENTRY_TEXT
+
     # ---- 通用 -----------------------------------------------------------------
     @staticmethod
     def tz_label(tz, when: datetime | None = None) -> str:
@@ -201,7 +339,7 @@ class BotUI:
     def matchup(p, tz) -> str:
         """详情页顶部的一行比赛信息。"""
         return (
-            f"🏠 <b>{esc(p.home)}</b> 🆚 <b>{esc(p.away)}</b> ✈️\n"
+            f"🏠 <b>{esc(team_name(p.home))}</b> 🆚 <b>{esc(team_name(p.away))}</b> ✈️\n"
             f"🕐 <code>{BotUI.fmt_time(p.kickoff, tz)}</code> ({BotUI.tz_label(tz, p.kickoff)})"
         )
 
@@ -231,9 +369,9 @@ class BotUI:
         lines = [
             title,
             SEP,
-            f"🏠 <b>{esc(p.home)}</b>",
+            f"🏠 <b>{esc(team_name(p.home))}</b>",
             "      🆚",
-            f"✈️ <b>{esc(p.away)}</b>",
+            f"✈️ <b>{esc(team_name(p.away))}</b>",
             when,
             SEP,
             "📈 <b>胜平负概率</b>",
@@ -245,6 +383,14 @@ class BotUI:
             SEP,
             f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code> · 预期比分 <code>{a['best_score']}</code>",
         ]
+        # 数据不足：必须明确告知结论不可信，不能与正常预测同等呈现
+        if getattr(p, "insufficient", False):
+            lines += [
+                SEP,
+                "⚠️ <b>数据不足</b>",
+                "积分榜中未包含这两支球队，",
+                "当前概率仅基于联赛平均水平估算，<b>不代表双方真实实力</b>。",
+            ]
         if _is_fallback(p):
             lines.append("ℹ️ 当前为备用数据源，仅提供基础比赛数据，赔率等高级统计不可用。")
         if p.best:
@@ -286,17 +432,24 @@ class BotUI:
     # ---- 视图：单场预测卡片（菜单/赛程入口） ----------------------------------------
     @staticmethod
     def confidence_text(p) -> str:
-        """置信度：高 / 中 / 低，并说明依据。"""
+        """模型信心等级：🟢 高 / 🟡 中 / 🔴 低，只由概率计算。
+
+        概率本身已经反映了数据完整性，因此不再叠加人工规则；
+        仅在完全无球队数据时额外说明原因。
+        """
+        level = calculate_prediction_level(
+            {
+                "home_win": p.analysis["win_prob"],
+                "draw": p.analysis["draw_prob"],
+                "away_win": p.analysis["loss_prob"],
+            }
+        )
+        text = f"{level['emoji']} {level['name']}"
         if not p.has_team_data:
-            return "低（缺少球队数据，仅按联赛平均估算）"
-        top = max(p.analysis["win_prob"], p.analysis["draw_prob"], p.analysis["loss_prob"])
-        if p.low_sample:
-            return "低（近期样本不足）"
-        if top >= 0.6:
-            return "高"
-        if top >= 0.45:
-            return "中"
-        return "低（三项概率接近）"
+            text += "（缺少球队数据，仅按联赛平均估算）"
+        elif p.low_sample:
+            text += "（近期样本不足）"
+        return text
 
     @staticmethod
     def risk_lines(p) -> list[str]:
@@ -314,62 +467,137 @@ class BotUI:
         return lines
 
     @staticmethod
-    def format_prediction_card(p, tz, model_version: str = MODEL_VERSION) -> str:
-        """完整预测卡片：包含时间、模型版本、数据更新时间、置信度、完整性与风险提示。"""
+    # 概率条：用方块横向条，不用特殊符号堆叠
+    @staticmethod
+    def _hbar(prob: float, width: int = 10) -> str:
+        filled = max(0, min(width, round(prob * width)))
+        return "█" * filled + "░" * (width - filled)
+
+    @classmethod
+    def format_prediction_card(cls, p, tz, model_version: str = MODEL_VERSION) -> str:
+        """预测主卡：少文字 + 大结论 + 数据卡片。
+
+        结构固定为四段：顶部看比赛 → 中部看预测 → 下部看依据 → 底部小字来源。
+        详细数据（近期战绩、预期进球）集中在「核心数据」，避免正文塞满。
+        """
         a = p.analysis
         probs = (("主胜", a["win_prob"]), ("平局", a["draw_prob"]), ("客胜", a["loss_prob"]))
         top_label, top_prob = max(probs, key=lambda kv: kv[1])
+        home, away = esc(team_name(p.home)), esc(team_name(p.away))
+        level = p.level
+
+        # 大结论：不败 / 单一结果，比「最可能结果」更接近用户直觉
+        if top_label == "主胜":
+            verdict = f"{home}不败" if top_prob + a["draw_prob"] >= 0.7 else "主胜"
+        elif top_label == "客胜":
+            verdict = f"{away}不败" if top_prob + a["draw_prob"] >= 0.7 else "客胜"
+        else:
+            verdict = "平局"
+
+        # 数据可信度： GOOD / FAIR / POOR，一眼看出结论能不能信
+        if getattr(p, "insufficient", False):
+            quality = "POOR"
+        elif p.low_sample:
+            quality = "FAIR"
+        else:
+            quality = "GOOD"
 
         lines = [
-            "⚽ <b>比赛预测</b>",
-            f"🏠 <b>{esc(p.home)}</b> 🆚 <b>{esc(p.away)}</b> ✈️",
-            f"🕐 比赛时间：<code>{BotUI.fmt_time(p.kickoff, tz)}</code>（{BotUI.tz_label(tz, p.kickoff)}）",
+            "<b>⚽ FOOTBALL INSIGHT</b>",
+            f"<code>{esc(p.league)} · {BotUI.fmt_time(p.kickoff, tz, '%Y-%m-%d %H:%M')}</code>",
+            "",
+            f"<b>{home}</b>  <code>VS</code>  <b>{away}</b>",
+            "",
             SEP,
-            "📈 <b>预测概率</b>",
+            "<b>🔮 比赛预测</b>",
+            "",
         ]
         for label, prob in probs:
-            mark = " <b>← 最可能</b>" if label == top_label else ""
-            lines.append(f"{label} <code>{bar(prob)}</code> <b>{prob:.1%}</b>{mark}")
+            lines.append(f"{label}　<b>{prob:.0%}</b>  {cls._hbar(prob)}")
         lines += [
-            SEP,
-            f"🎯 <b>最可能结果</b>：{esc(top_label)}（{top_prob:.1%}）· 最可能比分 <code>{esc(a['best_score'])}</code>",
-            f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>",
-            f"💎 <b>置信度</b>：{esc(BotUI.confidence_text(p))}",
-            f"🧩 <b>数据完整性</b>：{esc(p.data_completeness)}"
-            + ("" if p.has_team_data else "（未使用球队实际数据）"),
-            f"🛰 <b>数据源</b>：<code>{esc(getattr(p, 'source', 'API-Football'))}</code>",
-            f"🤖 <b>模型版本</b>：<code>{esc(model_version)}</code>",
-            f"🕑 <b>数据更新时间</b>：<code>{BotUI.fmt_time(p.created_at, tz, '%Y-%m-%d %H:%M:%S')}</code>"
-            f"（{BotUI.tz_label(tz, p.created_at)}）",
+            "",
+            f"预测结果：<b>{verdict}</b>",
+            f"预计比分：<b>{esc(a['best_score'])}</b>",
+            f"信心等级：<b>{level['emoji']} {level['name']}</b>",
         ]
-        if _is_fallback(p):
-            lines.append("ℹ️ 当前为备用数据源，仅提供基础比赛数据，赔率等高级统计不可用。")
-        if p.best:
-            key, o = p.best
-            lines.append(
-                f"💰 赔率 <code>{p.odds['home']:.2f} | {p.odds['draw']:.2f} | {p.odds['away']:.2f}</code>"
-                f" · 价值偏差 {OUTCOME_LABEL[key]} <code>{o['edge']:+.2%}</code>"
+
+        # 核心数据：详细指标集中在此，正文不再堆砌
+        core = [SEP, "", "<b>📊 核心数据</b>", ""]
+        core.append(f"预期进球：<b>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</b>")
+        if p.has_team_data:
+            core.append(
+                f"攻防强度：<b>主 {p.home_strength.attack_home:.2f} / 客 {p.away_strength.attack_away:.2f}</b>"
             )
-        lines += [SEP, *BotUI.risk_lines(p), SEP, DISCLAIMER]
+        core.append(f"数据完整性：<b>{esc(p.data_completeness)}</b>")
+        lines += core
+
+        # 模型分析：结论式短句，不做长篇说明
+        notes = cls._model_notes(p, home, away, verdict)
+        if notes:
+            lines += [SEP, "", "<b>📝 模型分析</b>", ""]
+            lines += [f"• {n}" for n in notes]
+
+        # 脚注：来源/赛季/模型版本/更新时间一律小字，不占正文篇幅
+        lines += [
+            "",
+            f"<code>DATA QUALITY: {quality} · SOURCE: {esc(getattr(p, 'source', 'API-Football'))}"
+            f" · SEASON: {esc(p.season or '未知')}</code>",
+            f"<code>MODEL: {esc(model_version)} · UPDATED: "
+            f"{BotUI.fmt_time(p.created_at, tz, '%H:%M')} UTC+8</code>",
+        ]
+
+        # 数据不足：必须明确告知结论不可信，不能与正常预测同等呈现
+        if getattr(p, "insufficient", False):
+            lines += [
+                SEP,
+                "⚠️ <b>数据不足</b>：积分榜未包含这两支球队，",
+                "当前概率仅基于联赛平均估算，<b>不代表双方真实实力</b>。",
+            ]
+        if _is_fallback(p):
+            lines.append("ℹ️ 备用数据源：仅基础比赛数据，赔率等高级统计不可用。")
+        lines += ["", DISCLAIMER]
         return "\n".join(lines)
 
     @staticmethod
+    def _model_notes(p, home: str, away: str, verdict: str) -> list[str]:
+        """模型分析短句：每条结论都对应真实数据，缺数据时不编造。"""
+        notes: list[str] = []
+        if not p.has_team_data:
+            notes.append("缺少两队实际数据，结论参考价值有限")
+            return notes
+        hs, as_ = p.home_strength, p.away_strength
+        if hs.attack_home >= as_.attack_away:
+            notes.append(f"{home}近期进攻状态更稳定")
+        else:
+            notes.append(f"{away}近期进攻状态更稳定")
+        if as_.defense_away > hs.defense_home:
+            notes.append(f"{away}客场防守存在波动")
+        else:
+            notes.append(f"{home}主场防守更稳固")
+        notes.append(f"综合数据倾向：{verdict}")
+        return notes
+
+    @staticmethod
     def prediction_keyboard(fixture_id: int) -> InlineKeyboardMarkup:
-        """预测卡片下方：复用现有 4 个标签页（可继续看深度分析/交锋/赔率）+ 图表 + 返回。"""
-        buttons = [
-            InlineKeyboardButton(label, callback_data=f"{key}:{fixture_id}") for key, label in TABS
-        ]
+        """预测卡片按钮：两列三行，继续操作全部走按钮，不挤在正文里。"""
         return InlineKeyboardMarkup(
             [
-                buttons[:2],
-                buttons[2:],
                 [
-                    InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}"),
+                    InlineKeyboardButton("📊 详细分析", callback_data=f"deep:{fixture_id}"),
                     InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
                 ],
-                [InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"), InlineKeyboardButton("🏠 主菜单", callback_data="menu:home")],
+                [
+                    InlineKeyboardButton("📅 今日赛程", callback_data="menu:fixtures"),
+                    InlineKeyboardButton("🏆 联赛排名", callback_data="menu:standings"),
+                ],
+                [
+                    InlineKeyboardButton("🎯 历史命中率", callback_data="menu:stats"),
+                    InlineKeyboardButton("🔄 刷新数据", callback_data=f"refresh:{fixture_id}"),
+                ],
+                [InlineKeyboardButton("🏠 返回主菜单", callback_data="menu:home")],
             ]
         )
+
 
     @staticmethod
     def analysis_keyboard(fixture_id: int) -> InlineKeyboardMarkup:
@@ -378,6 +606,10 @@ class BotUI:
                 [
                     InlineKeyboardButton("⚽ 看预测", callback_data=f"fx:{fixture_id}"),
                     InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
+                ],
+                [
+                    InlineKeyboardButton("🎴 比赛主卡", callback_data=f"chart:card:{fixture_id}"),
+                    InlineKeyboardButton("🎯 概率环", callback_data=f"chart:ring:{fixture_id}"),
                 ],
                 [
                     InlineKeyboardButton("📊 战绩图", callback_data=f"chart:form:{fixture_id}"),
@@ -504,25 +736,43 @@ class BotUI:
         )
 
     @staticmethod
+    @staticmethod
     def format_standings_page(rows: list[dict], tz, limit: int = 20, league_label: str = "", updated=None) -> str:
-        lines = ["🏆 <b>联赛排名</b>", f"{esc(league_label)} · 时区 <code>{esc(tz.zone)}</code>"]
+        """联赛排名：前 3 名做成数据卡片突出重点，其余用紧凑单行，避免 20 行糊成一片。"""
+        lines = ["🏆 <b>联赛排名</b>"]
+        if league_label:
+            lines.append(f"<code>{esc(league_label)}</code>")
         if updated is not None:
-            lines.append(f"🕑 数据更新时间：<code>{BotUI.fmt_time(updated, tz, '%Y-%m-%d %H:%M')}</code>")
+            lines.append(
+                f"🕑 <code>UPDATED: {BotUI.fmt_time(updated, tz, '%m-%d %H:%M')}</code>"
+            )
         lines.append(SEP)
         if not rows:
             lines.append(NO_DATA)
-        else:
-            for i, row in enumerate(rows[:limit], start=1):
-                summary = _row_summary(row)
-                name = (row.get("team") or {}).get("name") or "?"
-                rank = (summary or {}).get("rank") or i
-                points = f"{(summary or {}).get('points')}分" if (summary or {}).get("points") is not None else "-"
-                record = f"{summary['win']}-{summary['draw']}-{summary['lose']}" if summary else "-"
-                avg_for = f"{summary['avg_for']:.1f}" if summary and summary["avg_for"] is not None else "-"
-                avg_against = f"{summary['avg_against']:.1f}" if summary and summary["avg_against"] is not None else "-"
-                lines.append(
-                    f"{rank:>2}. {esc(name)}  <code>{points}</code>  <code>{record}</code>  进 {avg_for} / 失 {avg_against}"
-                )
+            lines += [SEP, DISCLAIMER]
+            return "\n".join(lines)
+
+        shown = rows[:limit]
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        for i, row in enumerate(shown, start=1):
+            summary = _row_summary(row)
+            name = esc(team_name((row.get("team") or {}).get("name")))
+            rank = (summary or {}).get("rank") or i
+            pts = (summary or {}).get("points")
+            points = f"{pts}分" if pts is not None else "-"  # 无积分时不显示孤立的「分」字
+            record = f"{summary['win']}-{summary['draw']}-{summary['lose']}" if summary else "-"
+            avg_for = f"{summary['avg_for']:.2f}" if summary and summary["avg_for"] is not None else "-"
+            avg_against = (
+                f"{summary['avg_against']:.2f}"
+                if summary and summary["avg_against"] is not None else "-"
+            )
+            if i <= 3:
+                # 前三：两行卡片，积分大字突出
+                lines.append(f"{medals[i]} <b>{name}</b>　<b>{points}</b>")
+                lines.append(f"└ <code>{record}</code> · 进 {avg_for} / 失 {avg_against}")
+            else:
+                # 其余：紧凑单行，靠点线引导视线，避免堆成表格
+                lines.append(f"<code>{rank:>2}</code> {name} <b>{points}</b>　<code>{record}</code>")
         lines += [SEP, DISCLAIMER]
         return "\n".join(lines)
 
@@ -545,8 +795,8 @@ class BotUI:
             f"🤝 双方都进球 <code>{a['btts']:.1%}</code>",
             SEP,
             "🧮 <b>球队强度</b>（1.00 = 联赛平均）",
-            f"🏠 {esc(p.home)} 主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
-            f"✈️ {esc(p.away)} 客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
+            f"🏠 {esc(team_name(p.home))} 主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
+            f"✈️ {esc(team_name(p.away))} 客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
             "攻击 &gt;1：进球高于平均；防守 &lt;1：失球低于平均（防守更好）。",
             SEP,
             DISCLAIMER,
@@ -613,7 +863,7 @@ class BotUI:
                 f"{mark} <code>{date}</code> {esc((teams.get('home') or {}).get('name', '?'))} "
                 f"<b>{goals['home']}-{goals['away']}</b> {esc((teams.get('away') or {}).get('name', '?'))}"
             )
-        summary = f"近 {len(finished)} 次交锋（{esc(p.home)} 视角）：<b>{win} 胜 {draw} 平 {loss} 负</b>，进 {gf} / 失 {ga}"
+        summary = f"近 {len(finished)} 次交锋（{esc(team_name(p.home))} 视角）：<b>{win} 胜 {draw} 平 {loss} 负</b>，进 {gf} / 失 {ga}"
         return "\n".join(
             [title, BotUI.matchup(p, tz), SEP, summary, *rows, SEP, "🟢 胜 · 🟡 平 · 🔴 负；球队阵容与状态可能已大不相同，仅供参考。"]
         )
@@ -623,29 +873,68 @@ class BotUI:
     def menu_keyboard() -> InlineKeyboardMarkup:
         """Inline 主菜单：点击后在原消息上切换，不刷屏。"""
         buttons = [InlineKeyboardButton(label, callback_data=f"menu:{key}") for key, label in MENU_ITEMS]
-        return InlineKeyboardMarkup([buttons[0:2], buttons[2:4], buttons[4:6]])
+        return InlineKeyboardMarkup([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
     @staticmethod
     def reply_menu_keyboard() -> ReplyKeyboardMarkup:
         """底部常驻键盘：与 Inline 菜单共用 MENU_ITEMS，保证两边一致。"""
         labels = [label for _, label in MENU_ITEMS]
+        # 每行 2 个，跟随 MENU_ITEMS 自动适配数量
+        rows = [[KeyboardButton(x) for x in labels[i : i + 2]] for i in range(0, len(labels), 2)]
         return ReplyKeyboardMarkup(
-            [
-                [KeyboardButton(x) for x in labels[0:2]],
-                [KeyboardButton(x) for x in labels[2:4]],
-                [KeyboardButton(x) for x in labels[4:6]],
-            ],
+            rows,
             resize_keyboard=True,
             is_persistent=True,
         )
 
     @staticmethod
+    def format_welcome(settings) -> str:
+        """/start 欢迎文案：科技仪表盘风格（配套品牌头图，头图已含品牌名）。
+
+        注意：Telegram 消息区不是等宽字体，因此这里只用「短边框 + 参数面板」
+        这类容错较高的符号；主视觉由品牌头图承担，避免长边框错位。
+        """
+        return (
+            f"👋 <b>欢迎使用 {BRAND_CN}</b>\n"
+            f"<code>{BRAND_EN}</code> · AI 赛事情报\n"
+            "\n"
+            "用泊松分布拆解每一场比赛，\n"
+            "让预测可量化、可追溯。\n"
+            "\n"
+            f"◆ <b>引擎参数</b>\n"
+            f"{THIN_SEP}\n"
+            f"▍模型　<code>Poisson Distribution</code>\n"
+            f"▍数据　赛程 · 积分榜 · 赔率\n"
+            f"▍输出　概率 · 信心评级 · 图表\n"
+            "\n"
+            f"◆ <b>核心功能</b>\n"
+            f"{THIN_SEP}\n"
+            f"│ 📅 今日赛程\n"
+            f"│ ⚽ 比赛预测\n"
+            f"│ 📊 深度分析\n"
+            f"│ 🏆 联赛排名\n"
+            f"└ 📈 数据图表\n"
+            "\n"
+            f"{SEP}\n"
+            f"⏰ 每日 <code>{settings.push_time:%H:%M}</code>（{esc(BotUI.tz_label(settings.timezone))}）自动推送\n"
+            "💡 点击下方菜单，或发送 /menu 开始"
+        )
+
+    @staticmethod
     def format_menu(settings) -> str:
         return (
-            "⚽ <b>足球量化预测机器人</b>\n"
-            f"联赛 <code>{settings.league_id}</code> · 赛季 <code>{settings.season}</code>"
-            f" · 时区 <code>{settings.timezone.zone}</code>\n"
-            f"{SEP}\n请选择一个功能："
+            "⚽ <b>Football Insight</b>\n"
+            "AI 赛事情报 · 数据驱动洞察\n"
+            f"{SEP}\n"
+            "\n"
+            "⚙️ <b>运行环境</b>\n"
+            f"{THIN_SEP}\n"
+            f"│ 联赛　<code>{esc(league_label(settings.league_id))}</code>\n"
+            f"│ 赛季　<code>{settings.season}</code>\n"
+            f"└ 时区　<code>{esc(settings.timezone.zone)}</code>\n"
+            "\n"
+            f"{SEP}\n"
+            "📌 <b>请选择功能</b>"
         )
 
     @staticmethod
@@ -653,19 +942,45 @@ class BotUI:
         return (
             "ℹ️ <b>使用帮助</b>\n"
             f"{SEP}\n"
-            "📅 今日赛程：列出当天全部比赛（按联赛分组、支持翻页）\n"
-            "⚽ 比赛预测：选择比赛，生成胜平负概率与建议\n"
-            "📊 深度分析：近期状态、联赛数据、历史交锋\n"
-            "🏆 联赛排名：当前积分榜\n"
-            "🔄 刷新数据：清空缓存重新拉取\n\n"
-            "命令：/menu 打开菜单 · /test 立即推送 · /status 运行状态\n"
-            f"{SEP}\n{DISCLAIMER}"
+            "\n"
+            f"◆ <b>功能说明</b>\n"
+            f"{THIN_SEP}\n"
+            "📅 <b>今日赛程</b>　当日比赛，按联赛分组、支持翻页\n"
+            "⚽ <b>比赛预测</b>　胜平负概率、比分与信心等级\n"
+            "📊 <b>深度分析</b>　近期状态、主客场、历史交锋\n"
+            "🏆 <b>联赛排名</b>　实时积分榜与攻防数据\n"
+            "🔄 <b>刷新数据</b>　清空缓存，重新拉取\n"
+            "🌐 <b>网页端</b>　　浏览器查询入口（规划中）\n"
+            "\n"
+            f"◆ <b>命令列表 / Commands</b>\n"
+            f"{THIN_SEP}\n"
+            "<code>/start</code>　欢迎与推送时间 / Welcome\n"
+            "<code>/menu</code>　功能菜单 / Main menu\n"
+            "<code>/help</code>　本指南 / This help\n"
+            "<code>/fixtures</code>　今日赛程 / Fixtures\n"
+            "<code>/predict</code>　比赛预测 / Prediction\n"
+            "<code>/standings</code>　联赛排名 / Standings\n"
+            "<code>/refresh</code>　刷新数据 / Refresh\n"
+            "<code>/web</code>　网页端 / Web app\n"
+            "<code>/test</code>　立即推送（管理员）/ Push now (admin)\n"
+            "<code>/status</code>　状态诊断（管理员）/ Status (admin)\n"
+            "\n"
+            f"{SEP}\n"
+            f"{DISCLAIMER}"
         )
 
     @staticmethod
     def format_coming(key: str) -> str:
         label = dict(MENU_ITEMS).get(key, key)
-        return f"🚧 <b>{esc(label)}</b>\n{SEP}\n该功能正在开发中，将在后续阶段上线。"
+        return (
+            f"🚧 <b>{esc(label)}</b>\n"
+            f"{SEP}\n"
+            "\n"
+            "该功能正在开发中，将在后续阶段上线。\n"
+            "\n"
+            f"{SEP}\n"
+            "📌 可先使用其他功能，或发送 /help 查看完整说明。"
+        )
 
     @staticmethod
     def error_hint(exc) -> str:
@@ -686,21 +1001,45 @@ class BotUI:
     # ---- 今日赛程 ---------------------------------------------------------------
     @staticmethod
     def format_fixtures_page(
-        items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = ""
+        items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = "",
+        multi_day: bool = False,
+    empty_range: tuple[str, str] | None = None,
+    empty_source_ok: bool = True,
     ) -> tuple[str, InlineKeyboardMarkup, int, int]:
-        """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。"""
+        """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。
+
+        multi_day=True 表示这批赛程跨越多天（今日无比赛时扩展到未来），
+        此时标题改为「近期赛程」，且每场比赛显示日期，避免用户误以为是今天的比赛。
+        """
         total_pages = max(1, -(-len(items) // per_page))
         page = min(max(page, 0), total_pages - 1)
         chunk = items[page * per_page : (page + 1) * per_page]
 
+        title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
         lines = [
-            "📅 <b>今日赛程</b>",
+            title,
             f"日期：<code>{esc(day_label)}</code> · 时区：<code>{esc(tz.zone)}</code>",
             SEP,
         ]
         rows: list[list[InlineKeyboardButton]] = []
         if not chunk:
-            lines.append("今日暂无赛程。")
+            # 空状态要说清三件事：没比赛、查了哪段时间、数据源是否正常。
+            # 绝不能把「窗口内没比赛」说成「数据源无数据」。
+            lines.extend([
+                "<b>NO FIXTURE IN THIS WINDOW</b>",
+                "📅 当前时间范围内暂无比赛",
+                SEP,
+            ])
+            if empty_source_ok:
+                lines.append("✅ 数据源正常，已查询：")
+            else:
+                lines.append("⚠️ 数据源返回异常，已查询：")
+            span_text = (
+                f"{empty_range[0]} 至 {empty_range[1]}" if empty_range
+                else esc(day_label)
+            )
+            lines.append(f"<code>{esc(span_text)}</code>")
+            lines += ["", "你可以尝试："]
         else:
             current = None
             for offset, fx in enumerate(chunk):
@@ -711,10 +1050,14 @@ class BotUI:
                     current = league
                     lines.append(f"🏆 <b>{esc(league)}</b>")
                 teams = fx.get("teams") or {}
-                home = (teams.get("home") or {}).get("name") or "?"
-                away = (teams.get("away") or {}).get("name") or "?"
+                home = team_name((teams.get("home") or {}).get("name"))
+                away = team_name((teams.get("away") or {}).get("name"))
                 kickoff = parse_kickoff(info.get("date"))
-                when = kickoff.astimezone(tz).strftime("%H:%M") if kickoff else "--:--"
+                if kickoff:
+                    local = kickoff.astimezone(tz)
+                    when = local.strftime("%m-%d %H:%M") if multi_day else local.strftime("%H:%M")
+                else:
+                    when = "--:--"
                 short = (info.get("status") or {}).get("short") or ""
                 status = STATUS_TEXT.get(short, short or "未知")
                 goals = fx.get("goals") or {}
@@ -728,6 +1071,13 @@ class BotUI:
                         InlineKeyboardButton(f"📊 分析 {idx}", callback_data=f"fa:{info.get('id')}"),
                     ]
                 )
+        if not chunk:
+            # 空状态直接给可继续操作的按钮，避免用户以为系统坏了
+            rows.append([
+                InlineKeyboardButton("⏭ 查询下一场", callback_data="fxm:next"),
+                InlineKeyboardButton("📅 未来 7 天", callback_data="fxm:upcoming"),
+                InlineKeyboardButton("📆 指定日期", callback_data="fxm:date"),
+            ])
         if total_pages > 1:
             rows.append(
                 [
@@ -736,5 +1086,14 @@ class BotUI:
                     InlineKeyboardButton("下一页 ➡️", callback_data=f"fxp:{min(total_pages - 1, page + 1)}"),
                 ]
             )
+        if chunk:  # 空态已单独给出「下一场/未来 7 天」，不重复
+            rows.append([
+                InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all"),
+                InlineKeyboardButton("⏭ 下一场", callback_data="fxm:next"),
+            ])
         rows.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
         return "\n".join(lines), InlineKeyboardMarkup(rows), page, total_pages
+
+
+# 向后兼容：模块级别名（历史代码可能直接 import 此名）
+WEB_ENTRY_TEXT = BotUI.WEB_ENTRY_TEXT

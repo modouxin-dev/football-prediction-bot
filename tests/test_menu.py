@@ -11,6 +11,7 @@ import main
 from api_client import APIError
 from bot_handler import BotUI, STATUS_TEXT
 from config import load_settings
+from repository import PredictionRepository
 from service import PredictionService
 from tests.sample_data import FakeAPI, fixture
 
@@ -50,8 +51,19 @@ class TodayAPI(FakeAPI):
         return self.items
 
 
-def today_fixtures(count=3, hour=10):
+def today_fixtures(count=3, hour=None):
+    """构造今日赛程。
+
+    默认开赛时刻取「当前时间 + 1 小时」，保证任何时段运行都在未来；
+    写死某个钟点会让测试随时间流逝而失效（下午跑就全变成已开赛）。
+    """
     now = datetime.now(timezone.utc)
+    if hour is None:
+        base = now + timedelta(hours=1)
+        if base.date() != now.date():  # 跨天时贴到当天最后一刻
+            base = now.replace(hour=23, minute=0, second=0, microsecond=0)
+    else:
+        base = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     items = []
     for i in range(count):
         items.append(
@@ -61,7 +73,7 @@ def today_fixtures(count=3, hour=10):
                 f"主队{i + 1}",
                 100 + i,
                 f"客队{i + 1}",
-                now.replace(hour=hour, minute=0) + timedelta(minutes=30 * i),
+                base + timedelta(minutes=30 * i),
                 status="NS" if i % 2 == 0 else "FT",
             )
         )
@@ -69,22 +81,16 @@ def today_fixtures(count=3, hour=10):
 
 
 # ---- 主菜单 -------------------------------------------------------------------
-def test_menu_keyboard_has_six_buttons_in_three_rows():
+def test_menu_keyboard_has_all_buttons():
+    from bot_handler import MENU_ITEMS
+
     markup = BotUI.menu_keyboard()
-    assert len(markup.inline_keyboard) == 3
     flat = [b for row in markup.inline_keyboard for b in row]
-    assert len(flat) == 6
+    assert len(flat) == len(MENU_ITEMS)  # 不写死数量，跟随 MENU_ITEMS
     assert all(isinstance(b, InlineKeyboardButton) for b in flat)
     labels = [b.text for b in flat]
     assert "📅 今日赛程" in labels and "🏆 联赛排名" in labels
-    assert {b.callback_data for b in flat} == {
-        "menu:fixtures",
-        "menu:predict",
-        "menu:analysis",
-        "menu:standings",
-        "menu:refresh",
-        "menu:help",
-    }
+    assert {b.callback_data for b in flat} == {f"menu:{key}" for key, _ in MENU_ITEMS}
 
 
 def test_reply_menu_keyboard_matches_menu_items():
@@ -92,9 +98,8 @@ def test_reply_menu_keyboard_matches_menu_items():
     from bot_handler import MENU_ITEMS
 
     markup = BotUI.reply_menu_keyboard()
-    assert len(markup.keyboard) == 3
     flat = [b for row in markup.keyboard for b in row]
-    assert len(flat) == 6
+    assert len(flat) == len(MENU_ITEMS)  # 与 MENU_ITEMS 保持一致，不写死数量
     assert all(isinstance(b, KeyboardButton) for b in flat)
     assert [b.text for b in flat] == [label for _, label in MENU_ITEMS]
     assert [b.text for b in flat] == [b.text for row in main.ui.menu_keyboard().inline_keyboard for b in row]
@@ -234,9 +239,32 @@ def test_fixtures_page_clamps_out_of_range_page():
 
 
 def test_fixtures_page_empty_shows_reason_not_error():
+    """空赛程必须是「高级空状态」：说明范围无比赛 + 已查询范围 + 下一步，而非一片空白。"""
     text, markup, _, _ = BotUI.format_fixtures_page([], SETTINGS.timezone, 0, 5, "2026-09-25")
-    assert "暂无赛程" in text
+    assert "NO FIXTURE IN THIS WINDOW" in text
+    assert "暂无比赛" in text
+    assert "你可以尝试" in text  # 给出下一步指引，不能是死胡同
     assert any(b.callback_data == "menu:home" for row in markup.inline_keyboard for b in row)
+
+
+def test_empty_state_shows_queried_range_and_source_status():
+    """空态必须显示查了哪段时间、数据源是否正常，不能把没比赛说成接口无数据。"""
+    text, markup, _, _ = BotUI.format_fixtures_page(
+        [], SETTINGS.timezone, 0, 5, "2026-09-25",
+        empty_range=("2026-09-25", "2026-10-02"), empty_source_ok=True,
+    )
+    assert "2026-09-25" in text and "2026-10-02" in text
+    assert "数据源正常" in text  # 明确区分「没比赛」与「接口无数据」
+    data = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert "fxm:next" in data and "fxm:upcoming" in data
+
+
+def test_empty_state_marks_source_abnormal():
+    """接口真的失败时，空态必须说数据源异常，不能伪装成只是没比赛。"""
+    text, _, _, _ = BotUI.format_fixtures_page(
+        [], SETTINGS.timezone, 0, 5, "2026-09-25", empty_source_ok=False,
+    )
+    assert "数据源返回异常" in text
 
 
 def test_status_text_mapping_covers_common_codes():
@@ -284,12 +312,17 @@ class FakeQuery:
     async def answer(self, text=None, show_alert=False):
         self.answers.append(text)
 
-    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None, **kwargs):
         self.edits.append((text, parse_mode, reply_markup))
 
 
 def make_ctx(api, user_data=None):
     service = PredictionService(SETTINGS, api)
+    # 本组测试验证的是「API 交互与渲染」行为：改用独立内存库并关闭本地优先，
+    # 避免落盘数据在不同测试之间互相污染，也避免命中缓存而漏掉对 API 的断言。
+    service.repo = PredictionRepository(":memory:")
+    service.sync.repo = service.repo
+    service.local_first = False
     app = SimpleNamespace(
         bot=SimpleNamespace(send_message=AsyncMock()),
         bot_data={"settings": SETTINGS, "service": service, "api": api},
@@ -312,7 +345,7 @@ def test_menu_home_callback_renders_menu():
     ctx, _ = make_ctx(TodayAPI(today_fixtures(2)))
     update, q = query_update("menu:home")
     run(main.on_menu(update, ctx))
-    assert q.edits and "足球量化预测机器人" in q.edits[0][0]
+    assert q.edits and "Football Insight" in q.edits[0][0]
 
 
 def test_menu_fixtures_callback_lists_fixtures():
@@ -323,13 +356,13 @@ def test_menu_fixtures_callback_lists_fixtures():
 
 
 def test_menu_fixtures_shows_real_api_error():
-    """赛季不可用时：逐级降级探测（每个赛季各请求一次），全部失败后抛出真实原因。"""
+    """接口故障时：状态为 no_data，显示真实原因，绝不伪装成「今天没有比赛」。"""
     api = BoomAPI()
     ctx, _ = make_ctx(api)
     update, q = query_update("menu:fixtures")
     run(main.on_menu(update, ctx))
     text = q.edits[0][0]
-    assert "获取今日赛程失败" in text
+    assert "获取赛程失败" in text
     assert "套餐" in text  # 真实原因，不是“今天没有比赛”
     # 降级探测：候选赛季各请求一次，不重复刷同一个赛季
     assert api.calls == len({2026, 2025, 2024, 2023})
@@ -388,3 +421,101 @@ def test_unexpected_exception_does_not_crash():
     update, q = query_update("menu:fixtures")
     run(main.on_menu(update, ctx))
     assert "获取今日赛程失败" in q.edits[0][0]
+
+
+# ==============================================================================
+# 赛程查询三态：接口无数据 / 窗口无比赛 / 正常
+# ==============================================================================
+def test_query_status_ok_when_window_has_matches():
+    api = TodayAPI(today_fixtures(3))
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+
+    svc = PredictionService(SETTINGS, api, MatchAnalyzer())
+    res = run(svc.query_fixtures("today"))
+    assert res["status"] == "ok"
+    assert len(res["fixtures"]) == 3
+
+
+def test_query_status_no_data_keeps_real_reason():
+    """接口故障必须保留真实原因，不能伪装成「今天没比赛」。"""
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+
+    svc = PredictionService(SETTINGS, BoomAPI(), MatchAnalyzer())
+    res = run(svc.query_fixtures("today"))
+    assert res["status"] == "no_data"
+    assert res["error"] is not None  # 原始异常保留，供上层翻译
+    assert "Free plans" in res["note"]
+
+
+def test_query_next_mode_returns_single_upcoming_match():
+    """「下一场」只返回不早于当前时刻的第一场。"""
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+
+    api = TodayAPI(today_fixtures(2))
+    svc = PredictionService(SETTINGS, api, MatchAnalyzer())
+    res = run(svc.query_fixtures("next"))
+    assert res["status"] == "ok"
+    assert len(res["fixtures"]) == 1
+
+
+def test_query_window_empty_shows_season_range():
+    """窗口无比赛时要给出赛季数据范围，方便排查。"""
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+    from datetime import date
+
+    class EmptyAPI(TodayAPI):
+        def __init__(self):
+            super().__init__([])
+
+        @property
+        def fallback(self):
+            fb = super().fallback
+            return fb
+
+    svc = PredictionService(SETTINGS, EmptyAPI(), MatchAnalyzer())
+    # 手动注入赛季范围，验证 window_empty 分支会把它带出来
+    svc._season_range = lambda: (date(2026, 8, 15), date(2027, 5, 24))
+    res = run(svc.query_fixtures("today"))
+    assert res["status"] == "window_empty"
+    assert res["season_range"] == (date(2026, 8, 15), date(2027, 5, 24))
+    assert "没有比赛" in res["note"]
+
+
+def test_reply_keyboard_every_menu_item_has_branch():
+    """回归：底部键盘每个菜单项都必须有真实分支，不能落进「正在开发中」。
+
+    曾出现 predict / web 两个按钮点击后提示『功能开发中』，因为 on_menu_text
+    漏了这两个 key。此测试扫描源码确保所有 MENU_ITEMS 都被显式处理。
+    """
+    import inspect
+    import re
+
+    import main
+    from bot_handler import MENU_ITEMS
+
+    src = inspect.getsource(main.on_menu_text)
+    for key, label in MENU_ITEMS:
+        explicit = re.search(rf'key\s*==\s*["\']{re.escape(key)}["\']', src)
+        grouped = re.search(r'\(\s*["\']fixtures["\'],\s*["\']analysis["\'],\s*["\']predict["\']', src)
+        assert explicit or (key in ("fixtures", "analysis", "predict") and grouped), (
+            f"底部键盘「{label}」({key}) 落进 format_coming 兜底，点击会显示『开发中』"
+        )
+
+
+def test_inline_menu_every_item_has_branch():
+    """回归：内联菜单每个菜单项也必须有真实分支。"""
+    import inspect
+    import re
+
+    import main
+    from bot_handler import MENU_ITEMS
+
+    src = inspect.getsource(main.on_menu_key)
+    for key, label in MENU_ITEMS:
+        assert re.search(rf'key\s*==\s*["\']{re.escape(key)}["\']', src), (
+            f"内联菜单「{label}」({key}) 缺少分支"
+        )
