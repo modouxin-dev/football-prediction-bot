@@ -426,3 +426,123 @@ def test_fallback_real_failure_still_raises():
     with pytest.raises(DataSourceError) as exc:
         run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     assert "均不可用" in str(exc.value)
+
+
+# ==============================================================================
+# 今日无比赛 → 自动扩展到未来几天（避免给用户一片空白）
+# ==============================================================================
+def _future_match(mid, utc_date, home="Man City", away="Liverpool"):
+    return {
+        "id": mid, "utcDate": utc_date, "status": "SCHEDULED", "matchday": 7,
+        "competition": {"id": 2021, "name": "Premier League"},
+        "homeTeam": {"id": 65, "name": home}, "awayTeam": {"id": 64, "name": away},
+        "score": {"fullTime": {"home": None, "away": None}},
+    }
+
+
+def test_today_empty_expands_to_upcoming_days():
+    """今日无比赛时，应自动拉取未来几天赛程，而不是返回空。"""
+    from config import load_settings
+    from service import PredictionService, UPCOMING_DAYS
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+
+    class SeasonBlocked(StubPrimary):
+        async def get_fixtures(self, *a, **k):
+            raise APIError("plan: Free plans do not have access to this season")
+
+        async def get_available_seasons(self):
+            return [2026, 2025, 2024]
+
+    seen_ranges = []
+
+    def handler(request):
+        params = request.url.params
+        df, dt = params.get("dateFrom"), params.get("dateTo")
+        seen_ranges.append((df, dt))
+        if df == dt:  # 只查今天 → 空
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [_future_match(6001, "2026-09-27T14:00:00Z")]})
+
+    router = DataSourceRouter(SeasonBlocked(), make_fd(handler), mode="auto")
+    svc = PredictionService(settings, router)
+    fixtures = run(svc.get_today_fixtures())
+
+    assert len(fixtures) == 1, "今日无比赛时应返回未来赛程"
+    assert svc.using_upcoming is True
+    assert "~" in svc.fixture_day_label  # 日期范围
+    assert svc.last_note and "暂无比赛" in svc.last_note and str(UPCOMING_DAYS) in svc.last_note
+    # 确认确实先查了「今天」，再查了「今天~未来」
+    assert seen_ranges[0][0] == seen_ranges[0][1]
+
+
+def test_upcoming_fixtures_are_sorted_by_kickoff():
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+
+    class SeasonBlocked(StubPrimary):
+        async def get_fixtures(self, *a, **k):
+            raise APIError("plan: Free plans do not have access to this season")
+
+        async def get_available_seasons(self):
+            return [2026, 2025, 2024]
+
+    matches = [
+        _future_match(6002, "2026-09-29T18:30:00Z"),  # 较晚
+        _future_match(6001, "2026-09-27T14:00:00Z"),  # 较早
+    ]
+
+    def handler(request):
+        p = request.url.params
+        if p.get("dateFrom") == p.get("dateTo"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": matches})
+
+    router = DataSourceRouter(SeasonBlocked(), make_fd(handler), mode="auto")
+    svc = PredictionService(settings, router)
+    fixtures = run(svc.get_today_fixtures())
+    ids = [str((f.get("fixture") or {}).get("id")) for f in fixtures]
+    assert ids == ["fd-6001", "fd-6002"], f"未来赛程应按开赛时间升序，实际 {ids}"
+
+
+def test_multi_day_page_shows_date_and_recent_title():
+    """跨天时标题应为「近期赛程」，且每行显示日期，避免误以为是今天的比赛。"""
+    from bot_handler import BotUI
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+    raw = [_future_match(6001, "2026-09-27T14:00:00Z")]
+    fixtures = [FootballDataAPI._to_fixture(m, 39, 2026) for m in raw]  # 经协议转换后才排版
+    text, _, _, _ = BotUI.format_fixtures_page(
+        fixtures, settings.timezone, 0, 5, "2026-09-25 ~ 2026-10-02", multi_day=True
+    )
+    assert "近期赛程" in text
+    assert "09-27" in text  # 每行带日期
+    assert "今日赛程" not in text
+
+
+def test_today_with_matches_keeps_today_title():
+    """今日有比赛时不触发扩展，标题仍是「今日赛程」且不带日期前缀。"""
+    from bot_handler import BotUI
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+    raw = [_future_match(6001, "2026-09-25T10:00:00Z")]
+    fixtures = [FootballDataAPI._to_fixture(m, 39, 2026) for m in raw]
+    text, _, _, _ = BotUI.format_fixtures_page(
+        fixtures, settings.timezone, 0, 5, "2026-09-25", multi_day=False
+    )
+    assert "今日赛程" in text
+    assert "近期赛程" not in text
