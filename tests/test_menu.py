@@ -519,3 +519,41 @@ def test_inline_menu_every_item_has_branch():
         assert re.search(rf'key\s*==\s*["\']{re.escape(key)}["\']', src), (
             f"内联菜单「{label}」({key}) 缺少分支"
         )
+
+
+# ==============================================================================
+# 回归：手打纯文字（不带 emoji）不应被误报成「功能开发中」
+# ==============================================================================
+def test_plain_text_without_emoji_matches_menu_item():
+    """回归：用户手打「比赛预测」（无 emoji）时必须命中菜单分支。
+
+    底部键盘按钮文字带 emoji，若只做精确匹配，手打的纯文字会落进兜底分支
+    被渲染成「功能正在开发中」，与实际功能状态不符。
+    """
+    ctx, _ = make_ctx(TodayAPI(today_fixtures(1)))
+    update, msg = text_update("比赛预测")
+    run(main.on_menu_text(update, ctx))
+    assert msg.replies, "手打「比赛预测」未命中菜单分支"
+    assert "开发中" not in msg.replies[0][0]
+
+
+def test_plain_text_storage_matches_menu_item():
+    """回归：手打「存储状态」应直接进入 /storage 自检。"""
+    ctx, _ = make_ctx(TodayAPI(today_fixtures(1)))
+    update, msg = text_update("存储状态")
+    run(main.on_menu_text(update, ctx))
+    assert msg.replies and "存储状态" in msg.replies[0][0]
+
+
+def test_storage_visible_in_bot_commands_and_menu():
+    """回归：/storage 必须同时出现在 Telegram 命令列表与菜单按钮中。
+
+    仅注册 CommandHandler 不会让用户在命令菜单里看到它，必须写入 BOT_COMMANDS。
+    """
+    import main
+    from bot_handler import MENU_ITEMS
+
+    commands = {cmd for cmd, _ in main.BOT_COMMANDS}
+    for name in ("storage", "stats", "date", "analysis"):
+        assert name in commands, f"/{name} 未写入 BOT_COMMANDS，用户看不到该命令"
+    assert "storage" in dict(MENU_ITEMS), "菜单缺少「💾 存储状态」按钮"

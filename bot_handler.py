@@ -107,6 +107,7 @@ MENU_ITEMS = (
     ("refresh", "🔄 刷新数据"),
     ("help", "ℹ️ 使用帮助"),
     ("web", "🌐 网页端"),
+    ("storage", "💾 存储状态"),
 )
 
 # API-Football 的比赛状态缩写 → 中文
