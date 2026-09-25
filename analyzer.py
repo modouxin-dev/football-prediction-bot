@@ -213,3 +213,74 @@ def consensus_odds(rows: list[dict]) -> dict | None:
 def overround(odds: dict) -> float:
     """庄家抽水：隐含概率之和 − 1。"""
     return sum(1 / odds[k] for k in OUTCOMES) - 1
+
+
+# ---- 模型信心等级 -------------------------------------------------------------
+# 说明：这里评的是「模型对自己结论的把握程度」，不是实际命中率。
+# 概率高 ≠ 一定赢，因此命名为「模型信心等级」而非「准确率等级」。
+LEVEL_HIGH = "high"
+LEVEL_MEDIUM = "medium"
+LEVEL_LOW = "low"
+
+LEVEL_META = {
+    LEVEL_HIGH: {"name": "高", "emoji": "🟢"},
+    LEVEL_MEDIUM: {"name": "中", "emoji": "🟡"},
+    LEVEL_LOW: {"name": "低", "emoji": "🔴"},
+}
+
+# 判定阈值：最高概率 + 领先第二名的差距，两个条件同时满足才算该等级
+HIGH_MIN_PROB = 0.65
+HIGH_MIN_GAP = 0.15
+MEDIUM_MIN_PROB = 0.50
+MEDIUM_MIN_GAP = 0.08
+
+PROB_KEYS = ("home_win", "draw", "away_win")
+
+
+def validate_probabilities(probabilities: dict) -> None:
+    """校验概率字段：必须齐全、落在 0~1、总和约等于 1。"""
+    for key in PROB_KEYS:
+        if key not in probabilities:
+            raise ValueError(f"缺少概率字段：{key}")
+        value = float(probabilities[key])
+        if not 0 <= value <= 1:
+            raise ValueError(f"概率超出范围：{key}={value}")
+
+    total = sum(float(probabilities[key]) for key in PROB_KEYS)
+    if abs(total - 1.0) > 0.02:
+        raise ValueError(f"概率总和异常：{total:.4f}")
+
+
+def calculate_prediction_level(probabilities: dict) -> dict:
+    """根据三项概率计算模型信心等级（🟢 高 / 🟡 中 / 🔴 低）。
+
+    等级只由概率计算，不允许外部手工指定。
+    """
+    validate_probabilities(probabilities)
+
+    values = {
+        "主胜": float(probabilities["home_win"]),
+        "平局": float(probabilities["draw"]),
+        "客胜": float(probabilities["away_win"]),
+    }
+    ordered = sorted(values.items(), key=lambda item: item[1], reverse=True)
+    best_name, best_probability = ordered[0]
+    second_probability = ordered[1][1]
+    gap = best_probability - second_probability
+
+    if best_probability >= HIGH_MIN_PROB and gap >= HIGH_MIN_GAP:
+        key = LEVEL_HIGH
+    elif best_probability >= MEDIUM_MIN_PROB and gap >= MEDIUM_MIN_GAP:
+        key = LEVEL_MEDIUM
+    else:
+        key = LEVEL_LOW
+
+    meta = LEVEL_META[key]
+    return {
+        "name": meta["name"],
+        "emoji": meta["emoji"],
+        "key": key,
+        "result": best_name,
+        "probability": best_probability,
+        "gap": gap,
+    }
