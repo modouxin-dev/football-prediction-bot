@@ -27,11 +27,11 @@ from telegram.ext import (
     filters,
 )
 
-from analyzer import MatchAnalyzer
+from analyzer import MatchAnalyzer, calculate_prediction_level
 from api_client import APIError, FootballAPI
 from data_source import DataSourceError, DataSourceRouter
 from football_data import FootballDataAPI
-from bot_handler import MENU_ITEMS, BotUI, esc, split_html_blocks
+from bot_handler import MENU_ITEMS, BotUI, esc, league_label, split_html_blocks
 from config import ConfigError, Settings, load_settings
 from service import Prediction, PredictionService
 
@@ -509,7 +509,42 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         cache = app.bot_data.get("fx_cache")
         fixtures = cache["items"] if cache else None
-        if kind == "prob":
+        if kind == "schedule":
+            # 赛程总览图：用当前缓存的赛程，不针对单场比赛
+            if not fixtures:
+                await query.answer("暂无赛程数据，请先打开今日赛程", show_alert=True)
+                return
+            blob = chart.schedule_chart(
+                fixtures,
+                settings.timezone,
+                day_label=getattr(service, "fixture_day_label", "") or "",
+                source=service.source_label,
+            )
+            caption = f"📊 赛程分布 · 共 {len(fixtures)} 场"
+        elif kind == "ring":
+            try:
+                prediction = service.get(fixture_id)
+            except KeyError:
+                prediction = await service.predict_fixture(fixture_id, fixtures)
+            blob = chart.prob_ring(prediction, settings.timezone)
+            caption = f"🎯 胜平负概率环 · {esc(prediction.home)} vs {esc(prediction.away)}"
+        elif kind == "card":
+            try:
+                prediction = service.get(fixture_id)
+            except KeyError:
+                prediction = await service.predict_fixture(fixture_id, fixtures)
+            a = prediction.analysis or {}
+            lv = calculate_prediction_level({
+                "home_win": a.get("win_prob", 0), "draw": a.get("draw_prob", 0),
+                "away_win": a.get("loss_prob", 0),
+            })
+            blob = chart.match_card(
+                prediction, settings.timezone, lv,
+                league_name=league_label(settings.league_id),
+                source=service.source_label,
+            )
+            caption = f"🎴 比赛主卡 · {esc(prediction.home)} vs {esc(prediction.away)}"
+        elif kind == "prob":
             try:
                 prediction = service.get(fixture_id)
             except KeyError:
@@ -544,11 +579,12 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if blob is None:  # 数据不足：明确提示，不发误导性图片
         await query.answer("暂无足够数据生成该图表", show_alert=True)
         return
+    keyboard = None if kind == "schedule" else ui.chart_keyboard(fixture_id, kind)
     await query.message.reply_photo(
         photo=blob,
         caption=caption,
         parse_mode=ParseMode.HTML,
-        reply_markup=ui.chart_keyboard(fixture_id, kind),
+        reply_markup=keyboard,
     )
 
 
@@ -793,7 +829,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
     app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:.+$"))
-    app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|form|goals|h2h):.+$"))
+    app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|ring|card|form|goals|h2h|schedule):.+$"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):.+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
