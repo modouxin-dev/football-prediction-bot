@@ -733,25 +733,43 @@ class BotUI:
         )
 
     @staticmethod
+    @staticmethod
     def format_standings_page(rows: list[dict], tz, limit: int = 20, league_label: str = "", updated=None) -> str:
-        lines = ["🏆 <b>联赛排名</b>", f"{esc(league_label)} · 时区 <code>{esc(tz.zone)}</code>"]
+        """联赛排名：前 3 名做成数据卡片突出重点，其余用紧凑单行，避免 20 行糊成一片。"""
+        lines = ["🏆 <b>联赛排名</b>"]
+        if league_label:
+            lines.append(f"<code>{esc(league_label)}</code>")
         if updated is not None:
-            lines.append(f"🕑 数据更新时间：<code>{BotUI.fmt_time(updated, tz, '%Y-%m-%d %H:%M')}</code>")
+            lines.append(
+                f"🕑 <code>UPDATED: {BotUI.fmt_time(updated, tz, '%m-%d %H:%M')}</code>"
+            )
         lines.append(SEP)
         if not rows:
             lines.append(NO_DATA)
-        else:
-            for i, row in enumerate(rows[:limit], start=1):
-                summary = _row_summary(row)
-                name = (row.get("team") or {}).get("name") or "?"
-                rank = (summary or {}).get("rank") or i
-                points = f"{(summary or {}).get('points')}分" if (summary or {}).get("points") is not None else "-"
-                record = f"{summary['win']}-{summary['draw']}-{summary['lose']}" if summary else "-"
-                avg_for = f"{summary['avg_for']:.1f}" if summary and summary["avg_for"] is not None else "-"
-                avg_against = f"{summary['avg_against']:.1f}" if summary and summary["avg_against"] is not None else "-"
-                lines.append(
-                    f"{rank:>2}. {esc(name)}  <code>{points}</code>  <code>{record}</code>  进 {avg_for} / 失 {avg_against}"
-                )
+            lines += [SEP, DISCLAIMER]
+            return "\n".join(lines)
+
+        shown = rows[:limit]
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        for i, row in enumerate(shown, start=1):
+            summary = _row_summary(row)
+            name = esc(team_name((row.get("team") or {}).get("name")))
+            rank = (summary or {}).get("rank") or i
+            pts = (summary or {}).get("points")
+            points = f"{pts}分" if pts is not None else "-"  # 无积分时不显示孤立的「分」字
+            record = f"{summary['win']}-{summary['draw']}-{summary['lose']}" if summary else "-"
+            avg_for = f"{summary['avg_for']:.2f}" if summary and summary["avg_for"] is not None else "-"
+            avg_against = (
+                f"{summary['avg_against']:.2f}"
+                if summary and summary["avg_against"] is not None else "-"
+            )
+            if i <= 3:
+                # 前三：两行卡片，积分大字突出
+                lines.append(f"{medals[i]} <b>{name}</b>　<b>{points}</b>")
+                lines.append(f"└ <code>{record}</code> · 进 {avg_for} / 失 {avg_against}")
+            else:
+                # 其余：紧凑单行，靠点线引导视线，避免堆成表格
+                lines.append(f"<code>{rank:>2}</code> {name} <b>{points}</b>　<code>{record}</code>")
         lines += [SEP, DISCLAIMER]
         return "\n".join(lines)
 
