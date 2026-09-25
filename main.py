@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import paths
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -345,6 +346,49 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     continue
                 r = slot["hit"] / slot["total"] if slot["total"] else 0
                 lines.append(f"│ {names.get(key, key)}：<code>{slot['hit']}/{slot['total']}</code>（{r:.0%}）")
+    await update.effective_message.reply_text(
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+    )
+
+
+async def storage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/storage — 验证挂载卷是否生效（写入测试文件 + 检查数据库表）。"""
+    s: Settings = context.application.bot_data["settings"]
+    if not is_admin(update, s):
+        return await deny(update)
+    service: PredictionService = context.application.bot_data["service"]
+    await _dispatch_cmd_typing(update)
+
+    # 1) 写入测试：文件能落盘，说明 Volume 真的挂上了
+    marker = paths.DATA_DIR / ".storage_test"
+    try:
+        marker.write_text("ok", encoding="utf-8")
+        exists = marker.exists()
+        marker.unlink(missing_ok=True)
+        write_ok = exists
+    except Exception as exc:
+        write_ok = False
+        log.warning("存储写入测试失败：%s", exc)
+
+    # 2) 数据库表：确认预测表已建立
+    try:
+        tables = service.repo.tables()
+    except Exception:
+        tables = []
+
+    st = service.stats()
+    lines = [
+        "💾 <b>存储状态</b>",
+        f"数据目录：<code>{esc(paths.DATA_DIR)}</code>",
+        f"数据库：<code>{esc(service.repo.db_path)}</code>",
+        f"落盘：{'✅ 是（重新部署不丢）' if service.repo.persistent and write_ok else '⚠️ 否（会丢）'}",
+        f"写入测试：{'✅ 通过' if write_ok else '❌ 失败（Volume 可能没挂载）'}",
+        f"数据表：<code>{esc(', '.join(tables) or '无')}</code>",
+        "",
+        f"已预测：<code>{st['total'] + st['pending']}</code> 场 · 已结算 <code>{st['total']}</code> 场",
+    ]
+    if not write_ok:
+        lines += ["", "请在 Railway 新建 Volume 并挂载到 <code>/data</code>。"]
     await update.effective_message.reply_text(
         "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
     )
@@ -788,6 +832,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"下次推送：{next_run}",
         f"CHAT_ID：{'已配置' if s.chat_id else '未配置'}",
         f"内存中的预测：{service.cached_predictions} 场",
+        f"存储：{paths.summary()}",
         f"数据源渠道：{'官方直连 (API-Sports)' if s.api_provider == 'apisports' else 'RapidAPI'}",
         f"数据源：{getattr(api, 'source_label', 'API-Football')}"
         + ("（备用源生效中）" if getattr(api, 'using_fallback', False) else ""),
@@ -935,6 +980,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("web", web_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("storage", storage_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\\d+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_mode, pattern=r"^fxm:(today|upcoming|next)$"))
