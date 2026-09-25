@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, time
 
+import paths
 import pytz
 
 log = logging.getLogger(__name__)
@@ -16,7 +17,7 @@ VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 VALID_SEASON_MODES = {"auto", "fixed"}
 VALID_DATA_SOURCE_MODES = {"auto", "api-football", "football-data"}
 
-DEFAULT_DB_PATH = "/data/predictions.db"  # 机器人存储：Railway 持久化卷通常挂这里
+DEFAULT_DB_PATH = None  # 由 paths.DB_PATH 统一决定（默认 /data/football.db）
 TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 
 
@@ -188,8 +189,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     football_data_enabled = parse_bool(_get(env, "FOOTBALL_DATA_ENABLED"), default=True)
     football_data_timeout = float(_get_int(env, "FOOTBALL_DATA_TIMEOUT", 10) or 10)
 
-    # 预测落盘：默认挂到机器人自己的持久化目录；设为 ':memory:' 可强制只用内存
-    db_path = (_get(env, "DB_PATH") or DEFAULT_DB_PATH).strip() or DEFAULT_DB_PATH
+    # 预测落盘：统一走 paths 模块（DATA_DIR/DATABASE_PATH），挂载卷生效时重启不丢
+    db_path = (_get(env, "DB_PATH") or _get(env, "DATABASE_PATH") or "").strip() or str(paths.DB_PATH)
 
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
