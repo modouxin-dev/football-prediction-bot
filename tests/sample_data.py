@@ -80,12 +80,14 @@ class FakeAPI:
     provider = "rapidapi"
     quota_remaining = "88"
 
-    def __init__(self, fixtures_by_season, odds=None, h2h=None, odds_error=None, h2h_error=None):
+    def __init__(self, fixtures_by_season, odds=None, h2h=None, odds_error=None, h2h_error=None, form=None):
         self.fixtures_by_season = fixtures_by_season
         self.odds = odds if odds is not None else odds_response([("Bet A", 1.80, 3.60, 4.50), ("Bet B", 1.85, 3.50, 4.40)])
         self.h2h = h2h if h2h is not None else h2h_matches()
         self.odds_error, self.h2h_error = odds_error, h2h_error
+        self.form = form if form is not None else {}  # {team_id: [近期比赛]}
         self.fixture_calls, self.standings_calls, self.odds_calls = [], [], []
+        self.form_calls = []
 
     async def get_fixtures(self, league_id, season, date_from, date_to):
         self.fixture_calls.append(season)
@@ -105,6 +107,11 @@ class FakeAPI:
         if self.h2h_error:
             raise self.h2h_error
         return self.h2h
+
+    async def get_team_form(self, team_id, season, last=5):
+        """深度分析用：某队近期已完场比赛。默认空 = 模拟“取不到近期数据”。"""
+        self.form_calls.append((team_id, season, last))
+        return self.form.get(team_id, [])
 
     async def get_account_status(self):
         return {"subscription": {"plan": "Pro", "active": True}, "requests": {"current": 12, "limit_day": 7500}}
