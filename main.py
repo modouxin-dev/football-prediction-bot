@@ -33,7 +33,15 @@ from data_source import DataSourceError, DataSourceRouter
 from football_data import FootballDataAPI
 from bot_handler import MENU_ITEMS, BotUI, esc, league_label, split_html_blocks
 from config import ConfigError, Settings, load_settings
-from service import Prediction, PredictionService
+from service import (
+    MODE_DATE,
+    ST_NO_DATA,
+    MODE_NEXT,
+    MODE_TODAY,
+    MODE_UPCOMING,
+    Prediction,
+    PredictionService,
+)
 
 try:  # 图表依赖缺失时机器人仍要能正常跑，只是不出图
     import chart
@@ -56,6 +64,7 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("predict", "比赛预测 / Match prediction"),
     ("standings", "联赛排名 / League standings"),
     ("refresh", "刷新数据 / Refresh data"),
+    ("next", "下一场比赛 / Next match"),
     ("web", "网页端入口 / Web app"),
     ("test", "立即推送一次预测（管理员） / Push now (admin)"),
     ("status", "运行状态与数据源诊断（管理员） / Status & diagnostics (admin)"),
@@ -281,6 +290,14 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _dispatch_menu_cmd(update, context, "refresh")
 
 
+async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/next — 直接查看下一场比赛 / Show the next match directly."""
+    context.user_data["fx_mode"] = MODE_NEXT
+    context.user_data["fx_page"] = 0
+    context.application.bot_data["fx_cache"] = None
+    await _dispatch_menu_cmd(update, context, "fixtures")
+
+
 async def web_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/web — 网页端入口 / Web app entry."""
     await _dispatch_menu_cmd(update, context, "web")
@@ -321,10 +338,18 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
     try:
         tz = settings.timezone
         label = datetime.now(tz).strftime("%Y-%m-%d")
+        mode = context.user_data.get("fx_mode") or MODE_TODAY
+        target = context.user_data.get("fx_date")
         cache = app.bot_data.get("fx_cache")
-        if cache is None or cache.get("date") != label:
-            items = await service.get_today_fixtures()  # 失败会抛 APIError，错误不写入缓存
-            cache = {"date": label, "items": items}
+        ck = f"{label}|{mode}|{target}"
+        if cache is None or cache.get("date") != ck:
+            # 统一查询入口：区分「接口无数据」与「窗口内无比赛」
+            res = await service.query_fixtures(mode, target)
+            items = res["fixtures"]
+            cache = {"date": ck, "items": items, "status": res["status"],
+                     "note": res["note"], "season_range": res["season_range"],
+                     "error": res.get("error"),
+                     "day_label": res["day_label"], "mode": mode}
             app.bot_data["fx_cache"] = cache
         items = cache["items"]
     except APIError as exc:
@@ -335,14 +360,30 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
         text = f"❌ <b>获取今日赛程失败</b>\n{esc(describe_error(exc))}"
         markup = back_to_menu_markup()
     else:
-        # 今日无比赛时会自动扩展到未来，此时用实际覆盖的日期范围做标题，并标记跨天
         multi_day = bool(getattr(service, "using_upcoming", False))
-        day_label = getattr(service, "fixture_day_label", "") or label
+        day_label = cache.get("day_label") or getattr(service, "fixture_day_label", "") or label
         text, markup, page, _ = ui.format_fixtures_page(
             items, tz, page, FX_PER_PAGE, day_label, multi_day=multi_day
         )
-        if not items and service.last_note:
-            text = f"{text}\n\n{esc(service.last_note)}"
+        # 三态渲染：有数据不啰嗦；窗口无比赛给范围+下一步；接口无数据说清真实原因
+        note = cache.get("note")
+        if not items and note:
+            span = cache.get("season_range")
+            if cache.get("status") == ST_NO_DATA:
+                err = cache.get("error")
+                reason = esc(describe_error(err)) if err is not None else esc(note)
+                hint = ui.error_hint(err) if err is not None else ""
+                text = (
+                    "❌ <b>获取赛程失败</b>\n"
+                    f"{reason}\n\n{hint}"
+                )
+                markup = back_to_menu_markup()
+            else:
+                hint = ""
+                if span:
+                    hint = (f"\n\n📆 该赛季数据范围：<code>{span[0]}</code> ~ <code>{span[1]}</code>"
+                            f"\n可点「下一场」查看最近一场比赛。")
+                text = f"{text}\n\n{esc(note)}{hint}"
     finally:
         end_task(app.bot_data, user_id, "fixtures")
 
@@ -394,6 +435,21 @@ async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: s
         await show_fixtures(update, context, page=0)  # 比赛预测要先选比赛 / pick a match first
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
+
+
+async def on_fixtures_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """切换赛程查询模式：今日 / 未来 7 天 / 下一场。
+
+    Switch fixture query mode: today / upcoming / next.
+    """
+    query = update.callback_query
+    _, _, raw = (query.data or "").partition(":")
+    await query.answer()
+    context.user_data["fx_mode"] = raw
+    context.user_data["fx_page"] = 0
+    # 清空缓存，强制按新模式重新查询（不同模式查询区间不同，不能复用）
+    context.application.bot_data["fx_cache"] = None
+    await show_fixtures(update, context, page=0)
 
 
 async def on_fixtures_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -825,8 +881,10 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("standings", standings_cmd))
     app.add_handler(CommandHandler("refresh", refresh_cmd))
     app.add_handler(CommandHandler("web", web_cmd))
+    app.add_handler(CommandHandler("next", next_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
-    app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\\d+$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_mode, pattern=r"^fxm:(today|upcoming|next)$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
     app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:.+$"))
     app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|ring|card|form|goals|h2h|schedule):.+$"))
