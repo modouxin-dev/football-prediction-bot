@@ -1,0 +1,26 @@
+# 封闭式测试部署编排。
+# 说明：容器层做最小权限；域名级出口限制必须在防火墙 / egress proxy 实施，
+# 单靠 Docker 网络配置不足以限制出口。
+services:
+  worker:
+    build: ./worker
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+      - /workspace:size=1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - egress_limited
+    # 凭据只在运行时注入，不写入镜像、不写入日志、不写入产物
+    environment:
+      GIT_TERMINAL_PROMPT: "0"
+      GH_TOKEN: "${GH_TOKEN}"
+      SRC_REPO: "modouxin-dev/football-prediction-bot"
+      DST_REPO: "modouxin-dev/football-prediction-bot-staging"
+
+networks:
+  egress_limited:
+    driver: bridge
