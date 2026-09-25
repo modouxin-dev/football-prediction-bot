@@ -308,7 +308,7 @@ def test_menu_home_callback_renders_menu():
     ctx, _ = make_ctx(TodayAPI(today_fixtures(2)))
     update, q = query_update("menu:home")
     run(main.on_menu(update, ctx))
-    assert q.edits and "足球量化预测机器人" in q.edits[0][0]
+    assert q.edits and "Football Insight" in q.edits[0][0]
 
 
 def test_menu_fixtures_callback_lists_fixtures():
