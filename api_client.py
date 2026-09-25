@@ -35,6 +35,7 @@ TTL_ODDS = 15 * 60
 TTL_H2H = 12 * 3600
 TTL_FORM = 12 * 3600  # 球队近期战绩（深度分析用，变化慢）
 TTL_STATUS = 5 * 60  # /status 诊断用的账户额度查询
+TTL_SEASONS = 24 * 3600  # 账号可用赛季列表（几乎不变，缓存一天，省额度）
 
 HTTP_HINTS = {
     401: "API Key 无效或缺失",
@@ -204,6 +205,20 @@ class FootballAPI:
         matches = await self._get("fixtures", params, ttl=TTL_FORM)
         done = {"FT", "AET", "PEN"}  # 只统计已完场，未开赛的不算进状态
         return [m for m in matches or [] if ((m.get("fixture") or {}).get("status") or {}).get("short") in done]
+
+    async def get_available_seasons(self) -> list[int]:
+        """当前账号可访问的赛季列表（/leagues/seasons），升序去重。
+
+        取不到时抛出 APIError，由上层决定降级策略；不在这里猜测或硬编码年份。
+        """
+        response = await self._get("leagues/seasons", {}, ttl=TTL_SEASONS)
+        seasons: set[int] = set()
+        for item in response or []:
+            try:
+                seasons.add(int(item))
+            except (TypeError, ValueError):
+                continue  # 忽略非整数条目（如 "2024/2025" 这类格式）
+        return sorted(seasons)
 
     async def get_account_status(self) -> dict:
         """账户与额度（用于 /status 诊断）。额度变化慢，缓存 5 分钟，避免反复排查时空耗额度。"""
