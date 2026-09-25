@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import httpx
@@ -263,6 +263,17 @@ class FootballDataAPI:
         return list(by_team.values())
 
     # ---- 对外接口（与 FootballAPI 同名，便于统一调度） ----------------------------
+    @staticmethod
+    def _in_range(m: dict, date_from: date, date_to: date) -> bool:
+        """本地按开赛日期过滤（用于「不带日期参数」拉取全量赛程后的筛选）。"""
+        raw = m.get("utcDate") or ""
+        if not raw:
+            return False
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        return date_from <= dt.date() <= date_to
     async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict]:
         code = _code_for(league_id)
         params = {"dateFrom": date_from.isoformat(), "dateTo": date_to.isoformat()}
@@ -284,8 +295,41 @@ class FootballDataAPI:
             log.info("全局端点共 %d 场，过滤后 %d 场", len(all_matches), len(matches))
 
         if not matches:
+            # 第三级兜底：部分免费层账号的 dateFrom/dateTo 过滤会返回空，
+            # 改为拉取该竞赛整季赛程（不带日期参数），再在本地按日期筛选。
+            log.info("备用源带日期过滤仍为空，改用不带日期参数拉取整季赛程（竞赛 %s）", code)
+            payload = await self._get(f"competitions/{code}/matches", {}, ttl=TTL_MATCHES)
+            season_matches = payload.get("matches") or []
+            matches = [m for m in season_matches if self._in_range(m, date_from, date_to)]
+            log.info("整季赛程共 %d 场，按 %s ~ %s 本地过滤后 %d 场",
+                     len(season_matches), date_from, date_to, len(matches))
+
+        if not matches:
             return []
         return [self._to_fixture(m, league_id, season) for m in matches]
+
+    async def probe(self, league_id: int) -> dict:
+        """连通性诊断：真实请求一次备用源，返回状态/条数/原始片段，供 /status 展示。
+
+        不抛异常（除网络层外的问题也一律转成文本），便于管理员自查账号与套餐。
+        """
+        code = _code_for(league_id)
+        result: dict[str, Any] = {"code": code}
+        try:
+            payload = await self._request(f"competitions/{code}/matches", {})
+        except Exception as exc:  # 诊断不能影响主流程
+            result.update(ok=False, detail=f"{type(exc).__name__}: {exc}")
+            return result
+        matches = (payload or {}).get("matches") or []
+        result.update(
+            ok=bool(matches),
+            count=len(matches),
+            competition=((payload or {}).get("competition") or {}).get("name", "-"),
+        )
+        if not matches:
+            # 返回空时把原始响应片段带出来，便于判断是账号限制还是真的没数据
+            result["raw"] = str(payload)[:200]
+        return result
 
     async def get_standings(self, league_id: int, season: int) -> list[dict]:
         code = _code_for(league_id)
