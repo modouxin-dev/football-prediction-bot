@@ -31,7 +31,7 @@ from analyzer import MatchAnalyzer
 from api_client import APIError, FootballAPI
 from data_source import DataSourceError, DataSourceRouter
 from football_data import FootballDataAPI
-from bot_handler import MENU_ITEMS, BotUI, esc
+from bot_handler import MENU_ITEMS, BotUI, esc, split_html_blocks
 from config import ConfigError, Settings, load_settings
 from service import Prediction, PredictionService
 
@@ -269,7 +269,7 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
     if query:
         await edit_view(query, text, markup)
     else:
-        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await reply_html(update.effective_message, text, markup)
 
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -293,6 +293,8 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show_fixtures(update, context, page=0)
     elif key == "help":
         await edit_view(query, ui.format_help(), ui.menu_keyboard())
+    elif key == "web":
+        await edit_view(query, ui.WEB_ENTRY_TEXT, ui.menu_keyboard())
     elif key == "standings":
         await show_standings(update, context)
     elif key == "analysis":
@@ -345,7 +347,7 @@ async def show_standings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if query:
         await edit_view(query, text, markup)
     else:
-        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        await reply_html(update.effective_message, text, markup)
 
 
 async def on_analysis_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -514,7 +516,7 @@ async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not key:
         return
     if key == "help":
-        await update.effective_message.reply_text(ui.format_help(), parse_mode=ParseMode.HTML)
+        await reply_html(update.effective_message, ui.format_help(), None)
     elif key == "refresh":
         context.application.bot_data["fx_cache"] = None
         await show_fixtures(update, context, page=0)
@@ -523,7 +525,7 @@ async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif key == "standings":
         await show_standings(update, context)
     else:
-        await update.effective_message.reply_text(ui.format_coming(key), parse_mode=ParseMode.HTML)
+        await reply_html(update.effective_message, ui.format_coming(key), None)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -579,9 +581,31 @@ def render_view(action: str, p: Prediction, settings: Settings, h2h: list[dict] 
     return ui.format_prediction(p, tz)
 
 
+async def reply_html(message, text: str, markup) -> None:
+    """发送 HTML 消息：统一加无链接预览，超长时拆分（后续块不带键盘）。"""
+    blocks = split_html_blocks(text)
+    for idx, block in enumerate(blocks):
+        await message.reply_text(
+            block,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup if idx == len(blocks) - 1 else None,
+            disable_web_page_preview=True,
+        )
+
+
 async def edit_view(query, text: str, keyboard: InlineKeyboardMarkup) -> None:
+    """就地编辑上一条消息。文本过长时按行拆分，只编辑第一块（其余省略并记录日志）。"""
+    blocks = split_html_blocks(text)
+    if len(blocks) > 1:
+        log.warning("消息过长（%d 字符），已拆分为 %d 块，仅展示第一块", len(text), len(blocks))
+        text = blocks[0] + "\n\n…（内容过长，已省略部分）"
     try:
-        await query.edit_message_text(text=text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        await query.edit_message_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
     except BadRequest as exc:
         if "not modified" not in str(exc).lower():  # 点击的正是当前页面时 Telegram 会报这个，忽略即可
             raise
