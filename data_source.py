@@ -125,20 +125,13 @@ class DataSourceRouter:
                 f"备用源：{str(exc)[:200]}"
             ) from None
 
-        if not result:
-            if optional:
-                return result  # 可选数据为空是正常情况
-            self._last_errors["football-data"] = "返回空数据"
-            primary_reason = self.last_error("api-football")
-            if primary_reason:
-                raise DataSourceError(
-                    "主数据源与备用数据源均无数据。\n"
-                    f"主源：{primary_reason}\n备用源：返回空数据"
-                )
-            return result  # 主源正常但确实无数据（如今天没有比赛），如实返回空
-
+        # 备用源请求成功（未抛异常）
         self._source = "football-data"
         self._last_errors.pop("football-data", None)
+        if not result:
+            # 备用源正常响应但无数据 = 该时段确实没有比赛/数据，不是故障。
+            # 主源的失败原因仍保留在 _last_errors 中，供上层提示（如赛季不可用）。
+            log.info("备用数据源 %s 返回空数据（该时段确实没有数据）", method)
         return result
 
     # ---- 对外接口（与 FootballAPI 同名） ---------------------------------------
