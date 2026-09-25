@@ -672,3 +672,53 @@ def test_probe_never_raises():
     info = run(fd.probe(39))
     assert info["ok"] is False
     assert "detail" in info
+
+
+# ==============================================================================
+# 窗口内无比赛 → 回退展示最近比赛日（用真实数据，不伪造）
+# ==============================================================================
+def test_shift_to_nearest_matchday_when_window_empty():
+    """请求窗口内没有比赛时，展示数据源里最近的真实比赛日，并说明原因。"""
+    def handler(request):
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [
+            _match_on("2026-10-05T14:00:00Z", 11),
+            _match_on("2026-10-05T18:30:00Z", 12),
+            _match_on("2026-10-18T14:00:00Z", 13),
+        ]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert len(fixtures) == 2, "应展示 10-05 那天的 2 场"
+    assert fd.last_shifted_date == date(2026, 10, 5)
+    assert "10-05" in fd.last_note or "2026-10-05" in fd.last_note
+
+
+def test_shift_note_explains_the_shift():
+    """必须说明这是「回退展示」，不能让用户误以为是请求日期的比赛。"""
+    def handler(request):
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [_match_on("2026-10-05T14:00:00Z", 11)]})
+
+    fd = make_fd(handler)
+    run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert "没有比赛" in fd.last_note
+    assert "最近的比赛日" in fd.last_note
+
+
+def test_no_shift_when_window_has_data():
+    """窗口内有比赛时不得触发回退（不能无事生非改日期）。"""
+    def handler(request):
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [
+            _match_on("2026-09-27T14:00:00Z", 21),
+            _match_on("2026-12-01T14:00:00Z", 22),
+        ]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert len(fixtures) == 1
+    assert fd.last_shifted_date is None  # 未回退
