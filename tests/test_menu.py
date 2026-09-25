@@ -227,12 +227,32 @@ def test_fixtures_page_clamps_out_of_range_page():
 
 
 def test_fixtures_page_empty_shows_reason_not_error():
-    """空赛程必须是「高级空状态」：说明范围无比赛 + 给出下一步，而非一片空白。"""
+    """空赛程必须是「高级空状态」：说明范围无比赛 + 已查询范围 + 下一步，而非一片空白。"""
     text, markup, _, _ = BotUI.format_fixtures_page([], SETTINGS.timezone, 0, 5, "2026-09-25")
     assert "NO FIXTURE IN THIS WINDOW" in text
     assert "暂无比赛" in text
-    assert "稍后再试" in text  # 给出下一步指引，不能是死胡同
+    assert "你可以尝试" in text  # 给出下一步指引，不能是死胡同
     assert any(b.callback_data == "menu:home" for row in markup.inline_keyboard for b in row)
+
+
+def test_empty_state_shows_queried_range_and_source_status():
+    """空态必须显示查了哪段时间、数据源是否正常，不能把没比赛说成接口无数据。"""
+    text, markup, _, _ = BotUI.format_fixtures_page(
+        [], SETTINGS.timezone, 0, 5, "2026-09-25",
+        empty_range=("2026-09-25", "2026-10-02"), empty_source_ok=True,
+    )
+    assert "2026-09-25" in text and "2026-10-02" in text
+    assert "数据源正常" in text  # 明确区分「没比赛」与「接口无数据」
+    data = {b.callback_data for row in markup.inline_keyboard for b in row}
+    assert "fxm:next" in data and "fxm:upcoming" in data
+
+
+def test_empty_state_marks_source_abnormal():
+    """接口真的失败时，空态必须说数据源异常，不能伪装成只是没比赛。"""
+    text, _, _, _ = BotUI.format_fixtures_page(
+        [], SETTINGS.timezone, 0, 5, "2026-09-25", empty_source_ok=False,
+    )
+    assert "数据源返回异常" in text
 
 
 def test_status_text_mapping_covers_common_codes():
