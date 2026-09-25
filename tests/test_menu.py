@@ -319,13 +319,13 @@ def test_menu_fixtures_callback_lists_fixtures():
 
 
 def test_menu_fixtures_shows_real_api_error():
-    """赛季不可用时：逐级降级探测（每个赛季各请求一次），全部失败后抛出真实原因。"""
+    """接口故障时：状态为 no_data，显示真实原因，绝不伪装成「今天没有比赛」。"""
     api = BoomAPI()
     ctx, _ = make_ctx(api)
     update, q = query_update("menu:fixtures")
     run(main.on_menu(update, ctx))
     text = q.edits[0][0]
-    assert "获取今日赛程失败" in text
+    assert "获取赛程失败" in text
     assert "套餐" in text  # 真实原因，不是“今天没有比赛”
     # 降级探测：候选赛季各请求一次，不重复刷同一个赛季
     assert api.calls == len({2026, 2025, 2024, 2023})
@@ -384,3 +384,65 @@ def test_unexpected_exception_does_not_crash():
     update, q = query_update("menu:fixtures")
     run(main.on_menu(update, ctx))
     assert "获取今日赛程失败" in q.edits[0][0]
+
+
+# ==============================================================================
+# 赛程查询三态：接口无数据 / 窗口无比赛 / 正常
+# ==============================================================================
+def test_query_status_ok_when_window_has_matches():
+    api = TodayAPI(today_fixtures(3))
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+
+    svc = PredictionService(SETTINGS, api, MatchAnalyzer())
+    res = run(svc.query_fixtures("today"))
+    assert res["status"] == "ok"
+    assert len(res["fixtures"]) == 3
+
+
+def test_query_status_no_data_keeps_real_reason():
+    """接口故障必须保留真实原因，不能伪装成「今天没比赛」。"""
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+
+    svc = PredictionService(SETTINGS, BoomAPI(), MatchAnalyzer())
+    res = run(svc.query_fixtures("today"))
+    assert res["status"] == "no_data"
+    assert res["error"] is not None  # 原始异常保留，供上层翻译
+    assert "Free plans" in res["note"]
+
+
+def test_query_next_mode_returns_single_upcoming_match():
+    """「下一场」只返回不早于当前时刻的第一场。"""
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+
+    api = TodayAPI(today_fixtures(2))
+    svc = PredictionService(SETTINGS, api, MatchAnalyzer())
+    res = run(svc.query_fixtures("next"))
+    assert res["status"] == "ok"
+    assert len(res["fixtures"]) == 1
+
+
+def test_query_window_empty_shows_season_range():
+    """窗口无比赛时要给出赛季数据范围，方便排查。"""
+    from service import PredictionService
+    from analyzer import MatchAnalyzer
+    from datetime import date
+
+    class EmptyAPI(TodayAPI):
+        def __init__(self):
+            super().__init__([])
+
+        @property
+        def fallback(self):
+            fb = super().fallback
+            return fb
+
+    svc = PredictionService(SETTINGS, EmptyAPI(), MatchAnalyzer())
+    # 手动注入赛季范围，验证 window_empty 分支会把它带出来
+    svc._season_range = lambda: (date(2026, 8, 15), date(2027, 5, 24))
+    res = run(svc.query_fixtures("today"))
+    assert res["status"] == "window_empty"
+    assert res["season_range"] == (date(2026, 8, 15), date(2027, 5, 24))
+    assert "没有比赛" in res["note"]
