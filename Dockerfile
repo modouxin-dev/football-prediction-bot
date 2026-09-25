@@ -23,6 +23,8 @@ RUN pip install -r requirements.txt
 
 # 让非 root 用户也能读写 matplotlib 缓存
 RUN mkdir -p /tmp/mplconfig && chmod 777 /tmp/mplconfig
+# 预测落盘目录：挂载持久化卷后重启不丢；未挂载时也能正常读写（仅重启清空）
+RUN mkdir -p /data && chmod 777 /data
 
 # 以非 root 用户运行
 RUN useradd --create-home --uid 10001 bot
