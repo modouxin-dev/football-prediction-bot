@@ -4,9 +4,10 @@ from __future__ import annotations
 import html
 from datetime import datetime
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from analyzer import OUTCOMES, overround
+from service import parse_kickoff
 
 SEP = "━━━━━━━━━━━━━━━━━━"
 OUTCOME_LABEL = {"home": "主胜", "draw": "平局", "away": "客胜"}
@@ -17,6 +18,38 @@ VALUE_LOW = 0.03
 
 # 视图标签页：(callback 前缀, 按钮文字)
 TABS = (("home", "📈 预测"), ("deep", "🔍 深度分析"), ("h2h", "📊 历史交锋"), ("odds", "💰 赔率对比"))
+
+# 主菜单：(callback key, 按钮文字) —— Inline 与底部 Reply 键盘共用同一份定义
+MENU_ITEMS = (
+    ("fixtures", "📅 今日赛程"),
+    ("predict", "⚽ 比赛预测"),
+    ("analysis", "📊 深度分析"),
+    ("standings", "🏆 联赛排名"),
+    ("refresh", "🔄 刷新数据"),
+    ("help", "ℹ️ 使用帮助"),
+)
+
+# API-Football 的比赛状态缩写 → 中文
+STATUS_TEXT = {
+    "NS": "未开始",
+    "TBD": "时间待定",
+    "1H": "上半场",
+    "HT": "中场休息",
+    "2H": "下半场",
+    "ET": "加时赛",
+    "BT": "加时休息",
+    "P": "点球大战",
+    "PEN": "点球大战",
+    "FT": "已完场",
+    "AET": "加时完场",
+    "PST": "已推迟",
+    "CANC": "已取消",
+    "ABD": "已中止",
+    "SUSP": "已中断",
+    "INT": "已中断",
+    "LIVE": "进行中",
+    "WO": "弃赛",
+}
 
 
 def esc(value) -> str:
@@ -216,3 +249,124 @@ class BotUI:
         return "\n".join(
             [title, BotUI.matchup(p, tz), SEP, summary, *rows, SEP, "🟢 胜 · 🟡 平 · 🔴 负；球队阵容与状态可能已大不相同，仅供参考。"]
         )
+
+    # ---- 主菜单 -----------------------------------------------------------------
+    @staticmethod
+    def menu_keyboard() -> InlineKeyboardMarkup:
+        """Inline 主菜单：点击后在原消息上切换，不刷屏。"""
+        buttons = [InlineKeyboardButton(label, callback_data=f"menu:{key}") for key, label in MENU_ITEMS]
+        return InlineKeyboardMarkup([buttons[0:2], buttons[2:4], buttons[4:6]])
+
+    @staticmethod
+    def reply_menu_keyboard() -> ReplyKeyboardMarkup:
+        """底部常驻键盘：与 Inline 菜单共用 MENU_ITEMS，保证两边一致。"""
+        labels = [label for _, label in MENU_ITEMS]
+        return ReplyKeyboardMarkup(
+            [
+                [KeyboardButton(x) for x in labels[0:2]],
+                [KeyboardButton(x) for x in labels[2:4]],
+                [KeyboardButton(x) for x in labels[4:6]],
+            ],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
+
+    @staticmethod
+    def format_menu(settings) -> str:
+        return (
+            "⚽ <b>足球量化预测机器人</b>\n"
+            f"联赛 <code>{settings.league_id}</code> · 赛季 <code>{settings.season}</code>"
+            f" · 时区 <code>{settings.timezone.zone}</code>\n"
+            f"{SEP}\n请选择一个功能："
+        )
+
+    @staticmethod
+    def format_help() -> str:
+        return (
+            "ℹ️ <b>使用帮助</b>\n"
+            f"{SEP}\n"
+            "📅 今日赛程：列出当天全部比赛（按联赛分组、支持翻页）\n"
+            "⚽ 比赛预测：选择比赛，生成胜平负概率与建议\n"
+            "📊 深度分析：近期状态、联赛数据、历史交锋\n"
+            "🏆 联赛排名：当前积分榜\n"
+            "🔄 刷新数据：清空缓存重新拉取\n\n"
+            "命令：/menu 打开菜单 · /test 立即推送 · /status 运行状态\n"
+            f"{SEP}\n{DISCLAIMER}"
+        )
+
+    @staticmethod
+    def format_coming(key: str) -> str:
+        label = dict(MENU_ITEMS).get(key, key)
+        return f"🚧 <b>{esc(label)}</b>\n{SEP}\n该功能正在开发中，将在后续阶段上线。"
+
+    @staticmethod
+    def error_hint(exc) -> str:
+        """把 APIError 翻译成人话，区分 Key / 套餐 / 限流 / 赛季 / 网络等原因。"""
+        text = str(exc).lower()
+        if "do not have access to this season" in text or "free plan" in text:
+            return "🔎 原因：当前订阅套餐不支持该赛季（Free 套餐通常只开放 2022–2024），需升级套餐或改用可访问的赛季。"
+        if "rate limit" in text or "429" in text or "too many" in text:
+            return "🔎 原因：请求次数已超限，请稍后再试或升级套餐。"
+        if "403" in text or "not subscribed" in text or "invalid" in text:
+            return "🔎 原因：API Key 无效或未订阅该接口，请检查 Key 与订阅状态。"
+        if "401" in text or "unauthor" in text:
+            return "🔎 原因：API Key 鉴权失败，请检查 Key 是否正确。"
+        if "timeout" in text or "timed out" in text or "network" in text or "connect" in text:
+            return "🔎 原因：网络异常或数据源超时，请稍后重试。"
+        return "🔎 如持续出现，请检查 API Key、套餐权限与网络连接。"
+
+    # ---- 今日赛程 ---------------------------------------------------------------
+    @staticmethod
+    def format_fixtures_page(
+        items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = ""
+    ) -> tuple[str, InlineKeyboardMarkup, int, int]:
+        """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。"""
+        total_pages = max(1, -(-len(items) // per_page))
+        page = min(max(page, 0), total_pages - 1)
+        chunk = items[page * per_page : (page + 1) * per_page]
+
+        lines = [
+            "📅 <b>今日赛程</b>",
+            f"日期：<code>{esc(day_label)}</code> · 时区：<code>{esc(tz.zone)}</code>",
+            SEP,
+        ]
+        rows: list[list[InlineKeyboardButton]] = []
+        if not chunk:
+            lines.append("今日暂无赛程。")
+        else:
+            current = None
+            for offset, fx in enumerate(chunk):
+                idx = page * per_page + offset + 1
+                info = fx.get("fixture") or {}
+                league = (fx.get("league") or {}).get("name") or "未知联赛"
+                if league != current:  # 按联赛分组，只在切换联赛时打印标题
+                    current = league
+                    lines.append(f"🏆 <b>{esc(league)}</b>")
+                teams = fx.get("teams") or {}
+                home = (teams.get("home") or {}).get("name") or "?"
+                away = (teams.get("away") or {}).get("name") or "?"
+                kickoff = parse_kickoff(info.get("date"))
+                when = kickoff.astimezone(tz).strftime("%H:%M") if kickoff else "--:--"
+                short = (info.get("status") or {}).get("short") or ""
+                status = STATUS_TEXT.get(short, short or "未知")
+                goals = fx.get("goals") or {}
+                gh, ga = goals.get("home"), goals.get("away")
+                score = f" <b>{esc(gh)}-{esc(ga)}</b>" if gh is not None and ga is not None else ""
+                lines.append(f"{idx}. <code>{when}</code> {esc(home)} 🆚 {esc(away)}{score}")
+                lines.append(f"     状态：{esc(status)} · ID <code>{esc(info.get('id'))}</code>")
+                rows.append(
+                    [
+                        InlineKeyboardButton(f"⚽ 预测 {idx}", callback_data=f"fx:{info.get('id')}"),
+                        InlineKeyboardButton(f"📊 分析 {idx}", callback_data=f"fa:{info.get('id')}"),
+                    ]
+                )
+        if total_pages > 1:
+            rows.append(
+                [
+                    InlineKeyboardButton("⬅️ 上一页", callback_data=f"fxp:{max(0, page - 1)}"),
+                    InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"),
+                    InlineKeyboardButton("下一页 ➡️", callback_data=f"fxp:{min(total_pages - 1, page + 1)}"),
+                ]
+            )
+        rows.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows), page, total_pages
