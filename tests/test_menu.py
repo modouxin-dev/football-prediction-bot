@@ -227,8 +227,11 @@ def test_fixtures_page_clamps_out_of_range_page():
 
 
 def test_fixtures_page_empty_shows_reason_not_error():
+    """空赛程必须是「高级空状态」：说明范围无比赛 + 给出下一步，而非一片空白。"""
     text, markup, _, _ = BotUI.format_fixtures_page([], SETTINGS.timezone, 0, 5, "2026-09-25")
-    assert "暂无赛程" in text
+    assert "NO FIXTURE IN THIS WINDOW" in text
+    assert "暂无比赛" in text
+    assert "稍后再试" in text  # 给出下一步指引，不能是死胡同
     assert any(b.callback_data == "menu:home" for row in markup.inline_keyboard for b in row)
 
 
