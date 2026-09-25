@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
+
 import paths
 import sys
 from dataclasses import dataclass
@@ -352,43 +354,71 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def storage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/storage — 验证挂载卷是否生效（写入测试文件 + 检查数据库表）。"""
+    """/storage — 存储自检：写入/读取/数据库/挂载/最后写入时间 五项。
+
+    核心用途：部署前跑一次，重新部署后再跑一次；
+    第二次若仍能看到第一次的标记文件及其时间，即证明 Volume 生效。
+    """
     s: Settings = context.application.bot_data["settings"]
     if not is_admin(update, s):
         return await deny(update)
     service: PredictionService = context.application.bot_data["service"]
     await _dispatch_cmd_typing(update)
 
-    # 1) 写入测试：文件能落盘，说明 Volume 真的挂上了
-    marker = paths.DATA_DIR / ".storage_test"
-    try:
-        marker.write_text("ok", encoding="utf-8")
-        exists = marker.exists()
-        marker.unlink(missing_ok=True)
-        write_ok = exists
-    except Exception as exc:
-        write_ok = False
-        log.warning("存储写入测试失败：%s", exc)
-
-    # 2) 数据库表：确认预测表已建立
+    probe = paths.probe_storage()
     try:
         tables = service.repo.tables()
     except Exception:
         tables = []
-
     st = service.stats()
+
+    def mark(ok: bool) -> str:
+        return "✅" if ok else "❌"
+
+    # 最后写入时间：数据库文件的 mtime，能直观看出数据是否真的落盘
+    last_write = "—"
+    try:
+        db_file = Path(service.repo.db_path)
+        if db_file.exists():
+            from datetime import datetime, timezone
+
+            mt = datetime.fromtimestamp(db_file.stat().st_mtime, timezone.utc)
+            last_write = BotUI.fmt_time(mt, s.timezone, "%m-%d %H:%M:%S")
+    except Exception:
+        pass
+
+    age = probe.get("age_seconds")
+    if age is None:
+        age_text = "—"
+    elif age < 60:
+        age_text = "刚刚写入（本次启动首次）"
+    elif age < 3600:
+        age_text = f"{int(age // 60)} 分钟前写入"
+    elif age < 86400:
+        age_text = f"{age / 3600:.1f} 小时前写入"
+    else:
+        age_text = f"{age / 86400:.1f} 天前写入"
+
+    mounted = probe["mounted"] and probe["age_seconds"] is not None and probe["age_seconds"] > 60
     lines = [
         "💾 <b>存储状态</b>",
         f"数据目录：<code>{esc(paths.DATA_DIR)}</code>",
         f"数据库：<code>{esc(service.repo.db_path)}</code>",
-        f"落盘：{'✅ 是（重新部署不丢）' if service.repo.persistent and write_ok else '⚠️ 否（会丢）'}",
-        f"写入测试：{'✅ 通过' if write_ok else '❌ 失败（Volume 可能没挂载）'}",
-        f"数据表：<code>{esc(', '.join(tables) or '无')}</code>",
+        "",
+        f"{mark(probe['write'])} 写入测试：{'通过' if probe['write'] else '失败'}",
+        f"{mark(probe['read'])} 读取测试：{'通过（内容一致）' if probe['read'] else '失败'}",
+        f"{mark(bool(tables))} 数据库：<code>{esc(', '.join(tables) or '无表')}</code>",
+        f"{mark(mounted)} Volume 挂载：{'已生效（跨部署保留）' if mounted else '未确认——重新部署后再执行一次本命令'}",
+        f"🕑 标记文件：<code>{age_text}</code>",
+        f"🕑 最后写入：<code>{esc(last_write)}</code>",
         "",
         f"已预测：<code>{st['total'] + st['pending']}</code> 场 · 已结算 <code>{st['total']}</code> 场",
     ]
-    if not write_ok:
-        lines += ["", "请在 Railway 新建 Volume 并挂载到 <code>/data</code>。"]
+    if not probe["write"] or not probe["read"]:
+        lines += ["", "⚠️ 写入/读取失败，数据留在容器临时目录，<b>重新部署会丢失</b>。"]
+    elif not mounted:
+        lines += ["", "ℹ️ 首次执行属正常；请重新部署后再执行一次，若标记时间仍在即 Volume 生效。"]
+    lines += ["", "未挂载 Volume 时，预测与命中率数据<b>会在重新部署后清空</b>。"]
     await update.effective_message.reply_text(
         "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
     )
@@ -459,7 +489,9 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
         multi_day = bool(getattr(service, "using_upcoming", False))
         day_label = cache.get("day_label") or getattr(service, "fixture_day_label", "") or label
         text, markup, page, _ = ui.format_fixtures_page(
-            items, tz, page, FX_PER_PAGE, day_label, multi_day=multi_day
+            items, tz, page, FX_PER_PAGE, day_label, multi_day=multi_day,
+            empty_range=cache.get("season_range"),
+            empty_source_ok=cache.get("status") != ST_NO_DATA,
         )
         # 三态渲染：有数据不啰嗦；窗口无比赛给范围+下一步；接口无数据说清真实原因
         note = cache.get("note")
