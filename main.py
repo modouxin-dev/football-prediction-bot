@@ -299,7 +299,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show_standings(update, context)
     elif key == "analysis":
         await show_fixtures(update, context, page=0)  # 深度分析要先选比赛
-    elif key == "prediction":
+    elif key == "predict":
         await show_fixtures(update, context, page=0)  # 比赛预测要先选比赛
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
