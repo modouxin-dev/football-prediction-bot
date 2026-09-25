@@ -4,6 +4,7 @@
 """
 import os
 import sqlite3
+from pathlib import Path
 
 import paths
 from repository import PredictionRepository
@@ -61,3 +62,33 @@ def test_env_overrides_db_path(tmp_path, monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(paths)
+
+
+def test_probe_storage_write_and_read():
+    """probe_storage 必须真实写→读→比对，不能只检查目录存在。"""
+    r = paths.probe_storage()
+    assert r["write"] is True
+    assert r["read"] is True
+    assert r["first_write"] is not None
+
+
+def test_probe_keeps_marker_for_cross_deploy_check():
+    """标记文件必须保留：重新部署后仍读到它，才能证明 Volume 生效。"""
+    paths.probe_storage()
+    marker = paths.DATA_DIR / paths.MARKER_NAME
+    assert marker.exists(), "标记文件被删除，无法做跨部署验证"
+    r2 = paths.probe_storage()  # 第二次应读到同一次写入时间
+    assert r2["age_seconds"] >= 0
+
+
+def test_probe_survives_unwritable_dir():
+    """目录不可写时不能抛异常，必须安全返回失败状态。"""
+    import paths as p
+
+    orig = p.DATA_DIR
+    p.DATA_DIR = Path("/proc/definitely/not/writable")
+    try:
+        r = p.probe_storage()
+        assert r["write"] is False
+    finally:
+        p.DATA_DIR = orig
