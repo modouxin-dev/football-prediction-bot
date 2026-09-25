@@ -54,6 +54,16 @@ STATUS_TEXT = {
 NO_DATA = "暂无可靠数据，不参与本次分析（缺什么就说明缺什么，不做填充）。"
 
 
+def _is_fallback(p) -> bool:
+    """预测结果是否来自备用数据源 football-data.org。"""
+    return "football-data" in str(getattr(p, "source", "")).lower()
+
+
+def _is_fallback_source(report: dict) -> bool:
+    """深度分析报告是否基于备用数据源。"""
+    return "football-data" in str(report.get("source", "")).lower()
+
+
 def _num(value) -> float:
     try:
         return float(value or 0)
@@ -235,6 +245,8 @@ class BotUI:
             SEP,
             f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code> · 预期比分 <code>{a['best_score']}</code>",
         ]
+        if _is_fallback(p):
+            lines.append("ℹ️ 当前为备用数据源，仅提供基础比赛数据，赔率等高级统计不可用。")
         if p.best:
             key, o = p.best
             flag = " 🚀 <b>Value Bet</b>" if o["edge"] > VALUE_FLAG else ""
@@ -325,10 +337,13 @@ class BotUI:
             f"💎 <b>置信度</b>：{esc(BotUI.confidence_text(p))}",
             f"🧩 <b>数据完整性</b>：{esc(p.data_completeness)}"
             + ("" if p.has_team_data else "（未使用球队实际数据）"),
+            f"🛰 <b>数据源</b>：<code>{esc(getattr(p, 'source', 'API-Football'))}</code>",
             f"🤖 <b>模型版本</b>：<code>{esc(model_version)}</code>",
             f"🕑 <b>数据更新时间</b>：<code>{BotUI.fmt_time(p.created_at, tz, '%Y-%m-%d %H:%M:%S')}</code>"
             f"（{BotUI.tz_label(tz, p.created_at)}）",
         ]
+        if _is_fallback(p):
+            lines.append("ℹ️ 当前为备用数据源，仅提供基础比赛数据，赔率等高级统计不可用。")
         if p.best:
             key, o = p.best
             lines.append(
@@ -451,6 +466,7 @@ class BotUI:
             f"⚖️ 主场优势：联赛主队场均 <code>{report['model']['avg_home_goals']:.2f}</code>"
             f" / 客队场均 <code>{report['model']['avg_away_goals']:.2f}</code>",
             f"⚽ 预期进球 λ：<code>{analysis['lambda_home']:.2f} - {analysis['lambda_away']:.2f}</code>",
+            f"🛰 数据源：<code>{esc(report.get('source', 'API-Football'))}</code>",
             f"🧩 数据完整性：<b>{integrity}</b>",
             "🩹 伤停信息：数据源未提供（当前套餐不支持）",
             f"🤖 模型版本：<code>{esc(model_version)}</code>",
@@ -466,6 +482,12 @@ class BotUI:
             (("主胜", analysis["win_prob"]), ("平局", analysis["draw_prob"]), ("客胜", analysis["loss_prob"])),
             key=lambda kv: kv[1],
         )
+        if _is_fallback_source(report):
+            lines += [
+                SEP,
+                "ℹ️ <b>当前备用数据源仅提供基础比赛数据，暂无法生成完整深度分析</b>"
+                "（无历史交锋、无赔率、无球员统计）。",
+            ]
         lines += [f"🎯 <b>模型倾向</b>：{top[0]}（{top[1]:.1%}）", SEP, DISCLAIMER]
         return "\n".join(lines)
 
