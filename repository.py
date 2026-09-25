@@ -305,17 +305,11 @@ class PredictionRepository:
         try:
             conn = self._connect()
             for m in matches:
-                fx = m.get("fixture") or {}
-                teams = m.get("teams") or {}
-                goals = m.get("goals") or {}
-                home = teams.get("home") or {}
-                away = teams.get("away") or {}
-                raw_id = str(fx.get("id") or "")
-                # "fd-123" → 123；非数字则退化为稳定哈希，避免主键冲突
-                mid = _stable_id(raw_id)
-                utc_date = fx.get("date") or ""
-                home_id = str(home.get("id") or "")
-                away_id = str(away.get("id") or "")
+                fx = _extract_match(m)
+                mid = fx["id"]
+                utc_date = fx["utc_date"]
+                home_id = fx["home_id"]
+                away_id = fx["away_id"]
                 # 先按业务唯一键定位已有行：命中则更新，避免 UNIQUE 冲突中断整批
                 row = conn.execute(
                     "SELECT id FROM matches WHERE competition_code=? AND utc_date=? "
@@ -326,8 +320,7 @@ class PredictionRepository:
                     conn.execute(
                         """UPDATE matches SET status=?, home_score=?, away_score=?,
                            raw_json=?, updated_at=? WHERE id=?""",
-                        ((fx.get("status") or {}).get("short") or "",
-                         _as_int(goals.get("home")), _as_int(goals.get("away")),
+                        (fx["status"], fx["home_score"], fx["away_score"],
                          json.dumps(m, ensure_ascii=False), _now_iso(), row["id"]),
                     )
                     saved += 1
@@ -346,13 +339,13 @@ class PredictionRepository:
                          updated_at=excluded.updated_at""",
                     (
                         mid, competition,
-                        _as_int((m.get("league") or {}).get("season")),
+                        fx["season"],
                         utc_date,
-                        (fx.get("status") or {}).get("short") or "",
-                        _as_int((m.get("league") or {}).get("round")),
-                        home_id, home.get("name") or "",
-                        away_id, away.get("name") or "",
-                        _as_int(goals.get("home")), _as_int(goals.get("away")),
+                        fx["status"],
+                        fx["matchday"],
+                        home_id, fx["home_name"],
+                        away_id, fx["away_name"],
+                        fx["home_score"], fx["away_score"],
                         source,
                         json.dumps(m, ensure_ascii=False),
                         _now_iso(),
@@ -449,6 +442,66 @@ def _as_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extract_match(m: dict) -> dict:
+    """把两种数据源的赛程结构归一化成同一组字段。
+
+    API-Football（主源）是嵌套结构：fixture / teams / goals / league。
+    football-data.org（备用源）是扁平结构：utcDate / homeTeam / score.fullTime。
+
+    之前只认嵌套结构，备用源拉到的数据会被存成空值，
+    导致本地库里 utc_date、队名、比分全为空，历史查询查不到任何东西。
+    """
+    fixture = m.get("fixture") or {}
+    teams = m.get("teams") or {}
+    goals = m.get("goals") or {}
+    league = m.get("league") or {}
+
+    # 备用源：顶层就是比赛本体
+    flat = bool(m.get("utcDate")) or bool(m.get("homeTeam"))
+
+    if flat:
+        home = m.get("homeTeam") or {}
+        away = m.get("awayTeam") or {}
+        full_time = (m.get("score") or {}).get("fullTime") or {}
+        raw_id = m.get("id")
+        utc_date = m.get("utcDate") or ""
+        status = m.get("status") or ""
+        season = (m.get("season") or {}).get("startDate") or ""
+        season = _as_int(season[:4]) if season else None
+        matchday = m.get("matchday")
+        home_score = _as_int(full_time.get("home"))
+        away_score = _as_int(full_time.get("away"))
+    else:
+        home = teams.get("home") or {}
+        away = teams.get("away") or {}
+        raw_id = fixture.get("id")
+        utc_date = fixture.get("date") or ""
+        status = (fixture.get("status") or {}).get("short") or ""
+        season = _as_int(league.get("season"))
+        matchday = None
+        # 主源的 round 形如 "Regular Season - 5"
+        raw_round = league.get("round") or ""
+        digits = "".join(ch for ch in raw_round.split("-")[-1] if ch.isdigit())
+        matchday = _as_int(digits) if digits else None
+        # 加时/点球可能为空，退回到 fulltime
+        home_score = _as_int(goals.get("home"))
+        away_score = _as_int(goals.get("away"))
+
+    return {
+        "id": _stable_id(str(raw_id or "")),
+        "utc_date": utc_date,
+        "status": status,
+        "season": season,
+        "matchday": matchday,
+        "home_id": str(home.get("id") or ""),
+        "home_name": home.get("name") or "",
+        "away_id": str(away.get("id") or ""),
+        "away_name": away.get("name") or "",
+        "home_score": home_score,
+        "away_score": away_score,
+    }
 
 
 def _outcome(home: int | None, away: int | None) -> str | None:

@@ -1,4 +1,6 @@
 """P1-5：预测落盘与命中率统计 / Prediction persistence & hit-rate."""
+import os
+import tempfile
 from datetime import datetime, timezone, timedelta
 
 from api_client import flatten_standings
@@ -154,3 +156,49 @@ def test_sync_results_tolerates_fetch_failure(tmp_path):
 
     service.get_today_fixtures = boom
     assert run(service.sync_results()) == 0
+
+
+def test_save_matches_supports_football_data_flat_format():
+    """备用源 football-data.org 是扁平结构，必须能正确落盘并被查询到。
+
+    回归：之前只认 API-Football 的嵌套结构，备用源数据会被存成空值，
+    导致 utc_date / 队名 / 比分全空，历史查询永远查不到。
+    """
+    from repository import PredictionRepository
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = PredictionRepository(os.path.join(td, "t.db"))
+        flat = [{
+            "id": 900001,
+            "utcDate": "2030-01-01T20:00:00Z",
+            "status": "SCHEDULED",
+            "matchday": 1,
+            "homeTeam": {"id": 1, "name": "Team A"},
+            "awayTeam": {"id": 2, "name": "Team B"},
+            "score": {"fullTime": {"home": None, "away": None}},
+            "season": {"startDate": "2029-08-01"},
+        }]
+        assert repo.save_matches("PL", flat) == 1
+        rows = repo.load_matches("PL", "2030-01-01", "2030-01-01")
+        assert len(rows) == 1
+        assert rows[0]["homeTeam"]["name"] == "Team A"
+
+
+def test_save_matches_still_supports_api_football_nested_format():
+    """主源嵌套结构不能被上面的兼容改动破坏。"""
+    from repository import PredictionRepository
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = PredictionRepository(os.path.join(td, "t.db"))
+        nested = [{
+            "fixture": {"id": 777, "date": "2030-02-02T15:00:00Z",
+                        "status": {"short": "NS"}},
+            "teams": {"home": {"id": 10, "name": "Home X"},
+                      "away": {"id": 20, "name": "Away Y"}},
+            "goals": {"home": None, "away": None},
+            "league": {"season": 2029, "round": "Regular Season - 21"},
+        }]
+        assert repo.save_matches("PL", nested) == 1
+        rows = repo.load_matches("PL", "2030-02-02", "2030-02-02")
+        assert len(rows) == 1
+        assert rows[0]["teams"]["home"]["name"] == "Home X"
