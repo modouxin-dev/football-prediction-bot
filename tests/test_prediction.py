@@ -121,10 +121,13 @@ def test_card_contains_all_required_fields():
     svc = PredictionService(SETTINGS, FullAPI(now_fixtures()))
     p = run(svc.predict_fixture(1001, now_fixtures()))
     text = BotUI.format_prediction_card(p, SETTINGS.timezone)
-    for field in ("比赛预测", "主队1", "客队1", "比赛时间", "预测概率", "主胜", "平局", "客胜",
-                  "最可能结果", "模型信心等级", "数据完整性", "模型版本", "数据更新时间", "使用赛季"):
+    # 新模板：顶部比赛 → 中部预测 → 下部依据 → 脚注来源
+    for field in ("FOOTBALL INSIGHT", "主队1", "客队1", "比赛预测", "主胜", "平局", "客胜",
+                  "预测结果", "预计比分", "信心等级", "数据完整性", "SEASON", "SOURCE"):
         assert field in text, field
     assert MODEL_VERSION in text
+    # 少文字原则：不能回到堆字段的老样式
+    assert "使用赛季：" not in text and "数据更新时间：" not in text
 
 
 def test_card_has_risk_warning_and_disclaimer():
@@ -159,11 +162,15 @@ def test_confidence_text_for_no_data():
 
 
 def test_prediction_keyboard_links_to_existing_tabs_and_back():
+    """按钮必须指向真实处理器，且提供返回入口。"""
     markup = BotUI.prediction_keyboard(1001)
     flat = [b for row in markup.inline_keyboard for b in row]
     data = {b.callback_data for b in flat}
-    assert {"home:1001", "deep:1001", "h2h:1001", "odds:1001", "refresh:1001"} <= data
+    assert {"deep:1001", "refresh:1001", "chart:prob:1001"} <= data
     assert "menu:fixtures" in data and "menu:home" in data
+    # 每个按钮都必须指向已实现的路由前缀，不能是死按钮
+    for cb in data:
+        assert cb.startswith(("deep:", "refresh:", "chart:", "menu:")), cb
 
 
 # ---- handler 集成 ------------------------------------------------------------------
