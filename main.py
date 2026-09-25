@@ -181,28 +181,15 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s: Settings = context.application.bot_data["settings"]
     await update.effective_message.reply_text(
-        "⚽ 足球量化预测机器人\n\n"
-        "功能：\n"
-        "├ 每日自动推送赛事预测\n"
-        "├ 泊松分布量化分析\n"
-        "├ 赔率价值评估\n"
-        "└ 历史交锋数据\n\n"
-        f"推送时间：每天 {s.push_time:%H:%M}（{ui.tz_label(s.timezone)}）\n"
-        "发送 /help 查看命令",
+        ui.format_welcome(s),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
         reply_markup=ui.reply_menu_keyboard(),  # 底部常驻菜单
     )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(
-        "📖 命令列表\n"
-        "/start  欢迎信息与推送时间\n"
-        "/help  显示本帮助\n"
-        "/test  立即生成并推送一次预测（管理员）\n"
-        "/status  运行状态与数据源诊断（管理员）\n\n"
-        "预测消息下方的按钮：预测 / 深度分析 / 历史交锋 / 赔率对比，点击后在原消息上切换；"
-        "「刷新赔率」会重新拉取最新赔率。"
-    )
+    await reply_html(update.effective_message, ui.format_help(), ui.menu_keyboard())
 
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
