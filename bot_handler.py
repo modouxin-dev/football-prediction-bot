@@ -340,7 +340,7 @@ class BotUI:
 
     @staticmethod
     def prediction_keyboard(fixture_id: int) -> InlineKeyboardMarkup:
-        """预测卡片下方：复用现有 4 个标签页（可继续看深度分析/交锋/赔率）+ 返回。"""
+        """预测卡片下方：复用现有 4 个标签页（可继续看深度分析/交锋/赔率）+ 图表 + 返回。"""
         buttons = [
             InlineKeyboardButton(label, callback_data=f"{key}:{fixture_id}") for key, label in TABS
         ]
@@ -348,17 +348,27 @@ class BotUI:
             [
                 buttons[:2],
                 buttons[2:],
-                [InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}")],
+                [
+                    InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}"),
+                    InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
+                ],
                 [InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"), InlineKeyboardButton("🏠 主菜单", callback_data="menu:home")],
             ]
         )
 
-    # ---- 视图：深度分析报告 ------------------------------------------------------
     @staticmethod
     def analysis_keyboard(fixture_id: int) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("⚽ 看预测", callback_data=f"fx:{fixture_id}")],
+                [
+                    InlineKeyboardButton("⚽ 看预测", callback_data=f"fx:{fixture_id}"),
+                    InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
+                ],
+                [
+                    InlineKeyboardButton("📊 战绩图", callback_data=f"chart:form:{fixture_id}"),
+                    InlineKeyboardButton("🥅 进失球图", callback_data=f"chart:goals:{fixture_id}"),
+                    InlineKeyboardButton("🤝 交锋图", callback_data=f"chart:h2h:{fixture_id}"),
+                ],
                 [
                     InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"),
                     InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
@@ -366,6 +376,28 @@ class BotUI:
             ]
         )
 
+    @staticmethod
+    def chart_keyboard(fixture_id: int, kind: str) -> InlineKeyboardMarkup:
+        """图片消息下方的导航：可继续切换其它图表或回到分析页。"""
+        others = [k for k in ("form", "goals", "h2h") if k != kind]
+        rows = [
+            [
+                InlineKeyboardButton(
+                    {"form": "📊 战绩图", "goals": "🥅 进失球图", "h2h": "🤝 交锋图"}[k],
+                    callback_data=f"chart:{k}:{fixture_id}",
+                )
+                for k in others
+            ]
+        ]
+        rows.append(
+            [
+                InlineKeyboardButton("🔍 回到分析", callback_data=f"fa:{fixture_id}"),
+                InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
+
+    # ---- 视图：深度分析报告 ------------------------------------------------------
     @staticmethod
     def format_deep_report(report: dict, tz, model_version: str = MODEL_VERSION) -> str:
         hs = report["model"]["home_strength"]
