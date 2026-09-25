@@ -982,6 +982,8 @@ class BotUI:
     def format_fixtures_page(
         items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = "",
         multi_day: bool = False,
+    empty_range: tuple[str, str] | None = None,
+    empty_source_ok: bool = True,
     ) -> tuple[str, InlineKeyboardMarkup, int, int]:
         """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。
 
@@ -1000,14 +1002,23 @@ class BotUI:
         ]
         rows: list[list[InlineKeyboardButton]] = []
         if not chunk:
-            # 高级空状态：明确说明「这个时间范围没有比赛」，并给出下一步操作，
-            # 而不是一句干巴巴的「暂无赛程」。
+            # 空状态要说清三件事：没比赛、查了哪段时间、数据源是否正常。
+            # 绝不能把「窗口内没比赛」说成「数据源无数据」。
             lines.extend([
                 "<b>NO FIXTURE IN THIS WINDOW</b>",
-                "当前时间范围暂无比赛",
+                "📅 当前时间范围内暂无比赛",
                 SEP,
-                "可稍后再试，或切换其它联赛查看。",
             ])
+            if empty_source_ok:
+                lines.append("✅ 数据源正常，已查询：")
+            else:
+                lines.append("⚠️ 数据源返回异常，已查询：")
+            span_text = (
+                f"{empty_range[0]} 至 {empty_range[1]}" if empty_range
+                else esc(day_label)
+            )
+            lines.append(f"<code>{esc(span_text)}</code>")
+            lines += ["", "你可以尝试："]
         else:
             current = None
             for offset, fx in enumerate(chunk):
@@ -1039,6 +1050,12 @@ class BotUI:
                         InlineKeyboardButton(f"📊 分析 {idx}", callback_data=f"fa:{info.get('id')}"),
                     ]
                 )
+        if not chunk:
+            # 空状态直接给可继续操作的按钮，避免用户以为系统坏了
+            rows.append([
+                InlineKeyboardButton("⏭ 查询下一场", callback_data="fxm:next"),
+                InlineKeyboardButton("📅 未来 7 天", callback_data="fxm:upcoming"),
+            ])
         if total_pages > 1:
             rows.append(
                 [
@@ -1047,7 +1064,7 @@ class BotUI:
                     InlineKeyboardButton("下一页 ➡️", callback_data=f"fxp:{min(total_pages - 1, page + 1)}"),
                 ]
             )
-        if total_pages >= 1:
+        if chunk:  # 空态已单独给出「下一场/未来 7 天」，不重复
             rows.append([
                 InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all"),
                 InlineKeyboardButton("⏭ 下一场", callback_data="fxm:next"),
