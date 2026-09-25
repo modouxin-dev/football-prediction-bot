@@ -22,6 +22,11 @@ from matplotlib.patches import FancyBboxPatch  # noqa: E402
 log = logging.getLogger(__name__)
 
 # 深色体育数据中心配色 / Dark sports data-center palette
+# 品牌名 / Brand name（全局统一，头图与文案共用同一常量）
+BRAND_EN = "FOOTBALL INSIGHT"
+BRAND_CN = "Football Insight"
+BRAND_CN_SUB = "AI 赛事情报 · 数据驱动洞察"
+
 BG = "#07111F"        # 深海军蓝背景 / deep navy background
 CARD = "#101D2E"      # 玻璃卡片 / glass card
 FG = "#EAF2F8"        # 主文字 / primary text
@@ -429,8 +434,8 @@ def h2h_chart(report: dict, tz) -> bytes | None:
     return _finish(fig)
 
 
-def brand_banner(title: str = "FOOTBALL QUANT",
-                 subtitle: str = "足球量化预测 · 数据驱动赛事洞察",
+def brand_banner(title: str = BRAND_EN,
+                 subtitle: str = BRAND_CN_SUB,
                  tagline: str = "Poisson Model") -> bytes | None:
     """品牌头图：深色卡片 + 品牌名 + 副标题，纯内存生成 PNG。
 
