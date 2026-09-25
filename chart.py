@@ -203,9 +203,11 @@ def brand_banner(title: str = "FOOTBALL QUANT",
         fig = plt.figure(figsize=(7.0, 2.6), dpi=140)
         fig.patch.set_facecolor(BG)
 
-        # 顶部装饰条（品牌色渐变感：三段色块）
-        for i, color in enumerate((ACCENT, WIN, DRAW)):
-            fig.add_axes([0.06 + i * 0.30, 0.90, 0.26, 0.035]).set_facecolor(color)
+        # 顶部装饰条：蓝 → 黄 → 绿 → 红（品牌四色，依次呼应 数据/平局/胜/负 语义）
+        strip = (ACCENT, DRAW, WIN, LOSE)
+        width = 0.21
+        for i, color in enumerate(strip):
+            fig.add_axes([0.06 + i * width, 0.90, width, 0.035]).set_facecolor(color)
 
         ax = fig.add_axes([0.0, 0.0, 1.0, 1.0])
         ax.set_axis_off()
@@ -219,10 +221,10 @@ def brand_banner(title: str = "FOOTBALL QUANT",
         ax.text(0.06, 0.17, tagline, fontsize=9.5, color=GRID if False else "#8A9AA8",
                 va="center", ha="left", family="monospace")
 
-        # 右侧装饰：同心圆（暗示"量化/靶心"）
-        for r, alpha in ((0.085, 0.30), (0.055, 0.55), (0.028, 0.90)):
-            circle = plt.Circle((0.855, 0.50), r, color=ACCENT, alpha=alpha, fill=True)
-            ax.add_patch(circle)
+        # 右侧装饰：同心圆靶心（外→内：蓝 黄 绿，中心红点，与顶部四色呼应）
+        for r, alpha, color in ((0.085, 0.30, ACCENT), (0.055, 0.55, DRAW), (0.028, 0.85, WIN)):
+            ax.add_patch(plt.Circle((0.855, 0.50), r, color=color, alpha=alpha, fill=True))
+        ax.add_patch(plt.Circle((0.855, 0.50), 0.010, color=LOSE, alpha=1.0, fill=True))
 
         return _finish(fig)
     except Exception:  # 图表永远不能拖垮主流程
