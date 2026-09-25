@@ -22,7 +22,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = "/data/predictions.db"  # Railway 持久化卷通常挂在这里
+DEFAULT_DB_PATH = None  # 由 paths.DB_PATH 统一决定（默认 /data/football.db）
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS predictions (
@@ -64,7 +64,9 @@ class PredictionRepository:
     """
 
     def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or DEFAULT_DB_PATH
+        import paths
+
+        self.db_path = db_path or DEFAULT_DB_PATH or str(paths.DB_PATH)
         self._memory = False
         self._init_schema()
 
@@ -83,8 +85,14 @@ class PredictionRepository:
                 path = Path(self.db_path)
                 if path.parent and not path.parent.exists():
                     path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self.db_path, timeout=10)
+            conn = sqlite3.connect(self.db_path, timeout=15)
             conn.row_factory = sqlite3.Row
+            # WAL：读写不互相阻塞，降低多进程/定时任务同时写入时的锁冲突
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA busy_timeout=15000")
+            except Exception:
+                pass
         except Exception as exc:  # 目录不可写 → 回退内存库
             log.warning("无法打开数据库 %s（%s），回退内存存储", self.db_path, exc)
             self._memory = True
@@ -228,6 +236,17 @@ class PredictionRepository:
             "pending": pending,
             "persistent": self.persistent,
         }
+
+    def tables(self) -> list[str]:
+        """当前数据库里的表名，供 /storage 自检确认落盘生效。"""
+        try:
+            conn = self._connect()
+            return [r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )]
+        except Exception as exc:
+            log.warning("查询数据表失败：%s", exc)
+            return []
 
     def recent(self, limit: int = 10) -> list[sqlite3.Row]:
         try:
