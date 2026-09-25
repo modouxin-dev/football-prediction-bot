@@ -11,6 +11,7 @@ import asyncio
 import os
 from pathlib import Path
 
+import bot_runner
 import paths
 import sys
 from dataclasses import dataclass
@@ -73,6 +74,10 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("refresh", "刷新数据 / Refresh data"),
     ("next", "下一场比赛 / Next match"),
     ("web", "网页端入口 / Web app"),
+    ("analysis", "深度分析 / Deep analysis"),
+    ("date", "指定日期赛程 / Fixtures by date"),
+    ("stats", "预测命中率（管理员） / Prediction stats (admin)"),
+    ("storage", "存储自检与挂载卷验证（管理员） / Storage check (admin)"),
     ("test", "立即推送一次预测（管理员） / Push now (admin)"),
     ("status", "运行状态与数据源诊断（管理员） / Status & diagnostics (admin)"),
 ]
@@ -325,6 +330,11 @@ async def standings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/refresh — 清空缓存重新拉取 / Clear cache and refetch."""
     await _dispatch_menu_cmd(update, context, "refresh")
+
+
+async def analysis_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/analysis — 直接进入深度分析（先选比赛） / Open deep analysis directly."""
+    await _dispatch_menu_cmd(update, context, "analysis")
 
 
 async def date_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -626,6 +636,8 @@ async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: s
         await show_fixtures(update, context, page=0)  # 深度分析要先选比赛 / pick a match first
     elif key == "predict":
         await show_fixtures(update, context, page=0)  # 比赛预测要先选比赛 / pick a match first
+    elif key == "storage":
+        await storage_cmd(update, context)
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
 
@@ -894,11 +906,46 @@ async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+def _menu_key_from_text(text: str) -> str | None:
+    """把用户输入或键盘文字解析成菜单 key。
+
+    底部键盘按钮带 emoji（如 "⚽ 比赛预测"），但用户也可能手打纯文字
+    （"比赛预测"）。这里先精确匹配，再按「去掉 emoji 与空白」归一化匹配，
+    避免手打文字落到兜底分支被误报成"功能开发中"。
+    """
+    raw = (text or "").strip()
+    key = MENU_BY_LABEL.get(raw)
+    if key:
+        return key
+    normalized = _strip_emoji(raw)
+    for label, menu_key in MENU_BY_LABEL.items():
+        if _strip_emoji(label) == normalized:
+            return menu_key
+    return None
+
+
+def _strip_emoji(text: str) -> str:
+    """去掉 emoji 与所有空白，只保留可打印的普通字符用于比对。"""
+    return "".join(ch for ch in (text or "") if not _is_emoji(ch) and not ch.isspace())
+
+
+def _is_emoji(ch: str) -> bool:
+    """判断单字符是否为 emoji/变体选择符/杂项符号。"""
+    code = ord(ch)
+    return (
+        0x1F000 <= code <= 0x1FAFF  # 表情与符号主区
+        or 0x2600 <= code <= 0x27BF  # 杂项符号与装饰符号
+        or code in (0xFE0F, 0x20E3, 0x200D)  # 变体选择符 / 组合键 / 零宽连接
+    )
+
+
 async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """底部 Reply 键盘：点击后按同一套逻辑处理。"""
-    key = MENU_BY_LABEL.get((update.effective_message.text or "").strip())
+    key = _menu_key_from_text(update.effective_message.text)
     if not key:
         return
+    if key == "storage":
+        return await storage_cmd(update, context)
     if key == "help":
         await reply_html(update.effective_message, ui.format_help(), None)
     elif key == "web":
@@ -1047,15 +1094,6 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---- 应用装配 ---------------------------------------------------------------
 async def post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
-    # 若 Telegram 端残留 Webhook，getUpdates 会立刻 409 并让进程退出。
-    # 必须在 post_init（run_polling 的同一个 event loop 内）清理：
-    # 若在 main() 里用 asyncio.run(...) 单独清理，会关闭当前 loop，
-    # 导致随后 run_polling 抛 "There is no current event loop" 并使 Updater 协程永不 await。
-    try:
-        await app.bot.delete_webhook(drop_pending_updates=True)
-        log.info("已清理残留 Webhook，使用长轮询接收更新")
-    except Exception as exc:  # 清理失败不应中断启动
-        log.warning("清理 Webhook 失败（继续尝试轮询）：%s", exc)
     api = FootballAPI(settings.api_key, provider=settings.api_provider)
     # 备用源：仅在配置了 Token 且启用时创建，否则为 None（行为与改动前完全一致）
     fallback = None
@@ -1108,6 +1146,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("predict", predict_cmd))
     app.add_handler(CommandHandler("standings", standings_cmd))
     app.add_handler(CommandHandler("refresh", refresh_cmd))
+    app.add_handler(CommandHandler("analysis", analysis_cmd))
     app.add_handler(CommandHandler("web", web_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
     app.add_handler(CommandHandler("date", date_cmd))
@@ -1156,9 +1195,17 @@ def main() -> None:
         len(settings.admin_ids),
     )
     app = build_application(settings)
-    # 注意：不要在 run_polling 之前调用 asyncio.run(...)，那会关闭当前 event loop，
-    # 使 run_polling 内部 asyncio.get_event_loop() 抛错并导致 Updater 协程永不 await。
-    app.run_polling(drop_pending_updates=True, allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY])
+    # 之前直接调用 app.run_polling()，线上出现
+    # "coroutine 'Updater.start_polling' was never awaited"：
+    # 轮询协程没被 await，机器人虽打印 Application started 却收不到任何
+    # update（所有命令无响应），且启动函数无阻塞点而立即返回，容器几秒后退出。
+    # 改用 bot_runner.serve 显式 await 轮询并阻塞到收到停止信号。
+    asyncio.run(
+        bot_runner.serve(
+            app,
+            allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY],
+        )
+    )
 
 
 if __name__ == "__main__":
