@@ -51,6 +51,119 @@ STATUS_TEXT = {
     "WO": "弃赛",
 }
 
+NO_DATA = "暂无可靠数据，不参与本次分析（缺什么就说明缺什么，不做填充）。"
+
+
+def _num(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _row_summary(row: dict | None) -> dict | None:
+    """积分榜一行 → 排名 / 积分 / 胜平负 / 场均进失球。缺字段时相应项为 None。"""
+    if not row:
+        return None
+    all_, home, away = row.get("all") or {}, row.get("home") or {}, row.get("away") or {}
+    played = _num(all_.get("played")) or (_num(home.get("played")) + _num(away.get("played")))
+    gf = _num((all_.get("goals") or {}).get("for")) or (
+        _num((home.get("goals") or {}).get("for")) + _num((away.get("goals") or {}).get("for"))
+    )
+    ga = _num((all_.get("goals") or {}).get("against")) or (
+        _num((home.get("goals") or {}).get("against")) + _num((away.get("goals") or {}).get("against"))
+    )
+    win = _num(all_.get("win")) or (_num(home.get("win")) + _num(away.get("win")))
+    draw = _num(all_.get("draw")) or (_num(home.get("draw")) + _num(away.get("draw")))
+    lose = _num(all_.get("lose")) or (_num(home.get("lose")) + _num(away.get("lose")))
+    return {
+        "rank": row.get("rank"),
+        "points": row.get("points"),
+        "played": int(played),
+        "win": int(win),
+        "draw": int(draw),
+        "lose": int(lose),
+        "avg_for": gf / played if played else None,
+        "avg_against": ga / played if played else None,
+    }
+
+
+def _form_mark(result: str) -> str:
+    return {"win": "🟢", "draw": "🟡", "lose": "🔴"}.get(result, "⚪")
+
+
+def _form_line(form: dict) -> str:
+    """近期战绩一行摘要（没有足够样本时明确说没有数据）。"""
+    if not form["played"]:
+        return NO_DATA
+    avg_for = f"{form['avg_for']:.1f}" if form["avg_for"] is not None else "-"
+    avg_against = f"{form['avg_against']:.1f}" if form["avg_against"] is not None else "-"
+    marks = " ".join(_form_mark(m["result"]) + m["score"] for m in form["matches"][:5])
+    return f"{form['win']}胜 {form['draw']}平 {form['lose']}负 · 进 {form['goals_for']} / 失 {form['goals_against']} · 场均 {avg_for} / {avg_against}\n   {marks}"
+
+
+def _row_line(row: dict | None) -> str:
+    if not row:
+        return NO_DATA
+    summary = _row_summary(row)
+    if not summary or not summary["played"]:
+        return NO_DATA
+    rank = f"第 {summary['rank']} 名" if summary["rank"] else "排名未知"
+    points = f"{summary['points']} 分" if summary["points"] is not None else "积分未知"
+    avg_for = f"{summary['avg_for']:.2f}" if summary["avg_for"] is not None else "-"
+    avg_against = f"{summary['avg_against']:.2f}" if summary["avg_against"] is not None else "-"
+    return (
+        f"{rank} · {points} · {summary['win']}胜{summary['draw']}平{summary['lose']}负"
+        f" · 场均进 {avg_for} / 失 {avg_against}"
+    )
+
+
+def _factors(report: dict) -> tuple[list[str], list[str], list[str]]:
+    """从数据推导有利 / 不利 / 不确定因素。没有数据就不编，直接归入不确定。"""
+    pros: list[str] = []
+    cons: list[str] = []
+    unknowns: list[str] = []
+    hs = report["model"]["home_strength"]
+    aws = report["model"]["away_strength"]
+    hf, af, h2h = report["home_form"], report["away_form"], report["h2h"]
+
+    if not report["has_team_data"]:
+        unknowns.append("积分榜中缺少这两支球队的数据，强弱对比不成立")
+        unknowns.append("数据源未提供伤停信息")
+        return pros, cons, unknowns
+
+    if hs.attack_home > 1.1:
+        pros.append(f"主队主场进攻强度 {hs.attack_home:.2f}，高于联赛平均")
+    elif hs.attack_home < 0.9:
+        cons.append(f"主队主场进攻强度 {hs.attack_home:.2f}，低于联赛平均")
+    if aws.defense_away > 1.1:
+        pros.append(f"客队客场失球偏多（防守强度 {aws.defense_away:.2f}）")
+    elif aws.defense_away < 0.9:
+        cons.append(f"客队客场防守稳固（防守强度 {aws.defense_away:.2f}）")
+
+    if hf["played"] >= 3:
+        if hf["win"] > hf["lose"]:
+            pros.append(f"主队近期 {hf['win']}胜{hf['draw']}平{hf['lose']}负，状态较好")
+        elif hf["lose"] > hf["win"]:
+            cons.append(f"主队近期 {hf['win']}胜{hf['draw']}平{hf['lose']}负，状态偏低")
+    if af["played"] >= 3 and af["win"] > af["lose"]:
+        cons.append(f"客队近期 {af['win']}胜{af['draw']}平{af['lose']}负，来势不弱")
+
+    if h2h["played"] >= 3:
+        if h2h["win"] > h2h["lose"]:
+            pros.append(f"历史交锋占优：{h2h['win']}胜{h2h['draw']}平{h2h['lose']}负")
+        elif h2h["lose"] > h2h["win"]:
+            cons.append(f"历史交锋处于劣势：{h2h['win']}胜{h2h['draw']}平{h2h['lose']}负")
+
+    if hf["played"] < 3 or af["played"] < 3:
+        unknowns.append("近期已完场比赛不足 3 场，状态判断不稳定")
+    if h2h["played"] == 0:
+        unknowns.append("暂无历史交锋记录")
+    if min(hs.games_home, aws.games_away) < 5:
+        unknowns.append("主/客场已赛场次不足 5 场，强度估计不稳定")
+    unknowns.append("数据源未提供伤停信息（当前套餐不支持）")
+    return pros, cons, unknowns
+
 
 def esc(value) -> str:
     return html.escape(str(value), quote=False)
@@ -239,6 +352,125 @@ class BotUI:
                 [InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"), InlineKeyboardButton("🏠 主菜单", callback_data="menu:home")],
             ]
         )
+
+    # ---- 视图：深度分析报告 ------------------------------------------------------
+    @staticmethod
+    def analysis_keyboard(fixture_id: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("⚽ 看预测", callback_data=f"fx:{fixture_id}")],
+                [
+                    InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"),
+                    InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
+                ],
+            ]
+        )
+
+    @staticmethod
+    def format_deep_report(report: dict, tz, model_version: str = MODEL_VERSION) -> str:
+        hs = report["model"]["home_strength"]
+        aws = report["model"]["away_strength"]
+        analysis = report["model"]["analysis"]
+        h2h = report["h2h"]
+        errors = report["errors"]
+        integrity = (
+            "完整"
+            if report["has_team_data"] and min(hs.games_home, aws.games_away) >= 5
+            else "部分"
+            if report["has_team_data"]
+            else "无数据"
+        )
+
+        lines = [
+            "📊 <b>深度分析</b>",
+            f"🏠 <b>{esc(report['home'])}</b> 🆚 <b>{esc(report['away'])}</b> ✈️",
+            f"🕐 <code>{BotUI.fmt_time(report['kickoff'], tz)}</code>（{BotUI.tz_label(tz, report['kickoff'])}） · {esc(report['league'])}",
+            SEP,
+            "🕑 <b>近期状态</b>（近 5 场已完场）",
+            f"🏠 {esc(report['home'])}：{_form_line(report['home_form'])}",
+            f"✈️ {esc(report['away'])}：{_form_line(report['away_form'])}",
+        ]
+        # 可选数据拉取失败：附真实原因，不伪装成“没有数据”
+        for key, prefix in (("home_form", "主队近期"), ("away_form", "客队近期"), ("h2h", "历史交锋")):
+            if errors.get(key):
+                lines.append(f"   ⚠️ {prefix}数据获取失败：{esc(errors[key])}")
+        lines += [
+            SEP,
+            "🏆 <b>联赛信息</b>",
+            f"🏠 {esc(report['home'])}：{_row_line(report['home_row'])}",
+            f"✈️ {esc(report['away'])}：{_row_line(report['away_row'])}",
+            SEP,
+            "🤝 <b>历史交锋</b>",
+        ]
+        if h2h["played"]:
+            lines.append(
+                f"近 {h2h['played']} 次交锋（{esc(report['home'])} 视角）："
+                f"<b>{h2h['win']} 胜 {h2h['draw']} 平 {h2h['lose']} 负</b>"
+                f" · 进球 {h2h['goals_for']}-{h2h['goals_against']}"
+            )
+        else:
+            lines.append(NO_DATA)
+        lines += [
+            SEP,
+            "🧮 <b>模型因素</b>",
+            f"🏠 主队主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
+            f"✈️ 客队客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
+            "（1.00 = 联赛平均；攻击 &gt;1 进球更多，防守 &lt;1 失球更少即防守更好）",
+            f"⚖️ 主场优势：联赛主队场均 <code>{report['model']['avg_home_goals']:.2f}</code>"
+            f" / 客队场均 <code>{report['model']['avg_away_goals']:.2f}</code>",
+            f"⚽ 预期进球 λ：<code>{analysis['lambda_home']:.2f} - {analysis['lambda_away']:.2f}</code>",
+            f"🧩 数据完整性：<b>{integrity}</b>",
+            "🩹 伤停信息：数据源未提供（当前套餐不支持）",
+            f"🤖 模型版本：<code>{esc(model_version)}</code>",
+            f"🕑 数据更新时间：<code>{BotUI.fmt_time(report['created_at'], tz, '%Y-%m-%d %H:%M:%S')}</code>",
+            SEP,
+            "🧭 <b>分析总结</b>",
+        ]
+        pros, cons, unknowns = _factors(report)
+        lines.append("✅ 有利：" + ("；".join(pros) if pros else NO_DATA))
+        lines.append("⚠️ 不利：" + ("；".join(cons) if cons else NO_DATA))
+        lines.append("❓ 不确定：" + "；".join(unknowns))
+        top = max(
+            (("主胜", analysis["win_prob"]), ("平局", analysis["draw_prob"]), ("客胜", analysis["loss_prob"])),
+            key=lambda kv: kv[1],
+        )
+        lines += [f"🎯 <b>模型倾向</b>：{top[0]}（{top[1]:.1%}）", SEP, DISCLAIMER]
+        return "\n".join(lines)
+
+    # ---- 视图：联赛排名 ----------------------------------------------------------
+    @staticmethod
+    def standings_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🔄 刷新", callback_data="menu:refresh"),
+                    InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
+                ]
+            ]
+        )
+
+    @staticmethod
+    def format_standings_page(rows: list[dict], tz, limit: int = 20, league_label: str = "", updated=None) -> str:
+        lines = ["🏆 <b>联赛排名</b>", f"{esc(league_label)} · 时区 <code>{esc(tz.zone)}</code>"]
+        if updated is not None:
+            lines.append(f"🕑 数据更新时间：<code>{BotUI.fmt_time(updated, tz, '%Y-%m-%d %H:%M')}</code>")
+        lines.append(SEP)
+        if not rows:
+            lines.append(NO_DATA)
+        else:
+            for i, row in enumerate(rows[:limit], start=1):
+                summary = _row_summary(row)
+                name = (row.get("team") or {}).get("name") or "?"
+                rank = (summary or {}).get("rank") or i
+                points = f"{(summary or {}).get('points')}分" if (summary or {}).get("points") is not None else "-"
+                record = f"{summary['win']}-{summary['draw']}-{summary['lose']}" if summary else "-"
+                avg_for = f"{summary['avg_for']:.1f}" if summary and summary["avg_for"] is not None else "-"
+                avg_against = f"{summary['avg_against']:.1f}" if summary and summary["avg_against"] is not None else "-"
+                lines.append(
+                    f"{rank:>2}. {esc(name)}  <code>{points}</code>  <code>{record}</code>  进 {avg_for} / 失 {avg_against}"
+                )
+        lines += [SEP, DISCLAIMER]
+        return "\n".join(lines)
 
     # ---- 视图：深度分析 ---------------------------------------------------------
     @staticmethod
