@@ -1,0 +1,34 @@
+# 命令白名单：Telegram 指令 -> 固定任务名
+# 只允许这里列出的命令，其它一律拒绝（不接受任意参数、路径、仓库名）
+commands:
+  "/test": run_tests
+  "/clone-approved": clone_approved_repo
+  "/deploy-staging": deploy_staging
+
+# 仓库白名单：任务只能操作这里列出的仓库，禁止用户通过参数指定
+repositories:
+  source: "modouxin-dev/football-prediction-bot"
+  staging: "modouxin-dev/football-prediction-bot-staging"
+
+# 允许克隆的分支
+branches:
+  source: "main"
+  staging: "main"
+
+# 沙盒出口域名白名单（供 egress proxy / 防火墙使用，容器网络本身也要限制）
+egress_allowlist:
+  - "api.telegram.org"
+  - "github.com"
+  - "api.github.com"
+  - "codeload.github.com"
+  - "pypi.org"
+  - "files.pythonhosted.org"
+
+# 回传给 Telegram 的字段白名单：只允许这些，避免泄露源码/token/路径
+report_fields:
+  - status
+  - commit
+  - tests
+  - secret_scan
+  - pr_url
+  - task
