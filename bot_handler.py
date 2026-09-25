@@ -505,6 +505,15 @@ class BotUI:
                     InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}"),
                     InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
                 ],
+                [
+                    InlineKeyboardButton("🎴 比赛主卡", callback_data=f"chart:card:{fixture_id}"),
+                    InlineKeyboardButton("🎯 概率环", callback_data=f"chart:ring:{fixture_id}"),
+                ],
+                [
+                    InlineKeyboardButton("📊 战绩图", callback_data=f"chart:form:{fixture_id}"),
+                    InlineKeyboardButton("🥅 进失球图", callback_data=f"chart:goals:{fixture_id}"),
+                    InlineKeyboardButton("🤝 交锋图", callback_data=f"chart:h2h:{fixture_id}"),
+                ],
                 [InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"), InlineKeyboardButton("🏠 主菜单", callback_data="menu:home")],
             ]
         )
@@ -516,6 +525,10 @@ class BotUI:
                 [
                     InlineKeyboardButton("⚽ 看预测", callback_data=f"fx:{fixture_id}"),
                     InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
+                ],
+                [
+                    InlineKeyboardButton("🎴 比赛主卡", callback_data=f"chart:card:{fixture_id}"),
+                    InlineKeyboardButton("🎯 概率环", callback_data=f"chart:ring:{fixture_id}"),
                 ],
                 [
                     InlineKeyboardButton("📊 战绩图", callback_data=f"chart:form:{fixture_id}"),
@@ -907,7 +920,14 @@ class BotUI:
         ]
         rows: list[list[InlineKeyboardButton]] = []
         if not chunk:
-            lines.append("近期暂无赛程。" if multi_day else "今日暂无赛程。")
+            # 高级空状态：明确说明「这个时间范围没有比赛」，并给出下一步操作，
+            # 而不是一句干巴巴的「暂无赛程」。
+            lines.extend([
+                "<b>NO FIXTURE IN THIS WINDOW</b>",
+                "当前时间范围暂无比赛",
+                SEP,
+                "可稍后再试，或切换其它联赛查看。",
+            ])
         else:
             current = None
             for offset, fx in enumerate(chunk):
@@ -947,5 +967,7 @@ class BotUI:
                     InlineKeyboardButton("下一页 ➡️", callback_data=f"fxp:{min(total_pages - 1, page + 1)}"),
                 ]
             )
+        if total_pages >= 1:
+            rows.append([InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all")])
         rows.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
         return "\n".join(lines), InlineKeyboardMarkup(rows), page, total_pages
