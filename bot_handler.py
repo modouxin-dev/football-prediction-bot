@@ -727,25 +727,30 @@ class BotUI:
 
     @staticmethod
     def format_welcome(settings) -> str:
-        """/start 欢迎卡片：品牌区 + 能力列表 + 推送信息。"""
+        """/start 欢迎文案：科技仪表盘风格（配套品牌头图，头图已含品牌名）。
+
+        注意：Telegram 消息区不是等宽字体，因此这里只用「短边框 + 参数面板」
+        这类容错较高的符号；主视觉由品牌头图承担，避免长边框错位。
+        """
         return (
-            "⚽ <b>足球量化预测机器人</b>\n"
-            f"{SEP}\n"
-            "<i>Football Quant · 数据驱动赛事洞察</i>\n"
-            "\n"
             "👋 <b>欢迎使用</b>\n"
             "\n"
-            "基于泊松分布构建赛事概率模型，\n"
-            "融合赛程、积分榜与赔率数据，\n"
-            "为每场比赛输出可量化、可追溯的预测。\n"
+            "用泊松分布拆解每一场比赛，\n"
+            "让预测可量化、可追溯。\n"
             "\n"
-            f"◆ <b>核心能力</b>\n"
+            f"◆ <b>引擎参数</b>\n"
             f"{THIN_SEP}\n"
-            f"{BULLET} 📅 <b>今日赛程</b>　按联赛分组，支持翻页\n"
-            f"{BULLET} ⚽ <b>比赛预测</b>　胜平负概率与信心评级\n"
-            f"{BULLET} 📊 <b>深度分析</b>　状态 · 交锋 · 攻防强度\n"
-            f"{BULLET} 🏆 <b>联赛排名</b>　实时积分榜\n"
-            f"{BULLET} 📈 <b>数据图表</b>　概率与战绩可视化\n"
+            f"▍模型　<code>Poisson Distribution</code>\n"
+            f"▍数据　赛程 · 积分榜 · 赔率\n"
+            f"▍输出　概率 · 信心评级 · 图表\n"
+            "\n"
+            f"◆ <b>核心功能</b>\n"
+            f"{THIN_SEP}\n"
+            f"│ 📅 今日赛程\n"
+            f"│ ⚽ 比赛预测\n"
+            f"│ 📊 深度分析\n"
+            f"│ 🏆 联赛排名\n"
+            f"└ 📈 数据图表\n"
             "\n"
             f"{SEP}\n"
             f"⏰ 每日 <code>{settings.push_time:%H:%M}</code>（{esc(BotUI.tz_label(settings.timezone))}）自动推送\n"
