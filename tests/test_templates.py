@@ -22,10 +22,22 @@ TEMPLATES = {
 # ---- 内容完整性 ---------------------------------------------------------------
 def test_welcome_shows_brand_and_push_time():
     text = BotUI.format_welcome(SETTINGS)
-    assert "足球量化预测机器人" in text
     assert "08:00" in text  # 推送时间
     for item in ("今日赛程", "比赛预测", "深度分析", "联赛排名", "数据图表"):
         assert item in text, item
+
+
+def test_brand_name_lives_in_banner_not_text():
+    """品牌主视觉由头图承担，文案里不再重复大标题（避免图片+文字重复冗长）。"""
+    try:
+        import chart
+    except ImportError:
+        pytest.skip("matplotlib 未安装（可选依赖）")
+    import inspect
+
+    src = inspect.getsource(chart.brand_banner)
+    assert "FOOTBALL QUANT" in src  # 品牌名在头图默认参数中
+    assert "足球量化预测机器人" not in BotUI.format_welcome(SETTINGS)
 
 
 def test_menu_shows_league_season_timezone():
@@ -84,3 +96,42 @@ def test_league_label_known_and_unknown():
     assert "英格兰超级联赛" in league_label(39)
     assert "39" in league_label(39)
     assert league_label(9999) == "联赛 9999"  # 未知 ID 不猜测
+
+
+# ---- 品牌头图 -------------------------------------------------------------------
+def test_brand_banner_generates_png():
+    """头图必须能生成 PNG；matplotlib 缺失时返回 None 而不是抛异常。"""
+    try:
+        import chart
+    except ImportError:
+        pytest.skip("matplotlib 未安装（可选依赖）")
+
+    data = chart.brand_banner()
+    if chart.FONT_IN_USE or True:  # 无中文字体时仍应出图（英文部分正常）
+        assert data, "品牌头图生成失败"
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", "不是合法 PNG"
+
+
+def test_brand_banner_accepts_custom_text():
+    try:
+        import chart
+    except ImportError:
+        pytest.skip("matplotlib 未安装（可选依赖）")
+    assert chart.brand_banner(title="TEST", subtitle="sub", tagline="tag")
+
+
+# ---- 欢迎文案：仪表盘风格结构 -----------------------------------------------------
+def test_welcome_has_dashboard_panels():
+    text = BotUI.format_welcome(SETTINGS)
+    assert "引擎参数" in text
+    assert "Poisson" in text
+    assert "核心功能" in text
+    assert "08:00" in text
+
+
+def test_welcome_uses_short_lines_to_avoid_misalignment():
+    """非等宽字体下长边框会错位，因此不使用长 ━━/┃ 边框作为正文主体。"""
+    text = BotUI.format_welcome(SETTINGS)
+    for line in text.split("\n"):
+        assert line.count("┃") == 0  # 不使用竖向长边框
+        assert line.count("━") <= 18  # 分隔线保持短（SEP 本身长度 18）
