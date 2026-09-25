@@ -380,6 +380,14 @@ class BotUI:
             SEP,
             f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code> · 预期比分 <code>{a['best_score']}</code>",
         ]
+        # 数据不足：必须明确告知结论不可信，不能与正常预测同等呈现
+        if getattr(p, "insufficient", False):
+            lines += [
+                SEP,
+                "⚠️ <b>数据不足</b>",
+                "积分榜中未包含这两支球队，",
+                "当前概率仅基于联赛平均水平估算，<b>不代表双方真实实力</b>。",
+            ]
         if _is_fallback(p):
             lines.append("ℹ️ 当前为备用数据源，仅提供基础比赛数据，赔率等高级统计不可用。")
         if p.best:
@@ -485,6 +493,14 @@ class BotUI:
             f"🕑 <b>数据更新时间</b>：<code>{BotUI.fmt_time(p.created_at, tz, '%Y-%m-%d %H:%M:%S')}</code>"
             f"（{BotUI.tz_label(tz, p.created_at)}）",
         ]
+        # 数据不足：必须明确告知结论不可信，不能与正常预测同等呈现
+        if getattr(p, "insufficient", False):
+            lines += [
+                SEP,
+                "⚠️ <b>数据不足</b>",
+                "积分榜中未包含这两支球队，",
+                "当前概率仅基于联赛平均水平估算，<b>不代表双方真实实力</b>。",
+            ]
         if _is_fallback(p):
             lines.append("ℹ️ 当前为备用数据源，仅提供基础比赛数据，赔率等高级统计不可用。")
         if p.best:
