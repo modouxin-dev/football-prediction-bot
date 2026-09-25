@@ -107,6 +107,7 @@ class FootballDataAPI:
         self._cache: dict[tuple, tuple[float, Any]] = {}
         self.last_note: str | None = None           # 数据被回退展示时的说明 / note when shifted
         self.last_shifted_date: date | None = None  # 实际展示的比赛日 / actually shown matchday
+        self.season_range: tuple[date, date] | None = None  # 赛季最早/最晚比赛日 / season span
         self.source = "football-data"
 
     @property
@@ -274,6 +275,16 @@ class FootballDataAPI:
         except (ValueError, AttributeError):
             return None
 
+    def _record_season_range(self, matches: list[dict]) -> None:
+        """记录该赛季最早与最晚的比赛日，便于排查「窗口内为何 0 场」。
+
+        Records the earliest/latest matchday of the season — helps diagnose
+        why a requested window returned nothing.
+        """
+        days = sorted({d for d in (self._match_date(m) for m in matches) if d})
+        if days:
+            self.season_range = (days[0], days[-1])
+
     def _nearest_matchday(self, matches: list[dict], target: date) -> date | None:
         """从整季赛程里找出离 target 最近的一个比赛日（优先取不早于 target 的）。"""
         days = sorted({d for d in (self._match_date(m) for m in matches) if d})
@@ -319,6 +330,7 @@ class FootballDataAPI:
             log.info("备用源带日期过滤仍为空，改用不带日期参数拉取整季赛程（竞赛 %s）", code)
             payload = await self._get(f"competitions/{code}/matches", {}, ttl=TTL_MATCHES)
             season_matches = payload.get("matches") or []
+            self._record_season_range(season_matches)
             matches = [m for m in season_matches if self._in_range(m, date_from, date_to)]
             log.info("整季赛程共 %d 场，按 %s ~ %s 本地过滤后 %d 场",
                      len(season_matches), date_from, date_to, len(matches))
@@ -358,10 +370,12 @@ class FootballDataAPI:
             result.update(ok=False, detail=f"{type(exc).__name__}: {exc}")
             return result
         matches = (payload or {}).get("matches") or []
+        self._record_season_range(matches)
         result.update(
             ok=bool(matches),
             count=len(matches),
             competition=((payload or {}).get("competition") or {}).get("name", "-"),
+            season_range=self.season_range,
         )
         if not matches:
             # 返回空时把原始响应片段带出来，便于判断是账号限制还是真的没数据
