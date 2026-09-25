@@ -190,3 +190,41 @@ def h2h_chart(report: dict, tz) -> bytes | None:
 
     _footer(fig, f"进球 {h2h['goals_for']}-{h2h['goals_against']} · {BotUI.fmt_time(report['created_at'], tz, '%Y-%m-%d')}")
     return _finish(fig)
+
+
+def brand_banner(title: str = "FOOTBALL QUANT",
+                 subtitle: str = "足球量化预测 · 数据驱动赛事洞察",
+                 tagline: str = "Poisson Model") -> bytes | None:
+    """品牌头图：深色卡片 + 品牌名 + 副标题，纯内存生成 PNG。
+
+    用于 /start 欢迎页。生成失败返回 None，调用方降级为纯文字，不影响主流程。
+    """
+    try:
+        fig = plt.figure(figsize=(7.0, 2.6), dpi=140)
+        fig.patch.set_facecolor(BG)
+
+        # 顶部装饰条（品牌色渐变感：三段色块）
+        for i, color in enumerate((ACCENT, WIN, DRAW)):
+            fig.add_axes([0.06 + i * 0.30, 0.90, 0.26, 0.035]).set_facecolor(color)
+
+        ax = fig.add_axes([0.0, 0.0, 1.0, 1.0])
+        ax.set_axis_off()
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        # 品牌名：无中文字体时英文仍可正常渲染，中文会降级但不影响布局
+        ax.text(0.06, 0.62, title, fontsize=27, fontweight="bold",
+                color=FG, va="center", ha="left")
+        ax.text(0.06, 0.38, subtitle, fontsize=12.5, color=ACCENT, va="center", ha="left")
+        ax.text(0.06, 0.17, tagline, fontsize=9.5, color=GRID if False else "#8A9AA8",
+                va="center", ha="left", family="monospace")
+
+        # 右侧装饰：同心圆（暗示"量化/靶心"）
+        for r, alpha in ((0.085, 0.30), (0.055, 0.55), (0.028, 0.90)):
+            circle = plt.Circle((0.855, 0.50), r, color=ACCENT, alpha=alpha, fill=True)
+            ax.add_patch(circle)
+
+        return _finish(fig)
+    except Exception:  # 图表永远不能拖垮主流程
+        log.exception("生成品牌头图失败")
+        return None
