@@ -29,6 +29,8 @@ from telegram.ext import (
 
 from analyzer import MatchAnalyzer
 from api_client import APIError, FootballAPI
+from data_source import DataSourceError, DataSourceRouter
+from football_data import FootballDataAPI
 from bot_handler import MENU_ITEMS, BotUI, esc
 from config import ConfigError, Settings, load_settings
 from service import Prediction, PredictionService
@@ -348,7 +350,7 @@ async def on_analysis_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id if update.effective_user else 0
 
     try:
-        fixture_id = int(raw)
+        fixture_id = raw  # ID 可能是 'fd-123'（备用源）或纯数字（主源），不再强转 int
     except ValueError:
         return
     if not await begin_task(app.bot_data, user_id, f"analysis:{fixture_id}"):
@@ -392,7 +394,7 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id if update.effective_user else 0
 
     try:
-        fixture_id = int(raw)
+        fixture_id = raw  # ID 可能是 'fd-123'（备用源）或纯数字（主源），不再强转 int
     except ValueError:
         return
     if not await begin_task(app.bot_data, user_id, f"chart:{kind}:{fixture_id}"):
@@ -464,7 +466,7 @@ async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id if update.effective_user else 0
 
     try:
-        fixture_id = int(raw)
+        fixture_id = raw  # ID 可能是 'fd-123'（备用源）或纯数字（主源），不再强转 int
     except ValueError:
         return
     if not await begin_task(app.bot_data, user_id, f"pred:{fixture_id}"):
@@ -520,7 +522,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     s: Settings = app.bot_data["settings"]
     if not is_admin(update, s):
         return await deny(update)
-    api: FootballAPI = app.bot_data["api"]
+    api = app.bot_data["api"]
     service: PredictionService = app.bot_data["service"]
 
     jobs = app.job_queue.get_jobs_by_name(DAILY_JOB) if app.job_queue else []
@@ -529,6 +531,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     season_line = f"联赛/赛季：{s.league_id} / {s.season}"
     if s.season != s.expected_season:
         season_line += f"（⚠️ 按日期应为 {s.expected_season}，请更新 SEASON 变量；无赛程时会自动改用 {s.expected_season}）"
+    if service.season_in_use != s.season:
+        season_line += f"\n实际使用赛季：{service.season_in_use}（已自动降级）"
 
     lines = [
         "🤖 运行状态",
@@ -538,7 +542,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"下次推送：{next_run}",
         f"CHAT_ID：{'已配置' if s.chat_id else '未配置'}",
         f"内存中的预测：{service.cached_predictions} 场",
-        f"数据源渠道：{'官方直连 (API-Sports)' if api.provider == 'apisports' else 'RapidAPI'}",
+        f"数据源渠道：{'官方直连 (API-Sports)' if s.api_provider == 'apisports' else 'RapidAPI'}",
+        f"数据源：{getattr(api, 'source_label', 'API-Football')}"
+        + ("（备用源生效中）" if getattr(api, 'using_fallback', False) else ""),
+        f"备用源 football-data.org：{'已配置' if s.football_data_available else '未配置'}",
     ]
     try:
         account = await api.get_account_status()
@@ -577,10 +584,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data["settings"]
     service: PredictionService = context.application.bot_data["service"]
 
+    fixture_id = raw_id  # 支持 'fd-' 前缀（备用源 ID）
     try:
-        fixture_id = int(raw_id)
         prediction = service.get(fixture_id)
-    except (KeyError, ValueError):
+    except KeyError:
         await query.answer("这条预测已过期（机器人重启过），请等待下一次推送或让管理员使用 /test。", show_alert=True)
         return
     await query.answer()  # 先应答，避免按钮一直转圈
@@ -604,6 +611,14 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
     api = FootballAPI(settings.api_key, provider=settings.api_provider)
+    # 备用源：仅在配置了 Token 且启用时创建，否则为 None（行为与改动前完全一致）
+    fallback = None
+    if settings.football_data_available:
+        fallback = FootballDataAPI(settings.football_data_token, timeout=settings.football_data_timeout)
+        log.info("备用数据源 football-data.org 已启用")
+    else:
+        log.info("备用数据源 football-data.org 未配置或未启用，仅使用主数据源")
+    api = DataSourceRouter(api, fallback, mode=settings.data_source_mode)
     app.bot_data["api"] = api
     app.bot_data["service"] = PredictionService(settings, api, MatchAnalyzer())
     try:
@@ -644,11 +659,11 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
-    app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:\d+$"))
-    app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:\d+$"))
-    app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|form|goals|h2h):\d+$"))
+    app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
+    app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:.+$"))
+    app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|form|goals|h2h):.+$"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
-    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):\d+$"))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):.+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
     app.add_error_handler(on_error)
 
