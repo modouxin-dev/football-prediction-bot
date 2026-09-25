@@ -546,3 +546,52 @@ def test_today_with_matches_keeps_today_title():
     )
     assert "今日赛程" in text
     assert "近期赛程" not in text
+
+
+# ==============================================================================
+# 回归：菜单 key 必须是 "predict"（与 MENU_ITEMS 一致），否则按钮落进「开发中」
+# ==============================================================================
+def test_menu_predict_key_matches_handler_branch():
+    from bot_handler import MENU_ITEMS
+
+    keys = {key for key, _ in MENU_ITEMS}
+    assert "predict" in keys
+    # main.py 的分支应覆盖 MENU_ITEMS 里每一个 key，避免按钮点了没反应
+    source = open("main.py", encoding="utf-8").read()
+    for key in keys:
+        if key in ("predict", "fixtures", "standings", "analysis", "refresh", "help", "web"):
+            assert f'elif key == "{key}"' in source, f"菜单 {key} 缺少处理分支"
+
+
+# ==============================================================================
+# 备用源全局端点回退：联赛端点返回空时改用 /v4/matches 并按竞赛过滤
+# ==============================================================================
+def test_fallback_uses_global_endpoint_when_competition_empty():
+    paths = []
+
+    def handler(request):
+        path = str(request.url.path)
+        paths.append(path)
+        if path.startswith("/v4/competitions/"):
+            return httpx.Response(200, json={"matches": []})  # 联赛端点为空
+        return httpx.Response(200, json={"matches": [FD_MATCH, FD_FINISHED]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert len(fixtures) == 2, "联赛端点为空时应回退到全局端点"
+    assert any(p == "/v4/matches" for p in paths)
+
+
+def test_global_endpoint_filters_other_competitions():
+    """全局端点会返回所有竞赛，必须只保留目标联赛，不能混入其他联赛的比赛。"""
+    other = dict(FD_MATCH, id=9001, competition={"id": 2014, "name": "La Liga", "code": "PD"})
+
+    def handler(request):
+        if str(request.url.path).startswith("/v4/competitions/"):
+            return httpx.Response(200, json={"matches": []})
+        return httpx.Response(200, json={"matches": [FD_MATCH, other]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert len(fixtures) == 1
+    assert fixtures[0]["league"]["name"] == "Premier League"
