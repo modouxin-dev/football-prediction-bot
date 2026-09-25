@@ -44,6 +44,22 @@ log = logging.getLogger("bot")
 ui = BotUI()
 
 DAILY_JOB = "daily_push"
+
+# 机器人指令表 / Bot command list
+# 每项为 (命令, 说明)；说明为中英双语，方便中文用户与英文用户各自识别。
+# Each item is (command, description); descriptions are bilingual (CN/EN).
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("start", "欢迎信息与推送时间 / Welcome & push time"),
+    ("menu", "打开功能菜单 / Open main menu"),
+    ("help", "命令说明 / Command help"),
+    ("fixtures", "今日赛程 / Today's fixtures"),
+    ("predict", "比赛预测 / Match prediction"),
+    ("standings", "联赛排名 / League standings"),
+    ("refresh", "刷新数据 / Refresh data"),
+    ("web", "网页端入口 / Web app"),
+    ("test", "立即推送一次预测（管理员） / Push now (admin)"),
+    ("status", "运行状态与数据源诊断（管理员） / Status & diagnostics (admin)"),
+]
 WIDE_HOURS = 24 * 14  # /test 在近期无比赛（如国际比赛日）时放宽到 14 天，方便看到示例消息
 
 FX_PER_PAGE = 5  # 今日赛程每页比赛数
@@ -201,6 +217,75 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_html(update.effective_message, ui.format_help(), ui.menu_keyboard())
 
 
+class _MessageQuery:
+    """把「新消息」伪装成 callback_query，让直接命令复用就地编辑逻辑。
+
+    Adapts a new message to the callback_query interface so direct commands
+    can reuse the same edit-based rendering path.
+    """
+
+    def __init__(self, message) -> None:
+        self.message = message
+
+    async def answer(self, *args, **kwargs) -> None:
+        return None
+
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None, **kwargs):
+        # 首次以新消息发出，后续编辑同一条（等价于按钮的就地切换体验）
+        if getattr(self, "_sent", False):
+            return await self.message.edit_text(
+                text, parse_mode=parse_mode, reply_markup=reply_markup, **kwargs
+            )
+        self._sent = True
+        return await self.message.reply_text(
+            text, parse_mode=parse_mode, reply_markup=reply_markup, **kwargs
+        )
+
+
+class _FakeUpdate:
+    """轻量 Update 包装：让直接命令走与按钮相同的 handler 签名。"""
+
+    def __init__(self, update: Update) -> None:
+        self._update = update
+        self.callback_query = _MessageQuery(update.effective_message)
+        self.effective_message = update.effective_message
+        self.effective_user = update.effective_user
+        self.effective_chat = update.effective_chat
+
+    def __getattr__(self, name):
+        return getattr(self._update, name)
+
+
+async def _dispatch_menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
+    """直接命令 → 菜单分发（与按钮共用 on_menu_key）。"""
+    await on_menu_key(_FakeUpdate(update), context, key)
+
+
+async def fixtures_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/fixtures — 直接打开今日赛程 / Open today's fixtures directly."""
+    await _dispatch_menu_cmd(update, context, "fixtures")
+
+
+async def predict_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/predict — 直接进入比赛预测 / Open match prediction directly."""
+    await _dispatch_menu_cmd(update, context, "predict")
+
+
+async def standings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/standings — 直接查看联赛排名 / Open league standings directly."""
+    await _dispatch_menu_cmd(update, context, "standings")
+
+
+async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/refresh — 清空缓存重新拉取 / Clear cache and refetch."""
+    await _dispatch_menu_cmd(update, context, "refresh")
+
+
+async def web_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/web — 网页端入口 / Web app entry."""
+    await _dispatch_menu_cmd(update, context, "web")
+
+
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """手动触发一次推送，走与定时任务完全相同的路径，用来验证 Telegram 与数据源都正常。"""
     app = context.application
@@ -276,9 +361,19 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """菜单按钮回调 / Inline menu callback."""
     query = update.callback_query
     _, _, key = (query.data or "").partition(":")
     await query.answer()
+    await on_menu_key(update, context, key)
+
+
+async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
+    """菜单业务分发：按钮回调与直接命令共用同一条路径（逻辑只写一份）。
+
+    Menu dispatcher shared by button callbacks and direct commands.
+    """
+    query = update.callback_query
     settings: Settings = context.application.bot_data["settings"]
     if key == "home":
         await edit_view(query, ui.format_menu(settings), ui.menu_keyboard())
@@ -294,9 +389,9 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif key == "standings":
         await show_standings(update, context)
     elif key == "analysis":
-        await show_fixtures(update, context, page=0)  # 深度分析要先选比赛
+        await show_fixtures(update, context, page=0)  # 深度分析要先选比赛 / pick a match first
     elif key == "predict":
-        await show_fixtures(update, context, page=0)  # 比赛预测要先选比赛
+        await show_fixtures(update, context, page=0)  # 比赛预测要先选比赛 / pick a match first
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
 
@@ -661,15 +756,7 @@ async def post_init(app: Application) -> None:
     app.bot_data["api"] = api
     app.bot_data["service"] = PredictionService(settings, api, MatchAnalyzer())
     try:
-        await app.bot.set_my_commands(
-            [
-                BotCommand("start", "欢迎信息与推送时间"),
-                BotCommand("menu", "打开功能菜单"),
-                BotCommand("help", "命令说明"),
-                BotCommand("test", "立即推送一次预测（管理员）"),
-                BotCommand("status", "运行状态与数据源诊断（管理员）"),
-            ]
-        )
+        await app.bot.set_my_commands([BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS])
     except TelegramError as exc:
         log.warning("设置命令菜单失败：%s", exc)
 
@@ -696,6 +783,12 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    # 直接命令：与菜单按钮共用同一套业务逻辑 / Direct commands reuse menu logic
+    app.add_handler(CommandHandler("fixtures", fixtures_cmd))
+    app.add_handler(CommandHandler("predict", predict_cmd))
+    app.add_handler(CommandHandler("standings", standings_cmd))
+    app.add_handler(CommandHandler("refresh", refresh_cmd))
+    app.add_handler(CommandHandler("web", web_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
