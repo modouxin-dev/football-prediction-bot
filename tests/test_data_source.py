@@ -722,3 +722,60 @@ def test_no_shift_when_window_has_data():
     fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
     assert len(fixtures) == 1
     assert fd.last_shifted_date is None  # 未回退
+
+
+# ==============================================================================
+# P0-4：请求日志与降级原因记录 / Request log & switch reason
+# ==============================================================================
+def _router(primary):
+    return DataSourceRouter(primary, make_fd(_fd_ok_handler()), mode="auto")
+
+
+def _fd_ok_handler():
+    def handler(request):
+        return httpx.Response(200, json={"matches": [dict(FD_MATCH)]})
+
+    return handler
+
+
+def test_request_log_contains_source_count_and_elapsed(caplog):
+    """每次请求必须记录：数据源、返回数量、耗时（技术细节留日志，用户看友好提示）。"""
+    import logging
+
+    router = _router(StubPrimary())
+    with caplog.at_level(logging.INFO, logger="data_source"):
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    msg = caplog.text
+    assert "源=api-football" in msg
+    assert "数量=" in msg
+    assert "耗时=" in msg
+
+
+def test_log_includes_league_and_date(caplog):
+    """日志要带联赛与日期，否则线上无法定位是哪个查询出问题。"""
+    import logging
+
+    router = _router(StubPrimary())
+    with caplog.at_level(logging.INFO, logger="data_source"):
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert "联赛=39" in caplog.text
+    assert "2026-09-25" in caplog.text
+
+
+def test_switch_is_recorded_with_reason():
+    """主源失败切换备用源时，必须记录切换原因，便于事后排查。"""
+    router = _router(StubPrimary(error=APIError("Free plans do not have access")))
+    run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    sw = router.last_switch
+    assert sw is not None
+    assert sw["from"] == "api-football"
+    assert sw["to"] == "football-data"
+    assert "Free plans" in sw["reason"]
+    assert router.using_fallback
+
+
+def test_no_switch_recorded_when_primary_ok():
+    """主源正常时不应产生降级记录（避免误导排查）。"""
+    router = _router(StubPrimary())
+    run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert router.last_switch is None
