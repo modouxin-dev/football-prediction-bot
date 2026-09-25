@@ -554,6 +554,16 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         + ("（备用源生效中）" if getattr(api, 'using_fallback', False) else ""),
         f"备用源 football-data.org：{'已配置' if s.football_data_available else '未配置'}",
     ]
+    # 备用源实测：真实请求一次，把结果/原因显示出来，便于管理员自查账号与套餐
+    if s.football_data_available and getattr(api, "fallback", None):
+        try:
+            probe = await api.fallback.probe(s.league_id)
+            if probe.get("ok"):
+                lines.append(f"备用源实测：✅ {probe['competition']} 共 {probe['count']} 场")
+            else:
+                lines.append(f"备用源实测：❌ {probe.get('count', 0)} 场｜{probe.get('raw') or probe.get('detail') or '无数据'}")
+        except Exception as exc:  # 诊断失败不影响状态页
+            lines.append(f"备用源实测：⚠️ {describe_error(exc)}")
     try:
         account = await api.get_account_status()
         sub, req = account.get("subscription") or {}, account.get("requests") or {}
