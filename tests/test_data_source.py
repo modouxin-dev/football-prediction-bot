@@ -370,3 +370,59 @@ def test_fallback_has_no_odds_and_no_h2h():
     fd = make_fd(ok_matches)
     assert run(fd.get_odds("fd-5001")) == []
     assert run(fd.get_h2h("fd-65", "fd-64")) == []
+
+
+# ==============================================================================
+# 回归：主源赛季不可用 + 备用源当日确实无比赛 → 应显示「今日暂无比赛」，不能报数据源故障
+# ==============================================================================
+def test_fallback_empty_matches_is_not_a_failure():
+    """备用源正常响应（HTTP 200）但没有比赛 = 今天确实没比赛，不是故障。"""
+    primary = StubPrimary(error=APIError("plan: Free plans do not have access to this season"))
+
+    def empty_matches(request):
+        return httpx.Response(200, json={"matches": []})
+
+    router = DataSourceRouter(primary, make_fd(empty_matches), mode="auto")
+    result = run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert result == []
+    assert router.using_fallback is True          # 确实在用备用源
+    assert router.last_error("api-football")      # 主源的赛季原因被保留，供提示使用
+
+
+def test_today_fixtures_empty_shows_reason_not_error():
+    """端到端：主源赛季不可用 + 备用源无比赛 → 返回空并给出说明，不抛异常。"""
+    from config import load_settings
+    from service import PredictionService
+
+    settings = load_settings(
+        {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
+    )
+
+    class SeasonBlockedPrimary(StubPrimary):
+        async def get_fixtures(self, *a, **k):
+            raise APIError("plan: Free plans do not have access to this season")
+
+        async def get_available_seasons(self):
+            return [2026, 2025, 2024]
+
+    def empty_matches(request):
+        return httpx.Response(200, json={"matches": []})
+
+    router = DataSourceRouter(SeasonBlockedPrimary(), make_fd(empty_matches), mode="auto")
+    svc = PredictionService(settings, router)
+    fixtures = run(svc.get_today_fixtures())
+    assert fixtures == []
+    assert svc.last_note and "备用数据源" in svc.last_note and "暂无比赛" in svc.last_note
+
+
+def test_fallback_real_failure_still_raises():
+    """备用源自身报错（如 403）才是真的故障，必须抛错而不是假装没比赛。"""
+    primary = StubPrimary(error=APIError("plan: Free plans do not have access to this season"))
+
+    def boom(request):
+        return httpx.Response(403, json={"message": "restricted"})
+
+    router = DataSourceRouter(primary, make_fd(boom), mode="auto")
+    with pytest.raises(DataSourceError) as exc:
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert "均不可用" in str(exc.value)
