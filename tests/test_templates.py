@@ -135,3 +135,43 @@ def test_welcome_uses_short_lines_to_avoid_misalignment():
     for line in text.split("\n"):
         assert line.count("┃") == 0  # 不使用竖向长边框
         assert line.count("━") <= 18  # 分隔线保持短（SEP 本身长度 18）
+
+
+# ---- 双语队名 / Bilingual team names -------------------------------------------
+def test_team_name_known_is_bilingual():
+    from bot_handler import team_name
+
+    assert team_name("Manchester City FC") == "曼城 (Manchester City FC)"
+    assert team_name("Liverpool FC") == "利物浦 (Liverpool FC)"
+
+
+def test_team_name_unknown_falls_back_to_original():
+    """未收录的球队绝不猜测，只显示英文原名。"""
+    from bot_handler import team_name
+
+    assert team_name("Some Unknown FC") == "Some Unknown FC"
+
+
+def test_team_name_empty_is_placeholder():
+    from bot_handler import team_name
+
+    assert team_name(None) == "?"
+    assert team_name("") == "?"
+
+
+def test_team_name_monolingual_mode():
+    from bot_handler import team_name
+
+    assert team_name("Liverpool FC", bilingual=False) == "Liverpool FC"
+
+
+# ---- 机器人指令表 / Bot commands --------------------------------------------------
+def test_bot_commands_registered_and_bilingual():
+    """每个指令都要有中英双语说明，且都有对应的 CommandHandler。"""
+    from main import BOT_COMMANDS
+
+    source = open("main.py", encoding="utf-8").read()
+    for cmd, desc in BOT_COMMANDS:
+        assert "/" in desc or True
+        assert " / " in desc, f"{cmd} 说明缺少中英双语分隔"
+        assert f'CommandHandler("{cmd}"' in source, f"{cmd} 未注册处理函数"
