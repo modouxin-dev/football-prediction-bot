@@ -10,9 +10,10 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 
 from dotenv import load_dotenv
-from telegram import BotCommand, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
@@ -22,11 +23,13 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     Defaults,
+    MessageHandler,
+    filters,
 )
 
 from analyzer import MatchAnalyzer
 from api_client import APIError, FootballAPI
-from bot_handler import BotUI, esc
+from bot_handler import MENU_ITEMS, BotUI, esc
 from config import ConfigError, Settings, load_settings
 from service import Prediction, PredictionService
 
@@ -35,6 +38,9 @@ ui = BotUI()
 
 DAILY_JOB = "daily_push"
 WIDE_HOURS = 24 * 14  # /test 在近期无比赛（如国际比赛日）时放宽到 14 天，方便看到示例消息
+
+FX_PER_PAGE = 5  # 今日赛程每页比赛数
+MENU_BY_LABEL = {label: key for key, label in MENU_ITEMS}  # 底部键盘文字 → 菜单 key
 
 
 # ---- 日志 -------------------------------------------------------------------
@@ -97,6 +103,31 @@ async def notify_admins(app: Application, text: str) -> None:
             log.warning("通知管理员 %s 失败：%s", admin_id, exc)
 
 
+# ---- 防重复点击（同一用户同一任务并发只放行一次） -----------------------------------
+async def begin_task(bot_data: dict, user_id: int, task: str) -> bool:
+    pending = bot_data.setdefault("pending", set())
+    key = (user_id, task)
+    if key in pending:
+        return False
+    pending.add(key)
+    return True
+
+
+def end_task(bot_data: dict, user_id: int, task: str) -> None:
+    bot_data.setdefault("pending", set()).discard((user_id, task))
+
+
+def back_to_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔄 重试", callback_data="menu:fixtures"),
+                InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home"),
+            ]
+        ]
+    )
+
+
 # ---- 推送 -------------------------------------------------------------------
 @dataclass
 class PushResult:
@@ -148,7 +179,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "├ 赔率价值评估\n"
         "└ 历史交锋数据\n\n"
         f"推送时间：每天 {s.push_time:%H:%M}（{ui.tz_label(s.timezone)}）\n"
-        "发送 /help 查看命令"
+        "发送 /help 查看命令",
+        reply_markup=ui.reply_menu_keyboard(),  # 底部常驻菜单
     )
 
 
@@ -181,6 +213,105 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         extra = f"\n{result.note}" if result.note else ""
         await progress.edit_text(f"✅ 已向 CHAT_ID 发送 {result.sent} 条预测。{extra}")
+
+
+# ---- 主菜单与今日赛程 -----------------------------------------------------------
+async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
+    """渲染今日赛程。有 callback_query 时编辑原消息，否则（底部键盘）发新消息。"""
+    query = update.callback_query
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    if not await begin_task(app.bot_data, user_id, "fixtures"):
+        if query:
+            await query.answer("正在获取，请稍候…")
+        return
+    try:
+        tz = settings.timezone
+        label = datetime.now(tz).strftime("%Y-%m-%d")
+        cache = app.bot_data.get("fx_cache")
+        if cache is None or cache.get("date") != label:
+            items = await service.get_today_fixtures()  # 失败会抛 APIError，错误不写入缓存
+            cache = {"date": label, "items": items}
+            app.bot_data["fx_cache"] = cache
+        items = cache["items"]
+    except APIError as exc:
+        text = f"❌ <b>获取今日赛程失败</b>\n{esc(exc)}\n\n{ui.error_hint(exc)}"
+        markup = back_to_menu_markup()
+    except Exception as exc:  # 任何异常都不能让机器人崩掉
+        log.exception("获取今日赛程失败")
+        text = f"❌ <b>获取今日赛程失败</b>\n{esc(describe_error(exc))}"
+        markup = back_to_menu_markup()
+    else:
+        text, markup, page, _ = ui.format_fixtures_page(items, tz, page, FX_PER_PAGE, label)
+    finally:
+        end_task(app.bot_data, user_id, "fixtures")
+
+    context.user_data["fx_page"] = page  # 页码按用户隔离
+    if query:
+        await edit_view(query, text, markup)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    await update.effective_message.reply_text(
+        ui.format_menu(settings), parse_mode=ParseMode.HTML, reply_markup=ui.menu_keyboard()
+    )
+
+
+async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, _, key = (query.data or "").partition(":")
+    await query.answer()
+    settings: Settings = context.application.bot_data["settings"]
+    if key == "home":
+        await edit_view(query, ui.format_menu(settings), ui.menu_keyboard())
+    elif key == "fixtures":
+        await show_fixtures(update, context, page=0)
+    elif key == "refresh":
+        context.application.bot_data["fx_cache"] = None
+        await show_fixtures(update, context, page=0)
+    elif key == "help":
+        await edit_view(query, ui.format_help(), ui.menu_keyboard())
+    else:
+        await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
+
+
+async def on_fixtures_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, _, raw = (query.data or "").partition(":")
+    await query.answer()
+    await show_fixtures(update, context, page=int(raw))
+
+
+async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """页码指示器（不可点），只用于占位。"""
+    await update.callback_query.answer()
+
+
+async def on_soon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """已渲染但尚未实现的按钮（单场预测 / 分析），避免死按钮无响应。"""
+    await update.callback_query.answer("该功能将在下一阶段开放")
+
+
+async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """底部 Reply 键盘：点击后按同一套逻辑处理。"""
+    key = MENU_BY_LABEL.get((update.effective_message.text or "").strip())
+    if not key:
+        return
+    if key == "help":
+        await update.effective_message.reply_text(ui.format_help(), parse_mode=ParseMode.HTML)
+    elif key == "refresh":
+        context.application.bot_data["fx_cache"] = None
+        await show_fixtures(update, context, page=0)
+    elif key == "fixtures":
+        await show_fixtures(update, context, page=0)
+    else:
+        await update.effective_message.reply_text(ui.format_coming(key), parse_mode=ParseMode.HTML)
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,6 +409,7 @@ async def post_init(app: Application) -> None:
         await app.bot.set_my_commands(
             [
                 BotCommand("start", "欢迎信息与推送时间"),
+                BotCommand("menu", "打开功能菜单"),
                 BotCommand("help", "命令说明"),
                 BotCommand("test", "立即推送一次预测（管理员）"),
                 BotCommand("status", "运行状态与数据源诊断（管理员）"),
@@ -306,9 +438,15 @@ def build_application(settings: Settings) -> Application:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("test", test_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_soon, pattern=r"^(fx|fa):\d+$"))
+    app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):\d+$"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
     app.add_error_handler(on_error)
 
     if app.job_queue is None:
