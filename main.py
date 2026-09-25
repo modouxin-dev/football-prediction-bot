@@ -277,6 +277,10 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await show_fixtures(update, context, page=0)
     elif key == "help":
         await edit_view(query, ui.format_help(), ui.menu_keyboard())
+    elif key == "standings":
+        await show_standings(update, context)
+    elif key == "analysis":
+        await show_fixtures(update, context, page=0)  # 深度分析要先选比赛
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
 
@@ -286,6 +290,84 @@ async def on_fixtures_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     _, _, raw = (query.data or "").partition(":")
     await query.answer()
     await show_fixtures(update, context, page=int(raw))
+
+
+async def show_standings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🏆 联赛排名：渲染积分榜。"""
+    query = update.callback_query
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    if not await begin_task(app.bot_data, user_id, "standings"):
+        if query:
+            await query.answer("正在获取，请稍候…")
+        return
+    try:
+        rows = await service.get_standings_page()
+    except APIError as exc:
+        text = f"❌ <b>获取联赛排名失败</b>\n{esc(exc)}\n\n{ui.error_hint(exc)}"
+        markup = back_to_menu_markup()
+    except Exception as exc:
+        log.exception("获取联赛排名失败")
+        text = f"❌ <b>获取联赛排名失败</b>\n{esc(describe_error(exc))}"
+        markup = back_to_menu_markup()
+    else:
+        text = ui.format_standings_page(
+            rows,
+            settings.timezone,
+            league_label=f"联赛 {settings.league_id} · 赛季 {service.season_in_use}",
+            updated=datetime.now(settings.timezone),
+        )
+        markup = ui.standings_keyboard()
+    finally:
+        end_task(app.bot_data, user_id, "standings")
+
+    if query:
+        await edit_view(query, text, markup)
+    else:
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def on_analysis_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """赛程里的 [📊 分析]：生成单场深度分析报告。"""
+    query = update.callback_query
+    _, _, raw = (query.data or "").partition(":")
+    await query.answer()
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    try:
+        fixture_id = int(raw)
+    except ValueError:
+        return
+    if not await begin_task(app.bot_data, user_id, f"analysis:{fixture_id}"):
+        await query.answer("正在分析，请稍候…")
+        return
+
+    try:
+        cache = app.bot_data.get("fx_cache")
+        fixtures = cache["items"] if cache else None
+        try:
+            report = await service.analyze_fixture(fixture_id, fixtures)
+        except KeyError:
+            await edit_view(query, "⚠️ 该场比赛已不在今日赛程中，请返回赛程重新选择。", back_to_menu_markup())
+            return
+        except APIError as exc:
+            text = f"❌ <b>生成深度分析失败</b>\n{esc(exc)}\n\n{ui.error_hint(exc)}"
+            await edit_view(query, text, back_to_menu_markup())
+            return
+    except Exception as exc:  # 兜底：任何异常都不能让机器人崩掉
+        log.exception("生成深度分析失败")
+        await edit_view(query, f"❌ <b>生成深度分析失败</b>\n{esc(describe_error(exc))}", back_to_menu_markup())
+        return
+    finally:
+        end_task(app.bot_data, user_id, f"analysis:{fixture_id}")
+
+    await edit_view(query, ui.format_deep_report(report, settings.timezone), ui.analysis_keyboard(fixture_id))
 
 
 async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -337,11 +419,6 @@ async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-async def on_soon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """已渲染但尚未实现的按钮（单场深度分析），避免死按钮无响应。"""
-    await update.callback_query.answer("该功能将在下一阶段开放")
-
-
 async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """底部 Reply 键盘：点击后按同一套逻辑处理。"""
     key = MENU_BY_LABEL.get((update.effective_message.text or "").strip())
@@ -352,8 +429,10 @@ async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif key == "refresh":
         context.application.bot_data["fx_cache"] = None
         await show_fixtures(update, context, page=0)
-    elif key == "fixtures":
+    elif key == "fixtures" or key == "analysis":
         await show_fixtures(update, context, page=0)
+    elif key == "standings":
+        await show_standings(update, context)
     else:
         await update.effective_message.reply_text(ui.format_coming(key), parse_mode=ParseMode.HTML)
 
@@ -488,7 +567,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:\d+$"))
-    app.add_handler(CallbackQueryHandler(on_soon, pattern=r"^fa:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:\d+$"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
