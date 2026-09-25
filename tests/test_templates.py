@@ -35,9 +35,9 @@ def test_brand_name_lives_in_banner_not_text():
         pytest.skip("matplotlib 未安装（可选依赖）")
     import inspect
 
-    src = inspect.getsource(chart.brand_banner)
-    assert "FOOTBALL QUANT" in src  # 品牌名在头图默认参数中
-    assert "足球量化预测机器人" not in BotUI.format_welcome(SETTINGS)
+    # 品牌名由常量定义，头图与文案共用同一处，不会各写一份
+    assert chart.BRAND_EN == "FOOTBALL INSIGHT"
+    assert "FOOTBALL INSIGHT" in BotUI.format_welcome(SETTINGS)
 
 
 def test_menu_shows_league_season_timezone():
