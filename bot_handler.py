@@ -686,21 +686,27 @@ class BotUI:
     # ---- 今日赛程 ---------------------------------------------------------------
     @staticmethod
     def format_fixtures_page(
-        items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = ""
+        items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = "",
+        multi_day: bool = False,
     ) -> tuple[str, InlineKeyboardMarkup, int, int]:
-        """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。"""
+        """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。
+
+        multi_day=True 表示这批赛程跨越多天（今日无比赛时扩展到未来），
+        此时标题改为「近期赛程」，且每场比赛显示日期，避免用户误以为是今天的比赛。
+        """
         total_pages = max(1, -(-len(items) // per_page))
         page = min(max(page, 0), total_pages - 1)
         chunk = items[page * per_page : (page + 1) * per_page]
 
+        title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
         lines = [
-            "📅 <b>今日赛程</b>",
+            title,
             f"日期：<code>{esc(day_label)}</code> · 时区：<code>{esc(tz.zone)}</code>",
             SEP,
         ]
         rows: list[list[InlineKeyboardButton]] = []
         if not chunk:
-            lines.append("今日暂无赛程。")
+            lines.append("近期暂无赛程。" if multi_day else "今日暂无赛程。")
         else:
             current = None
             for offset, fx in enumerate(chunk):
@@ -714,7 +720,11 @@ class BotUI:
                 home = (teams.get("home") or {}).get("name") or "?"
                 away = (teams.get("away") or {}).get("name") or "?"
                 kickoff = parse_kickoff(info.get("date"))
-                when = kickoff.astimezone(tz).strftime("%H:%M") if kickoff else "--:--"
+                if kickoff:
+                    local = kickoff.astimezone(tz)
+                    when = local.strftime("%m-%d %H:%M") if multi_day else local.strftime("%H:%M")
+                else:
+                    when = "--:--"
                 short = (info.get("status") or {}).get("short") or ""
                 status = STATUS_TEXT.get(short, short or "未知")
                 goals = fx.get("goals") or {}
