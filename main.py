@@ -17,7 +17,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
@@ -314,6 +314,17 @@ async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _dispatch_menu_cmd(update, context, "fixtures")
 
 
+async def _dispatch_cmd_typing(update: Update) -> None:
+    """命令入口统一先发「正在输入」，让用户在等待时知道机器人已收到。
+
+    发送失败不影响主流程：这只是一个体验优化，不该让命令整体挂掉。
+    """
+    try:
+        await update.effective_chat.send_action(ChatAction.TYPING)
+    except Exception:
+        pass
+
+
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/stats — 命中率统计（基于落盘到机器人存储的预测记录）。"""
     s: Settings = context.application.bot_data["settings"]
@@ -417,8 +428,11 @@ async def storage_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not probe["write"] or not probe["read"]:
         lines += ["", "⚠️ 写入/读取失败，数据留在容器临时目录，<b>重新部署会丢失</b>。"]
     elif not mounted:
-        lines += ["", "ℹ️ 首次执行属正常；请重新部署后再执行一次，若标记时间仍在即 Volume 生效。"]
-    lines += ["", "未挂载 Volume 时，预测与命中率数据<b>会在重新部署后清空</b>。"]
+        lines += [
+            "",
+            "ℹ️ 首次执行属正常；请重新部署后再执行一次，若标记时间仍在即 Volume 生效。",
+            "未确认挂载前，预测与命中率数据<b>可能在重新部署后清空</b>。",
+        ]
     await update.effective_message.reply_text(
         "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
     )
