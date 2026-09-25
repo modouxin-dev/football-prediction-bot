@@ -21,6 +21,7 @@ MODEL_VERSION = "poisson-v0.1"  # 展示给用户，便于判断结论来自哪�
 FORM_MATCHES = 5  # 深度分析取近期几场
 H2H_MATCHES = 10  # 历史交锋取几场
 SEASON_FALLBACK_STEPS = 3  # 赛季不可用时，最多再向下降级几个赛季（不硬编码具体年份）
+UPCOMING_DAYS = 7  # 今日无比赛时，自动向前查找的天数（避免"今天没比赛"就显示空白）
 
 _FINISHED = {"FT", "AET", "PEN"}  # 已完场的状态缩写
 
@@ -188,6 +189,8 @@ class PredictionService:
         self.api = api
         self.analyzer = analyzer or MatchAnalyzer()
         self.season_in_use: int = settings.season
+        self.using_upcoming: bool = False  # 当前赛程是否为「今日无比赛 → 扩展到未来」的结果
+        self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
         self._store: OrderedDict[int, Prediction] = OrderedDict()
 
@@ -370,15 +373,34 @@ class PredictionService:
         s = self.settings
         now = now or datetime.now(timezone.utc)
         day = now.astimezone(s.timezone).date()
+        self.using_upcoming = False
+        self.fixture_day_label = day.isoformat()
+
         fixtures, season, note = await self._fetch_fixtures(day, day)
+        if not fixtures:
+            # 今日无比赛：自动扩展到未来 N 天，避免「今天没比赛」就给用户一片空白。
+            # 注意区分：这里是「正常无数据」，仍不能把权限/故障错误伪装成空。
+            end = day + timedelta(days=UPCOMING_DAYS)
+            fixtures, season, note = await self._fetch_fixtures(day, end)
+            if fixtures:
+                self.using_upcoming = True
+                self.fixture_day_label = f"{day.isoformat()} ~ {end.isoformat()}"
+                fixtures = sorted(
+                    fixtures,
+                    key=lambda fx: (parse_kickoff((fx.get("fixture") or {}).get("date")) or now),
+                )
+                note = (
+                    f"ℹ️ 今日（{day.isoformat()}）暂无比赛，"
+                    f"已自动展示未来 {UPCOMING_DAYS} 天内的赛程。"
+                )
         if not fixtures and getattr(self.api, "using_fallback", False):
             # 备用源正常响应但今日无比赛：如实说明，不伪装成主源的权限错误，
             # 也不把「今天没比赛」说成数据源故障。
             primary_err = self.api.last_error("api-football") if hasattr(self.api, "last_error") else None
             note = (
-                f"ℹ️ 主数据源当前赛季不可用，已切换到备用数据源 {self.source_label}；今日暂无比赛。"
+                f"ℹ️ 主数据源当前赛季不可用，已切换到备用数据源 {self.source_label}；近期暂无比赛。"
                 if primary_err
-                else f"ℹ️ 当前使用备用数据源 {self.source_label}；今日暂无比赛。"
+                else f"ℹ️ 当前使用备用数据源 {self.source_label}；近期暂无比赛。"
             )
         self.last_note = note
         if note:
