@@ -595,3 +595,80 @@ def test_global_endpoint_filters_other_competitions():
     fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     assert len(fixtures) == 1
     assert fixtures[0]["league"]["name"] == "Premier League"
+
+
+# ==============================================================================
+# 第三级兜底：带日期过滤为空 → 不带日期参数拉整季 → 本地按日期筛选
+# ==============================================================================
+def _match_on(utc_date, mid=7001):
+    return _future_match(mid, utc_date)
+
+
+def test_third_fallback_filters_season_matches_locally():
+    """前两级都为空时，拉取整季赛程并在本地按日期筛选。"""
+    paths, seen_params = [], []
+
+    def handler(request):
+        paths.append(str(request.url.path))
+        seen_params.append(dict(request.url.params))
+        # 带日期参数的请求一律为空（模拟免费层日期过滤不可用）
+        if request.url.params.get("dateFrom"):
+            return httpx.Response(200, json={"matches": []})
+        # 不带日期参数 → 返回整季（含窗口内 1 场、窗口外 1 场）
+        return httpx.Response(200, json={"matches": [
+            _match_on("2026-09-20T14:00:00Z", 1),   # 窗口外（早于 09-25）
+            _match_on("2026-09-27T14:00:00Z", 2),   # 窗口内
+            _match_on("2026-12-01T14:00:00Z", 3),   # 窗口外（远晚于 10-02）
+        ]})
+
+    fd = make_fd(handler)
+    fixtures = run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 10, 2)))
+    assert len(fixtures) == 1, "应只保留窗口内的 1 场"
+    assert str(fixtures[0]["fixture"]["id"]) == "fd-2"
+    # 确认最后一次请求不带日期参数
+    assert seen_params[-1] == {}
+
+
+def test_probe_reports_count_when_data_exists():
+    def handler(request):
+        return httpx.Response(200, json={"matches": [FD_MATCH], "competition": {"name": "Premier League"}})
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is True
+    assert info["count"] == 1
+    assert "Premier League" in info["competition"]
+
+
+def test_probe_includes_raw_snippet_when_empty():
+    """HTTP 200 但 matches 为空 → 带出原始响应片段，便于判断是账号限制还是真没数据。"""
+    def handler(request):
+        return httpx.Response(200, json={"matches": []})
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is False
+    assert info["count"] == 0
+    assert "matches" in info["raw"]  # 原始内容可见，不再只显示「0 场」
+
+
+def test_probe_reports_api_message_as_detail():
+    """响应里的 message 字段是接口报错，应作为原因展示。"""
+    def handler(request):
+        return httpx.Response(200, json={"matches": [], "message": "restricted resource"})
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is False
+    assert "restricted resource" in info["detail"]
+
+
+def test_probe_never_raises():
+    """诊断接口不能因为请求失败而影响主流程。"""
+    def handler(request):
+        raise httpx.ConnectError("boom")
+
+    fd = make_fd(handler)
+    info = run(fd.probe(39))
+    assert info["ok"] is False
+    assert "detail" in info
