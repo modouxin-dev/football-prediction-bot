@@ -150,6 +150,39 @@ class PredictionService:
             best=best,
         )
 
+    # ---- 今日赛程 ---------------------------------------------------------------
+    def _season_candidates(self) -> list[int]:
+        """尝试赛季的顺序：配置的 SEASON 优先，其次按日期推算出的赛季。"""
+        s = self.settings
+        return [s.season] + ([s.expected_season] if s.expected_season != s.season else [])
+
+    async def get_today_fixtures(self, now: datetime | None = None) -> list[dict]:
+        """取「今天」（按 TIMEZONE，默认 Asia/Shanghai）的全部赛程。
+
+        与 build_predictions 不同：这里不限制未来窗口，已开赛 / 已完场的比赛也要列出。
+        取不到时抛出 APIError，让上层展示真实原因（套餐 / 赛季 / 网络），
+        绝不能把权限错误伪装成「今天没有比赛」。
+        """
+        s = self.settings
+        now = now or datetime.now(timezone.utc)
+        day = now.astimezone(s.timezone).date()
+        first_error: APIError | None = None
+        for season in self._season_candidates():
+            try:
+                fixtures = await self.api.get_fixtures(s.league_id, season, day, day)
+            except APIError as exc:
+                if first_error is None:
+                    first_error = exc
+                continue
+            if fixtures:
+                if season != s.season:
+                    log.warning("今日赛程：SEASON=%s 无数据，已改用 %s 赛季", s.season, season)
+                self.season_in_use = season
+                return list(fixtures)
+        if first_error is not None:
+            raise first_error
+        return []
+
     # ---- 存取（按钮回调用） -----------------------------------------------------
     def _remember(self, prediction: Prediction) -> None:
         self._store[prediction.fixture_id] = prediction
