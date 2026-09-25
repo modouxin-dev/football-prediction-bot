@@ -395,6 +395,14 @@ class PredictionService:
                     f"ℹ️ 今日（{day.isoformat()}）暂无比赛，"
                     f"已自动展示未来 {UPCOMING_DAYS} 天内的赛程。"
                 )
+        # 备用源把数据「回退到最近比赛日」时，把真实日期带出来，别只说「暂无比赛」
+        fb = getattr(self.api, "fallback", None)
+        if fixtures and fb and getattr(fb, "last_shifted_date", None):
+            shifted = fb.last_shifted_date
+            self.fixture_day_label = shifted.isoformat()
+            self.using_upcoming = False
+            note = f"ℹ️ {fb.last_note}"
+
         if not fixtures and getattr(self.api, "using_fallback", False):
             # 备用源正常响应但今日无比赛：如实说明，不伪装成主源的权限错误，
             # 也不把「今天没比赛」说成数据源故障。
