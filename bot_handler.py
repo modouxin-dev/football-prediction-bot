@@ -30,6 +30,56 @@ LEAGUE_NAMES = {
 }
 
 
+# 队名中英对照表 / Team name mapping (CN ↔ EN)
+# 说明 / Note: football-data.org 与 API-Football 返回的球队名均为英文原文，
+# 这里按官方名建立中文对照，供界面双语展示。未收录的球队只显示英文原名。
+TEAM_NAMES: dict[str, str] = {
+    # 英超 / Premier League
+    "Manchester City FC": "曼城", "Liverpool FC": "利物浦", "Arsenal FC": "阿森纳",
+    "Manchester United FC": "曼联", "Chelsea FC": "切尔西", "Tottenham Hotspur FC": "托特纳姆热刺",
+    "Newcastle United FC": "纽卡斯尔联", "Brighton & Hove Albion FC": "布莱顿",
+    "Aston Villa FC": "阿斯顿维拉", "West Ham United FC": "西汉姆联",
+    "Crystal Palace FC": "水晶宫", "Everton FC": "埃弗顿", "Fulham FC": "富勒姆",
+    "Brentford FC": "布伦特福德", "Nottingham Forest FC": "诺丁汉森林",
+    "AFC Bournemouth": "伯恩茅斯", "Wolverhampton Wanderers FC": "狼队",
+    "Leeds United FC": "利兹联", "Sunderland AFC": "桑德兰", "Burnley FC": "伯恩利",
+    # 西甲 / La Liga
+    "Real Madrid CF": "皇家马德里", "FC Barcelona": "巴塞罗那",
+    "Club Atlético de Madrid": "马德里竞技", "Sevilla FC": "塞维利亚",
+    "Real Betis Balompié": "皇家贝蒂斯", "Valencia CF": "瓦伦西亚",
+    "Villarreal CF": "比利亚雷亚尔", "Athletic Club": "毕尔巴鄂竞技",
+    "Real Sociedad de Fútbol": "皇家社会", "RC Celta de Vigo": "塞尔塔",
+    # 德甲 / Bundesliga
+    "FC Bayern München": "拜仁慕尼黑", "Borussia Dortmund": "多特蒙德",
+    "RB Leipzig": "莱比锡红牛", "Bayer 04 Leverkusen": "勒沃库森",
+    "Eintracht Frankfurt": "法兰克福", "VfB Stuttgart": "斯图加特",
+    "Borussia Mönchengladbach": "门兴格拉德巴赫", "VfL Wolfsburg": "沃尔夫斯堡",
+    # 意甲 / Serie A
+    "Juventus FC": "尤文图斯", "FC Internazionale Milano": "国际米兰",
+    "AC Milan": "AC米兰", "SSC Napoli": "那不勒斯", "AS Roma": "罗马",
+    "SS Lazio": "拉齐奥", "Atalanta BC": "亚特兰大", "ACF Fiorentina": "佛罗伦萨",
+    # 法甲 / Ligue 1
+    "Paris Saint-Germain FC": "巴黎圣日耳曼", "Olympique de Marseille": "马赛",
+    "Olympique Lyonnais": "里昂", "AS Monaco FC": "摩纳哥", "LOSC Lille": "里尔",
+}
+
+
+def team_name(raw: str | None, bilingual: bool = True) -> str:
+    """队名展示 / Display team name.
+
+    双语模式返回「中文名 (English)」，未收录时只返回英文原名，绝不猜测或编造。
+    Bilingual mode returns "中文 (English)"; unknown teams fall back to the
+    original English name — never guessed or fabricated.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "?"
+    cn = TEAM_NAMES.get(raw)
+    if not cn or not bilingual:
+        return raw
+    return f"{cn} ({raw})"
+
+
 def league_label(league_id: int) -> str:
     """展示用联赛名：已知 ID 显示中文名 + ID，未知则只显示 ID。"""
     name = LEAGUE_NAMES.get(int(league_id))
@@ -83,8 +133,8 @@ def build_prediction_payload(p, tz) -> dict:
     """统一预测结果数据结构（供格式化与未来的网页端复用）。"""
     a = p.analysis
     probabilities = {
-        "home_team": p.home,
-        "away_team": p.away,
+        "home_team": team_name(p.home),
+        "away_team": team_name(p.away),
         "home_win": float(a["win_prob"]),
         "draw": float(a["draw_prob"]),
         "away_win": float(a["loss_prob"]),
@@ -281,7 +331,7 @@ class BotUI:
     def matchup(p, tz) -> str:
         """详情页顶部的一行比赛信息。"""
         return (
-            f"🏠 <b>{esc(p.home)}</b> 🆚 <b>{esc(p.away)}</b> ✈️\n"
+            f"🏠 <b>{esc(team_name(p.home))}</b> 🆚 <b>{esc(team_name(p.away))}</b> ✈️\n"
             f"🕐 <code>{BotUI.fmt_time(p.kickoff, tz)}</code> ({BotUI.tz_label(tz, p.kickoff)})"
         )
 
@@ -311,9 +361,9 @@ class BotUI:
         lines = [
             title,
             SEP,
-            f"🏠 <b>{esc(p.home)}</b>",
+            f"🏠 <b>{esc(team_name(p.home))}</b>",
             "      🆚",
-            f"✈️ <b>{esc(p.away)}</b>",
+            f"✈️ <b>{esc(team_name(p.away))}</b>",
             when,
             SEP,
             "📈 <b>胜平负概率</b>",
@@ -409,7 +459,7 @@ class BotUI:
 
         lines = [
             "⚽ <b>比赛预测</b>",
-            f"🏠 <b>{esc(p.home)}</b> 🆚 <b>{esc(p.away)}</b> ✈️",
+            f"🏠 <b>{esc(team_name(p.home))}</b> 🆚 <b>{esc(team_name(p.away))}</b> ✈️",
             f"🕐 比赛时间：<code>{BotUI.fmt_time(p.kickoff, tz)}</code>（{BotUI.tz_label(tz, p.kickoff)}）",
             SEP,
             "📈 <b>预测概率</b>",
@@ -633,8 +683,8 @@ class BotUI:
             f"🤝 双方都进球 <code>{a['btts']:.1%}</code>",
             SEP,
             "🧮 <b>球队强度</b>（1.00 = 联赛平均）",
-            f"🏠 {esc(p.home)} 主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
-            f"✈️ {esc(p.away)} 客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
+            f"🏠 {esc(team_name(p.home))} 主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
+            f"✈️ {esc(team_name(p.away))} 客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
             "攻击 &gt;1：进球高于平均；防守 &lt;1：失球低于平均（防守更好）。",
             SEP,
             DISCLAIMER,
@@ -701,7 +751,7 @@ class BotUI:
                 f"{mark} <code>{date}</code> {esc((teams.get('home') or {}).get('name', '?'))} "
                 f"<b>{goals['home']}-{goals['away']}</b> {esc((teams.get('away') or {}).get('name', '?'))}"
             )
-        summary = f"近 {len(finished)} 次交锋（{esc(p.home)} 视角）：<b>{win} 胜 {draw} 平 {loss} 负</b>，进 {gf} / 失 {ga}"
+        summary = f"近 {len(finished)} 次交锋（{esc(team_name(p.home))} 视角）：<b>{win} 胜 {draw} 平 {loss} 负</b>，进 {gf} / 失 {ga}"
         return "\n".join(
             [title, BotUI.matchup(p, tz), SEP, summary, *rows, SEP, "🟢 胜 · 🟡 平 · 🔴 负；球队阵容与状态可能已大不相同，仅供参考。"]
         )
@@ -788,13 +838,18 @@ class BotUI:
             "🔄 <b>刷新数据</b>　清空缓存，重新拉取\n"
             "🌐 <b>网页端</b>　　浏览器查询入口（规划中）\n"
             "\n"
-            f"◆ <b>命令列表</b>\n"
+            f"◆ <b>命令列表 / Commands</b>\n"
             f"{THIN_SEP}\n"
-            "<code>/start</code>　欢迎信息与推送时间\n"
-            "<code>/menu</code>　打开功能菜单\n"
-            "<code>/help</code>　显示本指南\n"
-            "<code>/test</code>　立即推送一次预测（管理员）\n"
-            "<code>/status</code>　运行状态与数据源诊断（管理员）\n"
+            "<code>/start</code>　欢迎与推送时间 / Welcome\n"
+            "<code>/menu</code>　功能菜单 / Main menu\n"
+            "<code>/help</code>　本指南 / This help\n"
+            "<code>/fixtures</code>　今日赛程 / Fixtures\n"
+            "<code>/predict</code>　比赛预测 / Prediction\n"
+            "<code>/standings</code>　联赛排名 / Standings\n"
+            "<code>/refresh</code>　刷新数据 / Refresh\n"
+            "<code>/web</code>　网页端 / Web app\n"
+            "<code>/test</code>　立即推送（管理员）/ Push now (admin)\n"
+            "<code>/status</code>　状态诊断（管理员）/ Status (admin)\n"
             "\n"
             f"{SEP}\n"
             f"{DISCLAIMER}"
@@ -863,8 +918,8 @@ class BotUI:
                     current = league
                     lines.append(f"🏆 <b>{esc(league)}</b>")
                 teams = fx.get("teams") or {}
-                home = (teams.get("home") or {}).get("name") or "?"
-                away = (teams.get("away") or {}).get("name") or "?"
+                home = team_name((teams.get("home") or {}).get("name"))
+                away = team_name((teams.get("away") or {}).get("name"))
                 kickoff = parse_kickoff(info.get("date"))
                 if kickoff:
                     local = kickoff.astimezone(tz)
