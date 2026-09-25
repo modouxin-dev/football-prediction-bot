@@ -6,7 +6,7 @@ from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from analyzer import OUTCOMES, overround
+from analyzer import OUTCOMES, calculate_prediction_level, overround
 from service import MODEL_VERSION, parse_kickoff
 
 SEP = "━━━━━━━━━━━━━━━━━━"
@@ -27,6 +27,7 @@ MENU_ITEMS = (
     ("standings", "🏆 联赛排名"),
     ("refresh", "🔄 刷新数据"),
     ("help", "ℹ️ 使用帮助"),
+    ("web", "🌐 网页端"),
 )
 
 # API-Football 的比赛状态缩写 → 中文
@@ -52,6 +53,61 @@ STATUS_TEXT = {
 }
 
 NO_DATA = "暂无可靠数据，不参与本次分析（缺什么就说明缺什么，不做填充）。"
+
+
+def build_prediction_payload(p, tz) -> dict:
+    """统一预测结果数据结构（供格式化与未来的网页端复用）。"""
+    a = p.analysis
+    probabilities = {
+        "home_team": p.home,
+        "away_team": p.away,
+        "home_win": float(a["win_prob"]),
+        "draw": float(a["draw_prob"]),
+        "away_win": float(a["loss_prob"]),
+    }
+    level = calculate_prediction_level(probabilities)
+    probabilities.update(
+        {
+            "result": level["result"],
+            "level_key": level["key"],
+            "level_name": level["name"],
+            "level_emoji": level["emoji"],
+            "source": p.source,
+            "season": p.season,
+            "kickoff": BotUI.fmt_time(p.kickoff, tz),
+        }
+    )
+    return probabilities
+
+
+def split_html_blocks(text: str, limit: int = 3500) -> list[str]:
+    """按行拆分超长 HTML 文本，避免超过 Telegram 单条 4096 字符限制。
+
+    整段 <code>/<b> 标签不会被拆断（按行切分已足够安全，因为标签不跨行）。
+    """
+    if len(text) <= limit:
+        return [text]
+    blocks, current = [], ""
+    for line in text.split("\n"):
+        if len(current) + len(line) + 1 > limit:
+            blocks.append(current.rstrip())
+            current = line + "\n"
+        else:
+            current += line + "\n"
+    if current.strip():
+        blocks.append(current.rstrip())
+    return blocks
+
+
+WEB_ENTRY_TEXT = (
+    "🌐 <b>网页端</b>\n\n"
+    "网页查询界面正在规划中，当前阶段以 Telegram 机器人的数据稳定性为主。\n\n"
+    "开放后将支持：\n"
+    "· 在浏览器里查看今日赛程与预测\n"
+    "· 查询历史预测与命中情况\n"
+    "· 多联赛切换\n\n"
+    "目前请继续使用下方菜单功能。"
+)
 
 
 def _is_fallback(p) -> bool:
@@ -286,17 +342,24 @@ class BotUI:
     # ---- 视图：单场预测卡片（菜单/赛程入口） ----------------------------------------
     @staticmethod
     def confidence_text(p) -> str:
-        """置信度：高 / 中 / 低，并说明依据。"""
+        """模型信心等级：🟢 高 / 🟡 中 / 🔴 低，只由概率计算。
+
+        概率本身已经反映了数据完整性，因此不再叠加人工规则；
+        仅在完全无球队数据时额外说明原因。
+        """
+        level = calculate_prediction_level(
+            {
+                "home_win": p.analysis["win_prob"],
+                "draw": p.analysis["draw_prob"],
+                "away_win": p.analysis["loss_prob"],
+            }
+        )
+        text = f"{level['emoji']} {level['name']}"
         if not p.has_team_data:
-            return "低（缺少球队数据，仅按联赛平均估算）"
-        top = max(p.analysis["win_prob"], p.analysis["draw_prob"], p.analysis["loss_prob"])
-        if p.low_sample:
-            return "低（近期样本不足）"
-        if top >= 0.6:
-            return "高"
-        if top >= 0.45:
-            return "中"
-        return "低（三项概率接近）"
+            text += "（缺少球队数据，仅按联赛平均估算）"
+        elif p.low_sample:
+            text += "（近期样本不足）"
+        return text
 
     @staticmethod
     def risk_lines(p) -> list[str]:
@@ -334,7 +397,8 @@ class BotUI:
             SEP,
             f"🎯 <b>最可能结果</b>：{esc(top_label)}（{top_prob:.1%}）· 最可能比分 <code>{esc(a['best_score'])}</code>",
             f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>",
-            f"💎 <b>置信度</b>：{esc(BotUI.confidence_text(p))}",
+            f"💎 <b>模型信心等级</b>：{esc(BotUI.confidence_text(p))}",
+            f"📅 <b>使用赛季</b>：<code>{esc(p.season or '未知')}</code>",
             f"🧩 <b>数据完整性</b>：{esc(p.data_completeness)}"
             + ("" if p.has_team_data else "（未使用球队实际数据）"),
             f"🛰 <b>数据源</b>：<code>{esc(getattr(p, 'source', 'API-Football'))}</code>",
@@ -623,18 +687,16 @@ class BotUI:
     def menu_keyboard() -> InlineKeyboardMarkup:
         """Inline 主菜单：点击后在原消息上切换，不刷屏。"""
         buttons = [InlineKeyboardButton(label, callback_data=f"menu:{key}") for key, label in MENU_ITEMS]
-        return InlineKeyboardMarkup([buttons[0:2], buttons[2:4], buttons[4:6]])
+        return InlineKeyboardMarkup([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
 
     @staticmethod
     def reply_menu_keyboard() -> ReplyKeyboardMarkup:
         """底部常驻键盘：与 Inline 菜单共用 MENU_ITEMS，保证两边一致。"""
         labels = [label for _, label in MENU_ITEMS]
+        # 每行 2 个，跟随 MENU_ITEMS 自动适配数量
+        rows = [[KeyboardButton(x) for x in labels[i : i + 2]] for i in range(0, len(labels), 2)]
         return ReplyKeyboardMarkup(
-            [
-                [KeyboardButton(x) for x in labels[0:2]],
-                [KeyboardButton(x) for x in labels[2:4]],
-                [KeyboardButton(x) for x in labels[4:6]],
-            ],
+            rows,
             resize_keyboard=True,
             is_persistent=True,
         )
