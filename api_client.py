@@ -33,6 +33,7 @@ TTL_FIXTURES = 30 * 60
 TTL_STANDINGS = 6 * 3600
 TTL_ODDS = 15 * 60
 TTL_H2H = 12 * 3600
+TTL_FORM = 12 * 3600  # 球队近期战绩（深度分析用，变化慢）
 TTL_STATUS = 5 * 60  # /status 诊断用的账户额度查询
 
 HTTP_HINTS = {
@@ -196,6 +197,13 @@ class FootballAPI:
     async def get_h2h(self, home_id: int, away_id: int, last: int = 5) -> list[dict]:
         params = {"h2h": f"{home_id}-{away_id}", "last": last}
         return await self._get("fixtures/headtohead", params, ttl=TTL_H2H)
+
+    async def get_team_form(self, team_id: int, season: int, last: int = 5) -> list[dict]:
+        """某支球队最近 last 场已结束的比赛（用于深度分析的近期状态）。"""
+        params = {"team": team_id, "season": season, "last": last}
+        matches = await self._get("fixtures", params, ttl=TTL_FORM)
+        done = {"FT", "AET", "PEN"}  # 只统计已完场，未开赛的不算进状态
+        return [m for m in matches or [] if ((m.get("fixture") or {}).get("status") or {}).get("short") in done]
 
     async def get_account_status(self) -> dict:
         """账户与额度（用于 /status 诊断）。额度变化慢，缓存 5 分钟，避免反复排查时空耗额度。"""
