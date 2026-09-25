@@ -105,6 +105,8 @@ class FootballDataAPI:
         self._owns_client = client is None
         self._timeout = timeout
         self._cache: dict[tuple, tuple[float, Any]] = {}
+        self.last_note: str | None = None           # 数据被回退展示时的说明 / note when shifted
+        self.last_shifted_date: date | None = None  # 实际展示的比赛日 / actually shown matchday
         self.source = "football-data"
 
     @property
@@ -264,6 +266,23 @@ class FootballDataAPI:
 
     # ---- 对外接口（与 FootballAPI 同名，便于统一调度） ----------------------------
     @staticmethod
+    def _match_date(m: dict) -> date | None:
+        """取出比赛的 UTC 日期（无有效时间时返回 None）。"""
+        raw = m.get("utcDate") or ""
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        except (ValueError, AttributeError):
+            return None
+
+    def _nearest_matchday(self, matches: list[dict], target: date) -> date | None:
+        """从整季赛程里找出离 target 最近的一个比赛日（优先取不早于 target 的）。"""
+        days = sorted({d for d in (self._match_date(m) for m in matches) if d})
+        if not days:
+            return None
+        after = [d for d in days if d >= target]
+        return after[0] if after else days[-1]  # 有未来场次取最近一场，否则取最后一场
+
+    @staticmethod
     def _in_range(m: dict, date_from: date, date_to: date) -> bool:
         """本地按开赛日期过滤（用于「不带日期参数」拉取全量赛程后的筛选）。"""
         raw = m.get("utcDate") or ""
@@ -303,6 +322,24 @@ class FootballDataAPI:
             matches = [m for m in season_matches if self._in_range(m, date_from, date_to)]
             log.info("整季赛程共 %d 场，按 %s ~ %s 本地过滤后 %d 场",
                      len(season_matches), date_from, date_to, len(matches))
+
+            if not matches and season_matches:
+                # 窗口内确实没有比赛（多为赛季尚未开始或已结束）。
+                # 不伪造数据，而是定位这批真实数据里「离请求窗口最近的一个比赛日」，
+                # 由上层明确标注日期后展示，总比一句「暂无赛程」更有用。
+                nearest = self._nearest_matchday(season_matches, date_from)
+                if nearest is not None:
+                    matches = [
+                        m for m in season_matches
+                        if self._match_date(m) == nearest
+                    ]
+                    self.last_note = (
+                        f"请求区间 {date_from} ~ {date_to} 内该联赛没有比赛，"
+                        f"以下展示数据源中最近的比赛日 {nearest}（真实数据，非预测）"
+                    )
+                    self.last_shifted_date = nearest
+                    log.info("窗口内无比赛，回退展示最近比赛日 %s（%d 场）",
+                             nearest, len(matches))
 
         if not matches:
             return []
