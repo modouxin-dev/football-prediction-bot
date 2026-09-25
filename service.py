@@ -1,6 +1,7 @@
 """业务层：把赛程 / 积分榜 / 赔率拼成预测，并保存最近的预测供按钮回调使用。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections import OrderedDict
@@ -16,6 +17,97 @@ log = logging.getLogger(__name__)
 STORE_LIMIT = 100  # 内存里最多保留的预测条数（机器人重启后清空）
 LOW_SAMPLE_GAMES = 5  # 主/客场已赛场次低于此值时提示样本不足
 MODEL_VERSION = "poisson-v0.1"  # 展示给用户，便于判断结论来自哪套模型
+FORM_MATCHES = 5  # 深度分析取近期几场
+H2H_MATCHES = 10  # 历史交锋取几场
+
+_FINISHED = {"FT", "AET", "PEN"}  # 已完场的状态缩写
+
+
+def _is_finished(m: dict) -> bool:
+    """只统计已完场的比赛；状态字段缺失时按已完场处理（兼容精简数据）。"""
+    short = ((m.get("fixture") or {}).get("status") or {}).get("short")
+    return True if not short else short in _FINISHED
+
+
+def _side(m: dict, team_id: int) -> tuple[int | None, int | None, bool]:
+    """返回 (本队进球, 对手进球, 是否主场)；数据不全时返回 (None, None, ...)。"""
+    teams, goals = m.get("teams") or {}, m.get("goals") or {}
+    hg, ag = goals.get("home"), goals.get("away")
+    if hg is None or ag is None:
+        return None, None, False
+    is_home = (teams.get("home") or {}).get("id") == team_id
+    return (hg if is_home else ag), (ag if is_home else hg), is_home
+
+
+def form_stats(matches: list[dict], team_id: int) -> dict:
+    """近期战绩统计：胜平负、进失球、主客场表现。数据不足时 played=0，由上层显示“暂无”。"""
+    rows, w = [], {"win": 0, "draw": 0, "lose": 0}
+    home, away = {"win": 0, "draw": 0, "lose": 0}, {"win": 0, "draw": 0, "lose": 0}
+    gf = ga = 0
+    for m in matches or []:
+        if not _is_finished(m):  # 未开赛/进行中不算进“近期状态”（状态缺失时按已完场处理）
+            continue
+        our, their, is_home = _side(m, team_id)
+        if our is None:
+            continue
+        gf, ga = gf + our, ga + their
+        key = "win" if our > their else "draw" if our == their else "lose"
+        w[key] += 1
+        (home if is_home else away)[key] += 1
+        teams = m.get("teams") or {}
+        rows.append(
+            {
+                "result": key,
+                "score": f"{our}-{their}",
+                "is_home": is_home,
+                "opponent": ((teams.get("away") if is_home else teams.get("home")) or {}).get("name") or "?",
+                "date": (m.get("fixture") or {}).get("date"),
+            }
+        )
+    played = w["win"] + w["draw"] + w["lose"]
+    return {
+        "played": played,
+        "win": w["win"],
+        "draw": w["draw"],
+        "lose": w["lose"],
+        "goals_for": gf,
+        "goals_against": ga,
+        "avg_for": gf / played if played else None,
+        "avg_against": ga / played if played else None,
+        "home": home,
+        "away": away,
+        "matches": rows,
+    }
+
+
+def h2h_stats(matches: list[dict], home_id: int) -> dict:
+    """历史交锋统计（以主队视角）。"""
+    finished = []
+    win = draw = loss = gf = ga = 0
+    for m in matches or []:
+        if not _is_finished(m):
+            continue
+        our, their, _ = _side(m, home_id)
+        if our is None:
+            continue
+        gf, ga = gf + our, ga + their
+        if our > their:
+            win += 1
+        elif our == their:
+            draw += 1
+        else:
+            loss += 1
+        finished.append(m)
+    played = win + draw + loss
+    return {
+        "played": played,
+        "win": win,
+        "draw": draw,
+        "lose": loss,
+        "goals_for": gf,
+        "goals_against": ga,
+        "matches": finished,
+    }
 
 
 @dataclass
@@ -221,6 +313,74 @@ class PredictionService:
         prediction = await self._predict_one(build_league_model(standings), kickoff, fx)
         self._remember(prediction)
         return prediction
+
+    async def analyze_fixture(self, fixture_id: int, fixtures: list[dict] | None = None) -> dict:
+        """深度分析报告：近期状态 + 联赛排名 + 历史交锋 + 模型因素。
+
+        积分榜是必需数据，取不到就抛 APIError，由上层显示真实原因；
+        近期状态与历史交锋属于可选数据，失败时降级为「暂无可靠数据」并附上真实原因，
+        绝不把权限错误伪装成「没有比赛 / 没有数据」。
+        """
+        if fixtures is None:
+            fixtures = await self.get_today_fixtures()
+        fx = next((f for f in fixtures if (f.get("fixture") or {}).get("id") == fixture_id), None)
+        if fx is None:
+            raise KeyError(fixture_id)
+        kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
+        if kickoff is None:
+            raise APIError("该场比赛缺少开赛时间，无法分析")
+        s = self.settings
+        teams = fx.get("teams") or {}
+        home_id = (teams.get("home") or {}).get("id")
+        away_id = (teams.get("away") or {}).get("id")
+        season = self.season_in_use
+
+        standings = await self.api.get_standings(s.league_id, season)  # 必需：失败直接抛真实原因
+        model = build_league_model(standings)
+        rows_by_team = {(r.get("team") or {}).get("id"): r for r in standings}
+
+        # 可选数据并发取，单点失败不阻断整体，但保留真实原因
+        results = await asyncio.gather(
+            self.api.get_team_form(home_id, season, FORM_MATCHES),
+            self.api.get_team_form(away_id, season, FORM_MATCHES),
+            self.api.get_h2h(home_id, away_id, H2H_MATCHES),
+            return_exceptions=True,
+        )
+        errors: dict[str, str | None] = {}
+        for key, value in zip(("home_form", "away_form", "h2h"), results):
+            errors[key] = str(value) if isinstance(value, BaseException) else None
+        home_raw = [] if isinstance(results[0], BaseException) else results[0]
+        away_raw = [] if isinstance(results[1], BaseException) else results[1]
+        h2h_raw = [] if isinstance(results[2], BaseException) else results[2]
+
+        return {
+            "fixture_id": fixture_id,
+            "league": (fx.get("league") or {}).get("name") or f"联赛 {s.league_id}",
+            "home": (teams.get("home") or {}).get("name") or "?",
+            "away": (teams.get("away") or {}).get("name") or "?",
+            "home_id": home_id,
+            "away_id": away_id,
+            "kickoff": kickoff,
+            "home_form": form_stats(home_raw, home_id),
+            "away_form": form_stats(away_raw, away_id),
+            "home_row": rows_by_team.get(home_id),
+            "away_row": rows_by_team.get(away_id),
+            "h2h": h2h_stats(h2h_raw, home_id),
+            "model": {
+                "home_strength": model.strength(home_id),
+                "away_strength": model.strength(away_id),
+                "analysis": self.analyzer.predict_match(model, home_id, away_id),
+                "avg_home_goals": model.avg_home_goals,
+                "avg_away_goals": model.avg_away_goals,
+            },
+            "errors": errors,
+            "has_team_data": bool(model.teams) and home_id in model.teams and away_id in model.teams,
+            "created_at": datetime.now(timezone.utc),
+        }
+
+    async def get_standings_page(self, limit: int = 20) -> list[dict]:
+        """积分榜（联赛排名），取不到时抛 APIError 显示真实原因。"""
+        return await self.api.get_standings(self.settings.league_id, self.season_in_use)
 
     # ---- 存取（按钮回调用） -----------------------------------------------------
     def _remember(self, prediction: Prediction) -> None:
