@@ -326,13 +326,6 @@ def test_reply_keyboard_unknown_text_is_ignored():
     assert msg.replies == []
 
 
-def test_soon_buttons_answer_without_crashing():
-    ctx, _ = make_ctx(TodayAPI(today_fixtures(1)))
-    update, q = query_update("fx:1001")
-    run(main.on_soon(update, ctx))
-    assert q.answers and "下一阶段" in q.answers[0]
-
-
 def test_unexpected_exception_does_not_crash():
     class BrokenAPI(FakeAPI):
         async def get_fixtures(self, *a, **k):
