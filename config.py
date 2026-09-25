@@ -13,10 +13,26 @@ import pytz
 log = logging.getLogger(__name__)
 
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+VALID_SEASON_MODES = {"auto", "fixed"}
+VALID_DATA_SOURCE_MODES = {"auto", "api-football", "football-data"}
+TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 
 
 class ConfigError(RuntimeError):
     """配置缺失或格式错误。"""
+
+
+def parse_bool(raw: str | None, default: bool = True) -> bool:
+    """把 'true/false/1/0/yes/no' 解析为布尔值，无法识别时回退默认值。"""
+    if raw is None:
+        return default
+    text = raw.strip().lower()
+    if text in TRUE_VALUES:
+        return True
+    if text in {"0", "false", "no", "off", "n", ""}:
+        return False
+    log.warning("ALLOW_SEASON_FALLBACK=%r 无法识别，改用默认值 %s", raw, default)
+    return default
 
 
 def default_season(today: date | None = None) -> int:
@@ -69,6 +85,23 @@ class Settings:
     log_level: str
     max_matches: int
     lookahead_hours: int
+    season_mode: str  # "auto"（自动识别可用赛季并降级）/ "fixed"（只用目标赛季，不降级）
+    allow_season_fallback: bool
+    # 备用数据源 football-data.org（主源不可用时接管赛程/赛果/积分榜）
+    football_data_token: str
+    football_data_enabled: bool
+    football_data_timeout: float
+    data_source_mode: str  # "auto" / "api-football" / "football-data"
+
+    @property
+    def requested_season(self) -> int:
+        """用户期望的赛季（REQUESTED_SEASON → SEASON → 按日期推算）。"""
+        return self.season
+
+    @property
+    def football_data_available(self) -> bool:
+        """备用源是否可用：必须显式启用且配置了 Token（Token 缺失时安全降级为不可用）。"""
+        return self.football_data_enabled and bool(self.football_data_token)
 
     @property
     def chat_target(self) -> int | str | None:
@@ -135,6 +168,23 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if level not in VALID_LOG_LEVELS:
         level = "INFO"
 
+    # 赛季策略：REQUESTED_SEASON 优先于 SEASON，便于明确区分「期望赛季」与「实际赛季」
+    season = _get_int(env, "REQUESTED_SEASON", None) or _get_int(env, "SEASON", default_season())
+    season_mode = (_get(env, "SEASON_MODE", "auto") or "auto").strip().lower()
+    if season_mode not in VALID_SEASON_MODES:
+        log.warning("SEASON_MODE=%r 无法识别，改用默认值 auto", season_mode)
+        season_mode = "auto"
+    allow_season_fallback = parse_bool(_get(env, "ALLOW_SEASON_FALLBACK"), default=True)
+
+    # 备用数据源 football-data.org
+    data_source_mode = (_get(env, "DATA_SOURCE_MODE", "auto") or "auto").strip().lower()
+    if data_source_mode not in VALID_DATA_SOURCE_MODES:
+        log.warning("DATA_SOURCE_MODE=%r 无法识别，改用默认值 auto", data_source_mode)
+        data_source_mode = "auto"
+    football_data_token = _get(env, "FOOTBALL_DATA_API_TOKEN") or ""
+    football_data_enabled = parse_bool(_get(env, "FOOTBALL_DATA_ENABLED"), default=True)
+    football_data_timeout = float(_get_int(env, "FOOTBALL_DATA_TIMEOUT", 10) or 10)
+
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
     if push_raw is None and (_get(env, "SCHEDULED_HOUR") or _get(env, "SCHEDULED_MINUTE")):
@@ -147,10 +197,16 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         chat_id=chat_id,
         admin_ids=admin_ids,
         league_id=_get_int(env, "LEAGUE_ID", 39),  # 39 = 英超
-        season=_get_int(env, "SEASON", default_season()),
         push_time=parse_push_time(push_raw),
         timezone=tz,
         log_level=level,
         max_matches=_get_int(env, "MAX_MATCHES", 3),
         lookahead_hours=_get_int(env, "LOOKAHEAD_HOURS", 36),
+        season=season,
+        season_mode=season_mode,
+        allow_season_fallback=allow_season_fallback,
+        football_data_token=football_data_token,
+        football_data_enabled=football_data_enabled,
+        football_data_timeout=football_data_timeout,
+        data_source_mode=data_source_mode,
     )
