@@ -48,6 +48,12 @@ LEAGUE_ID_TO_CODE: dict[int, str] = {
     4: "EC",  # 欧洲杯
 }
 
+# competition code → football-data.org 的竞赛 id（全局 /v4/matches 端点过滤用）
+CODE_TO_ID: dict[str, int] = {
+    "PL": 2021, "PD": 2014, "BL1": 2002, "SA": 2019, "FL1": 2015, "CL": 2001,
+    "DED": 2003, "PPL": 2017, "ELC": 2016, "BSA": 2013, "WC": 2000, "EC": 2018,
+}
+
 # football-data.org 状态 → API-Football 的 status.short
 STATUS_MAP: dict[str, str] = {
     "SCHEDULED": "NS",
@@ -262,6 +268,21 @@ class FootballDataAPI:
         params = {"dateFrom": date_from.isoformat(), "dateTo": date_to.isoformat()}
         payload = await self._get(f"competitions/{code}/matches", params, ttl=TTL_MATCHES)
         matches = payload.get("matches") or []
+
+        if not matches:
+            # 免费层对部分竞赛的 dateFrom/dateTo 组合会返回空列表，
+            # 退回全局赛程端点 /v4/matches 再按竞赛过滤，避免误判为「没有比赛」。
+            log.info("备用源联赛端点返回空，改用全局端点 /v4/matches 重试（竞赛 %s）", code)
+            payload = await self._get("matches", params, ttl=TTL_MATCHES)
+            all_matches = payload.get("matches") or []
+            wanted_id = CODE_TO_ID.get(code)
+            matches = [
+                m for m in all_matches
+                if ((m.get("competition") or {}).get("code")) == code
+                or (wanted_id and ((m.get("competition") or {}).get("id")) == wanted_id)
+            ]
+            log.info("全局端点共 %d 场，过滤后 %d 场", len(all_matches), len(matches))
+
         if not matches:
             return []
         return [self._to_fixture(m, league_id, season) for m in matches]
