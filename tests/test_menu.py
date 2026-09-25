@@ -29,9 +29,11 @@ class BoomAPI(FakeAPI):
         super().__init__({})
         self.message = message
         self.calls = 0
+        self.seasons_tried = []
 
     async def get_fixtures(self, league_id, season, date_from, date_to):
         self.calls += 1
+        self.seasons_tried.append(season)
         raise APIError(self.message)
 
 
@@ -133,6 +135,54 @@ def test_get_today_fixtures_raises_permission_error_not_empty_list():
     with pytest.raises(APIError) as exc:
         run(svc.get_today_fixtures())
     assert "season" in str(exc.value).lower()
+
+
+def test_season_fallback_degrades_until_available():
+    """2026/2025 赛季不可用时，应自动降级到 2024 并取到数据。"""
+    class FallbackAPI(FakeAPI):
+        def __init__(self):
+            super().__init__({})
+            self.tried = []
+
+        async def get_fixtures(self, league_id, season, date_from, date_to):
+            self.tried.append(season)
+            if season >= 2025:
+                raise APIError("Free plans do not have access to this season, try from 2022 to 2024")
+            return today_fixtures(2)
+
+    api = FallbackAPI()
+    svc = PredictionService(SETTINGS, api)
+    got = run(svc.get_today_fixtures())
+    assert len(got) == 2
+    assert api.tried == [2026, 2025, 2024]  # 逐级向下，一命中就停
+    assert svc.season_in_use == 2024
+    assert svc.last_note and "2024" in svc.last_note and "降级" in svc.last_note
+
+
+def test_season_fallback_note_only_when_degraded():
+    """配置赛季本身可用时不产生降级提示。"""
+    svc = PredictionService(SETTINGS, TodayAPI(today_fixtures(2)))
+    run(svc.get_today_fixtures())
+    assert svc.season_in_use == 2026
+    assert svc.last_note is None
+
+
+def test_non_season_error_is_not_degraded():
+    """Key 无效 / 限流这类错误不应触发降级探测（避免无意义消耗额度）。"""
+    class KeyErrorAPI(FakeAPI):
+        def __init__(self):
+            super().__init__({})
+            self.calls = 0
+
+        async def get_fixtures(self, league_id, season, date_from, date_to):
+            self.calls += 1
+            raise APIError("HTTP 401 Invalid API key")
+
+    api = KeyErrorAPI()
+    svc = PredictionService(SETTINGS, api)
+    with pytest.raises(APIError):
+        run(svc.get_today_fixtures())
+    assert api.calls == 1  # 只请求一次，不降级重试
 
 
 def test_get_today_fixtures_returns_all_statuses():
@@ -273,6 +323,7 @@ def test_menu_fixtures_callback_lists_fixtures():
 
 
 def test_menu_fixtures_shows_real_api_error():
+    """赛季不可用时：逐级降级探测（每个赛季各请求一次），全部失败后抛出真实原因。"""
     api = BoomAPI()
     ctx, _ = make_ctx(api)
     update, q = query_update("menu:fixtures")
@@ -280,7 +331,9 @@ def test_menu_fixtures_shows_real_api_error():
     text = q.edits[0][0]
     assert "获取今日赛程失败" in text
     assert "套餐" in text  # 真实原因，不是“今天没有比赛”
-    assert api.calls == 1  # 错误不缓存，但单次点击只请求一次
+    # 降级探测：候选赛季各请求一次，不重复刷同一个赛季
+    assert api.calls == len({2026, 2025, 2024, 2023})
+    assert sorted(api.seasons_tried) == [2023, 2024, 2025, 2026]
 
 
 def test_fixtures_cached_on_second_click():
