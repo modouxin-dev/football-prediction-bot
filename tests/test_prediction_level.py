@@ -95,6 +95,7 @@ def test_payload_contains_required_fields():
 # ---- HTML 输出 -----------------------------------------------------------------
 def test_card_html_escapes_special_characters():
     from datetime import datetime, timezone
+    from types import SimpleNamespace
     """球队名含 < & > 时必须转义，不能拼进 HTML 造成解析错乱。"""
     from bot_handler import BotUI
     from unittest.mock import Mock
@@ -105,6 +106,14 @@ def test_card_html_escapes_special_characters():
     p.season = 2026
     p.source = "API-Football"
     p.kickoff = datetime.now(timezone.utc)
+    p.level = {"name": "中", "emoji": "🟡", "key": "medium", "result": "主胜"}
+    p.insufficient = False
+    p.low_sample = False
+    p.has_team_data = True
+    p.data_completeness = "完整"
+    p.home_strength = SimpleNamespace(attack_home=1.1, defense_home=0.9)
+    p.away_strength = SimpleNamespace(attack_away=1.0, defense_away=1.1)
+    p.league = "Premier League"
     p.analysis = {"win_prob": 0.5, "draw_prob": 0.3, "loss_prob": 0.2,
                   "best_score": "1-0", "lambda_home": 1.2, "lambda_away": 0.9}
     p.has_team_data = True
@@ -135,6 +144,8 @@ def test_no_markdown_table_in_output():
 
 
 def test_card_shows_source_and_season():
+    from types import SimpleNamespace
+
     from tests.test_prediction import FullAPI, now_fixtures
     import asyncio
 
@@ -143,8 +154,8 @@ def test_card_shows_source_and_season():
     svc = PredictionService(SETTINGS, FullAPI(now_fixtures()))
     p = asyncio.run(svc.predict_fixture(1001, now_fixtures()))
     text = BotUI.format_prediction_card(p, SETTINGS.timezone)
-    assert "使用赛季" in text and "数据源" in text
-    assert "2026" in text
+    # 脚注小字承载来源与赛季，正文不再堆这些字段
+    assert "SOURCE:" in text and "SEASON: 2026" in text
 
 
 def test_percentages_use_one_decimal():
