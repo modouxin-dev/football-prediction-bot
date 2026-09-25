@@ -180,12 +180,21 @@ async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---- 命令 -------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     s: Settings = context.application.bot_data["settings"]
-    await update.effective_message.reply_text(
-        ui.format_welcome(s),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-        reply_markup=ui.reply_menu_keyboard(),  # 底部常驻菜单
-    )
+    text = ui.format_welcome(s)
+    keyboard = ui.reply_menu_keyboard()
+    banner = chart.brand_banner() if chart else None
+    if banner:
+        # 品牌头图 + 文案说明（图片失败时降级为纯文字，不影响使用）
+        await update.effective_message.reply_photo(
+            photo=banner,
+            caption=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    else:
+        await update.effective_message.reply_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=keyboard
+        )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
