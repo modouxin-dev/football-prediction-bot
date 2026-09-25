@@ -154,6 +154,8 @@ class Prediction:
     best: tuple[str, dict] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "API-Football"
+    # 输入数据快照：预测可追溯，事后能回答「这个结论是基于什么算出来的」
+    inputs: dict = field(default_factory=dict)
     season: int = 0  # 实际使用的赛季（降级后可能不同于配置的赛季），展示给用户  # 实际使用的数据源（主源或备用源），必须如实展示
 
     @property
@@ -172,6 +174,19 @@ class Prediction:
         if not self.has_team_data:
             return "无数据"
         return "部分" if self.low_sample else "完整"
+
+    @property
+    def model_version(self) -> str:
+        """模型版本：结论可追溯，不同版本的结果不能直接比较。"""
+        return self.inputs.get("model_version") or MODEL_VERSION
+
+    @property
+    def insufficient(self) -> bool:
+        """数据不足：积分榜缺失或不含这两队 → 只能按联赛平均估算，结论不可信。
+
+        此时必须明确提示用户，绝不能给出确定性的结论。
+        """
+        return not self.has_team_data
 
     @property
     def prob_sum(self) -> float:
@@ -284,6 +299,18 @@ class PredictionService:
             home_strength=model.strength(home["id"]),
             away_strength=model.strength(away["id"]),
             model=model,
+            inputs={
+                "model_version": MODEL_VERSION,
+                "source": self.source_label,
+                "season": self.season_in_use,
+                "league_id": self.settings.league_id,
+                "standings_rows": len(getattr(model, "teams", {}) or {}),
+                "has_home_data": home["id"] in (getattr(model, "teams", {}) or {}),
+                "has_away_data": away["id"] in (getattr(model, "teams", {}) or {}),
+                "odds_count": len(bookmakers),
+                "kickoff": kickoff.isoformat() if kickoff else None,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            },
             fixture=fx,
             bookmakers=bookmakers,
             odds=odds,
@@ -528,9 +555,13 @@ class PredictionService:
         fx = next((f for f in fixtures if str((f.get("fixture") or {}).get("id")) == str(fixture_id)), None)
         if fx is None:
             raise KeyError(fixture_id)
+        # 无比赛数据时禁止生成预测：缺开赛时间或队伍信息的比赛，预测无从谈起
         kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
         if kickoff is None:
             raise APIError("该场比赛缺少开赛时间，无法预测")
+        teams = fx.get("teams") or {}
+        if not (teams.get("home") or {}).get("id") or not (teams.get("away") or {}).get("id"):
+            raise APIError("该场比赛缺少参赛队伍信息，无法预测")
         standings = await self.api.get_standings(self.settings.league_id, self.season_in_use)
         prediction = await self._predict_one(build_league_model(standings), kickoff, fx)
         self._remember(prediction)
