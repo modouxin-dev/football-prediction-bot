@@ -142,7 +142,8 @@ class Prediction:
     outcomes: dict = field(default_factory=dict)
     best: tuple[str, dict] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    source: str = "API-Football"  # 实际使用的数据源（主源或备用源），必须如实展示
+    source: str = "API-Football"
+    season: int = 0  # 实际使用的赛季（降级后可能不同于配置的赛季），展示给用户  # 实际使用的数据源（主源或备用源），必须如实展示
 
     @property
     def low_sample(self) -> bool:
@@ -278,6 +279,7 @@ class PredictionService:
             source=self.source_label,
             outcomes=outcomes,
             best=best,
+            season=self.season_in_use,
         )
 
     # ---- 赛季探测与降级 ---------------------------------------------------------
