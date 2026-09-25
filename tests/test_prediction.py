@@ -122,7 +122,7 @@ def test_card_contains_all_required_fields():
     p = run(svc.predict_fixture(1001, now_fixtures()))
     text = BotUI.format_prediction_card(p, SETTINGS.timezone)
     for field in ("比赛预测", "主队1", "客队1", "比赛时间", "预测概率", "主胜", "平局", "客胜",
-                  "最可能结果", "置信度", "数据完整性", "模型版本", "数据更新时间"):
+                  "最可能结果", "模型信心等级", "数据完整性", "模型版本", "数据更新时间", "使用赛季"):
         assert field in text, field
     assert MODEL_VERSION in text
 
@@ -155,7 +155,7 @@ def test_confidence_text_for_no_data():
     api = FullAPI(now_fixtures(), standings=[])
     svc = PredictionService(SETTINGS, api)
     p = run(svc.predict_fixture(1001, now_fixtures()))
-    assert BotUI.confidence_text(p).startswith("低")
+    assert "低" in BotUI.confidence_text(p)
 
 
 def test_prediction_keyboard_links_to_existing_tabs_and_back():
@@ -175,7 +175,7 @@ class FakeQuery:
     async def answer(self, text=None, show_alert=False):
         self.answers.append(text)
 
-    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None, **kwargs):
         self.edits.append((text, parse_mode, reply_markup))
 
 
