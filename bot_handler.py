@@ -7,7 +7,7 @@ from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from analyzer import OUTCOMES, overround
-from service import parse_kickoff
+from service import MODEL_VERSION, parse_kickoff
 
 SEP = "━━━━━━━━━━━━━━━━━━"
 OUTCOME_LABEL = {"home": "主胜", "draw": "平局", "away": "客胜"}
@@ -157,6 +157,88 @@ class BotUI:
         top = max(a["win_prob"], a["draw_prob"], a["loss_prob"])
         stars = "⭐⭐⭐⭐⭐" if top > 0.7 else "⭐⭐⭐" if top > 0.5 else "⭐⭐"
         return stars + "（样本较少）" if p.low_sample else stars
+
+    # ---- 视图：单场预测卡片（菜单/赛程入口） ----------------------------------------
+    @staticmethod
+    def confidence_text(p) -> str:
+        """置信度：高 / 中 / 低，并说明依据。"""
+        if not p.has_team_data:
+            return "低（缺少球队数据，仅按联赛平均估算）"
+        top = max(p.analysis["win_prob"], p.analysis["draw_prob"], p.analysis["loss_prob"])
+        if p.low_sample:
+            return "低（近期样本不足）"
+        if top >= 0.6:
+            return "高"
+        if top >= 0.45:
+            return "中"
+        return "低（三项概率接近）"
+
+    @staticmethod
+    def risk_lines(p) -> list[str]:
+        """风险提示：缺什么就说什么，绝不虚构概率。"""
+        lines = []
+        if not p.model.teams:
+            lines.append("⚠️ 未取到积分榜数据，概率仅来自联赛平均基准，参考价值有限。")
+        elif not p.has_team_data:
+            lines.append("⚠️ 积分榜中没有这两支球队，只能按联赛平均估算。")
+        elif p.low_sample:
+            lines.append("⚠️ 主/客场已赛场次不足 5 场，强度估计不稳定。")
+        if not p.odds:
+            lines.append("⚠️ 暂无赔率数据，未做价值偏差对比。")
+        lines.append("⚠️ 本结果基于历史进球数据，未考虑伤停、赛程密度与临场变数。")
+        return lines
+
+    @staticmethod
+    def format_prediction_card(p, tz, model_version: str = MODEL_VERSION) -> str:
+        """完整预测卡片：包含时间、模型版本、数据更新时间、置信度、完整性与风险提示。"""
+        a = p.analysis
+        probs = (("主胜", a["win_prob"]), ("平局", a["draw_prob"]), ("客胜", a["loss_prob"]))
+        top_label, top_prob = max(probs, key=lambda kv: kv[1])
+
+        lines = [
+            "⚽ <b>比赛预测</b>",
+            f"🏠 <b>{esc(p.home)}</b> 🆚 <b>{esc(p.away)}</b> ✈️",
+            f"🕐 比赛时间：<code>{BotUI.fmt_time(p.kickoff, tz)}</code>（{BotUI.tz_label(tz, p.kickoff)}）",
+            SEP,
+            "📈 <b>预测概率</b>",
+        ]
+        for label, prob in probs:
+            mark = " <b>← 最可能</b>" if label == top_label else ""
+            lines.append(f"{label} <code>{bar(prob)}</code> <b>{prob:.1%}</b>{mark}")
+        lines += [
+            SEP,
+            f"🎯 <b>最可能结果</b>：{esc(top_label)}（{top_prob:.1%}）· 最可能比分 <code>{esc(a['best_score'])}</code>",
+            f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>",
+            f"💎 <b>置信度</b>：{esc(BotUI.confidence_text(p))}",
+            f"🧩 <b>数据完整性</b>：{esc(p.data_completeness)}"
+            + ("" if p.has_team_data else "（未使用球队实际数据）"),
+            f"🤖 <b>模型版本</b>：<code>{esc(model_version)}</code>",
+            f"🕑 <b>数据更新时间</b>：<code>{BotUI.fmt_time(p.created_at, tz, '%Y-%m-%d %H:%M:%S')}</code>"
+            f"（{BotUI.tz_label(tz, p.created_at)}）",
+        ]
+        if p.best:
+            key, o = p.best
+            lines.append(
+                f"💰 赔率 <code>{p.odds['home']:.2f} | {p.odds['draw']:.2f} | {p.odds['away']:.2f}</code>"
+                f" · 价值偏差 {OUTCOME_LABEL[key]} <code>{o['edge']:+.2%}</code>"
+            )
+        lines += [SEP, *BotUI.risk_lines(p), SEP, DISCLAIMER]
+        return "\n".join(lines)
+
+    @staticmethod
+    def prediction_keyboard(fixture_id: int) -> InlineKeyboardMarkup:
+        """预测卡片下方：复用现有 4 个标签页（可继续看深度分析/交锋/赔率）+ 返回。"""
+        buttons = [
+            InlineKeyboardButton(label, callback_data=f"{key}:{fixture_id}") for key, label in TABS
+        ]
+        return InlineKeyboardMarkup(
+            [
+                buttons[:2],
+                buttons[2:],
+                [InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}")],
+                [InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"), InlineKeyboardButton("🏠 主菜单", callback_data="menu:home")],
+            ]
+        )
 
     # ---- 视图：深度分析 ---------------------------------------------------------
     @staticmethod
