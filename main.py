@@ -293,8 +293,52 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.answer()
 
 
+async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """赛程里的 [⚽ 预测]：为单场比赛生成预测卡片。"""
+    query = update.callback_query
+    _, _, raw = (query.data or "").partition(":")
+    await query.answer()
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    try:
+        fixture_id = int(raw)
+    except ValueError:
+        return
+    if not await begin_task(app.bot_data, user_id, f"pred:{fixture_id}"):
+        await query.answer("正在生成预测，请稍候…")
+        return
+
+    try:
+        cache = app.bot_data.get("fx_cache")
+        fixtures = cache["items"] if cache else None
+        try:
+            prediction = await service.predict_fixture(fixture_id, fixtures)
+        except KeyError:
+            await edit_view(query, "⚠️ 该场比赛已不在今日赛程中，请返回赛程重新选择。", back_to_menu_markup())
+            return
+        except APIError as exc:
+            text = f"❌ <b>生成预测失败</b>\n{esc(exc)}\n\n{ui.error_hint(exc)}"
+            await edit_view(query, text, back_to_menu_markup())
+            return
+    except Exception as exc:  # 兜底：任何异常都不能让机器人崩掉
+        log.exception("生成单场预测失败")
+        await edit_view(query, f"❌ <b>生成预测失败</b>\n{esc(describe_error(exc))}", back_to_menu_markup())
+        return
+    finally:
+        end_task(app.bot_data, user_id, f"pred:{fixture_id}")
+
+    await edit_view(
+        query,
+        ui.format_prediction_card(prediction, settings.timezone),
+        ui.prediction_keyboard(fixture_id),
+    )
+
+
 async def on_soon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """已渲染但尚未实现的按钮（单场预测 / 分析），避免死按钮无响应。"""
+    """已渲染但尚未实现的按钮（单场深度分析），避免死按钮无响应。"""
     await update.callback_query.answer("该功能将在下一阶段开放")
 
 
@@ -443,7 +487,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
-    app.add_handler(CallbackQueryHandler(on_soon, pattern=r"^(fx|fa):\d+$"))
+    app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_soon, pattern=r"^fa:\d+$"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
