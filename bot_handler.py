@@ -10,6 +10,30 @@ from analyzer import OUTCOMES, calculate_prediction_level, overround
 from service import MODEL_VERSION, parse_kickoff
 
 SEP = "━━━━━━━━━━━━━━━━━━"
+THIN_SEP = "──────────────────"  # 次级分隔：用于分区内部，避免主分隔线过度重复
+BULLET = "▸"  # 列表符号
+
+# 联赛 ID → 中文名称（仅用于展示；未知 ID 直接显示数字，不猜测）
+LEAGUE_NAMES = {
+    39: "英格兰超级联赛",
+    140: "西班牙甲级联赛",
+    78: "德国甲级联赛",
+    135: "意大利甲级联赛",
+    61: "法国甲级联赛",
+    2: "欧洲冠军联赛",
+    88: "荷兰甲级联赛",
+    94: "葡萄牙超级联赛",
+    40: "英格兰冠军联赛",
+    71: "巴西甲级联赛",
+    1: "国际足联世界杯",
+    4: "欧洲足球锦标赛",
+}
+
+
+def league_label(league_id: int) -> str:
+    """展示用联赛名：已知 ID 显示中文名 + ID，未知则只显示 ID。"""
+    name = LEAGUE_NAMES.get(int(league_id))
+    return f"{name} · {league_id}" if name else f"联赛 {league_id}"
 OUTCOME_LABEL = {"home": "主胜", "draw": "平局", "away": "客胜"}
 DISCLAIMER = "⚠️ 模型仅基于进球数据估算，不构成投注建议。"
 VALUE_FLAG = 0.05  # 价值偏差超过此值时打 🚀 标记
@@ -702,12 +726,46 @@ class BotUI:
         )
 
     @staticmethod
+    def format_welcome(settings) -> str:
+        """/start 欢迎卡片：品牌区 + 能力列表 + 推送信息。"""
+        return (
+            "⚽ <b>足球量化预测机器人</b>\n"
+            f"{SEP}\n"
+            "<i>Football Quant · 数据驱动赛事洞察</i>\n"
+            "\n"
+            "👋 <b>欢迎使用</b>\n"
+            "\n"
+            "基于泊松分布构建赛事概率模型，\n"
+            "融合赛程、积分榜与赔率数据，\n"
+            "为每场比赛输出可量化、可追溯的预测。\n"
+            "\n"
+            f"◆ <b>核心能力</b>\n"
+            f"{THIN_SEP}\n"
+            f"{BULLET} 📅 <b>今日赛程</b>　按联赛分组，支持翻页\n"
+            f"{BULLET} ⚽ <b>比赛预测</b>　胜平负概率与信心评级\n"
+            f"{BULLET} 📊 <b>深度分析</b>　状态 · 交锋 · 攻防强度\n"
+            f"{BULLET} 🏆 <b>联赛排名</b>　实时积分榜\n"
+            f"{BULLET} 📈 <b>数据图表</b>　概率与战绩可视化\n"
+            "\n"
+            f"{SEP}\n"
+            f"⏰ 每日 <code>{settings.push_time:%H:%M}</code>（{esc(BotUI.tz_label(settings.timezone))}）自动推送\n"
+            "💡 点击下方菜单，或发送 /menu 开始"
+        )
+
+    @staticmethod
     def format_menu(settings) -> str:
         return (
             "⚽ <b>足球量化预测机器人</b>\n"
-            f"联赛 <code>{settings.league_id}</code> · 赛季 <code>{settings.season}</code>"
-            f" · 时区 <code>{settings.timezone.zone}</code>\n"
-            f"{SEP}\n请选择一个功能："
+            f"{SEP}\n"
+            "\n"
+            "⚙️ <b>运行环境</b>\n"
+            f"{THIN_SEP}\n"
+            f"│ 联赛　<code>{esc(league_label(settings.league_id))}</code>\n"
+            f"│ 赛季　<code>{settings.season}</code>\n"
+            f"└ 时区　<code>{esc(settings.timezone.zone)}</code>\n"
+            "\n"
+            f"{SEP}\n"
+            "📌 <b>请选择功能</b>"
         )
 
     @staticmethod
@@ -715,19 +773,40 @@ class BotUI:
         return (
             "ℹ️ <b>使用帮助</b>\n"
             f"{SEP}\n"
-            "📅 今日赛程：列出当天全部比赛（按联赛分组、支持翻页）\n"
-            "⚽ 比赛预测：选择比赛，生成胜平负概率与建议\n"
-            "📊 深度分析：近期状态、联赛数据、历史交锋\n"
-            "🏆 联赛排名：当前积分榜\n"
-            "🔄 刷新数据：清空缓存重新拉取\n\n"
-            "命令：/menu 打开菜单 · /test 立即推送 · /status 运行状态\n"
-            f"{SEP}\n{DISCLAIMER}"
+            "\n"
+            f"◆ <b>功能说明</b>\n"
+            f"{THIN_SEP}\n"
+            "📅 <b>今日赛程</b>　当日比赛，按联赛分组、支持翻页\n"
+            "⚽ <b>比赛预测</b>　胜平负概率、比分与信心等级\n"
+            "📊 <b>深度分析</b>　近期状态、主客场、历史交锋\n"
+            "🏆 <b>联赛排名</b>　实时积分榜与攻防数据\n"
+            "🔄 <b>刷新数据</b>　清空缓存，重新拉取\n"
+            "🌐 <b>网页端</b>　　浏览器查询入口（规划中）\n"
+            "\n"
+            f"◆ <b>命令列表</b>\n"
+            f"{THIN_SEP}\n"
+            "<code>/start</code>　欢迎信息与推送时间\n"
+            "<code>/menu</code>　打开功能菜单\n"
+            "<code>/help</code>　显示本指南\n"
+            "<code>/test</code>　立即推送一次预测（管理员）\n"
+            "<code>/status</code>　运行状态与数据源诊断（管理员）\n"
+            "\n"
+            f"{SEP}\n"
+            f"{DISCLAIMER}"
         )
 
     @staticmethod
     def format_coming(key: str) -> str:
         label = dict(MENU_ITEMS).get(key, key)
-        return f"🚧 <b>{esc(label)}</b>\n{SEP}\n该功能正在开发中，将在后续阶段上线。"
+        return (
+            f"🚧 <b>{esc(label)}</b>\n"
+            f"{SEP}\n"
+            "\n"
+            "该功能正在开发中，将在后续阶段上线。\n"
+            "\n"
+            f"{SEP}\n"
+            "📌 可先使用其他功能，或发送 /help 查看完整说明。"
+        )
 
     @staticmethod
     def error_hint(exc) -> str:
