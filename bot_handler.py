@@ -975,6 +975,9 @@ class BotUI:
                 ]
             )
         if total_pages >= 1:
-            rows.append([InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all")])
+            rows.append([
+                InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all"),
+                InlineKeyboardButton("⏭ 下一场", callback_data="fxm:next"),
+            ])
         rows.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
         return "\n".join(lines), InlineKeyboardMarkup(rows), page, total_pages
