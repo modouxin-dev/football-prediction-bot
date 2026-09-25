@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 STORE_LIMIT = 100  # 内存里最多保留的预测条数（机器人重启后清空）
 LOW_SAMPLE_GAMES = 5  # 主/客场已赛场次低于此值时提示样本不足
+MODEL_VERSION = "poisson-v0.1"  # 展示给用户，便于判断结论来自哪套模型
 
 
 @dataclass
@@ -37,10 +38,28 @@ class Prediction:
     odds: dict | None = None
     outcomes: dict = field(default_factory=dict)
     best: tuple[str, dict] | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def low_sample(self) -> bool:
         return min(self.home_strength.games_home, self.away_strength.games_away) < LOW_SAMPLE_GAMES
+
+    @property
+    def has_team_data(self) -> bool:
+        """积分榜里是否真的有这两支球队（False 表示只能按联赛平均估算）。"""
+        return bool(self.model.teams) and self.home_id in self.model.teams and self.away_id in self.model.teams
+
+    @property
+    def data_completeness(self) -> str:
+        if not self.model.teams:
+            return "无数据"
+        if not self.has_team_data:
+            return "无数据"
+        return "部分" if self.low_sample else "完整"
+
+    @property
+    def prob_sum(self) -> float:
+        return self.analysis["win_prob"] + self.analysis["draw_prob"] + self.analysis["loss_prob"]
 
 
 def parse_kickoff(value: str | None) -> datetime | None:
@@ -182,6 +201,26 @@ class PredictionService:
         if first_error is not None:
             raise first_error
         return []
+
+    # ---- 单场比赛预测 ----------------------------------------------------------
+    async def predict_fixture(self, fixture_id: int, fixtures: list[dict] | None = None) -> Prediction:
+        """为指定的一场比赛生成预测。
+
+        fixtures 为今日赛程缓存；不传则重新拉取一次。找不到该场比赛抛 KeyError，
+        API 失败抛 APIError（由上层展示真实原因）。
+        """
+        if fixtures is None:
+            fixtures = await self.get_today_fixtures()
+        fx = next((f for f in fixtures if (f.get("fixture") or {}).get("id") == fixture_id), None)
+        if fx is None:
+            raise KeyError(fixture_id)
+        kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
+        if kickoff is None:
+            raise APIError("该场比赛缺少开赛时间，无法预测")
+        standings = await self.api.get_standings(self.settings.league_id, self.season_in_use)
+        prediction = await self._predict_one(build_league_model(standings), kickoff, fx)
+        self._remember(prediction)
+        return prediction
 
     # ---- 存取（按钮回调用） -----------------------------------------------------
     def _remember(self, prediction: Prediction) -> None:
