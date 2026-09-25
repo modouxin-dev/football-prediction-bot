@@ -14,6 +14,10 @@ THIN_SEP = "──────────────────"  # 次级分
 BULLET = "▸"  # 列表符号
 
 # 联赛 ID → 中文名称（仅用于展示；未知 ID 直接显示数字，不猜测）
+# 品牌名 / Brand name（与 chart.BRAND_* 保持一致，头图与文案共用）
+BRAND_EN = "FOOTBALL INSIGHT"
+BRAND_CN = "Football Insight"
+
 LEAGUE_NAMES = {
     39: "英格兰超级联赛",
     140: "西班牙甲级联赛",
@@ -33,6 +37,7 @@ LEAGUE_NAMES = {
 # 队名中英对照表 / Team name mapping (CN ↔ EN)
 # 说明 / Note: football-data.org 与 API-Football 返回的球队名均为英文原文，
 # 这里按官方名建立中文对照，供界面双语展示。未收录的球队只显示英文原名。
+# 队名中英对照表 / Team name mapping (CN ↔ EN)
 TEAM_NAMES: dict[str, str] = {
     # 英超 / Premier League
     "Manchester City FC": "曼城", "Liverpool FC": "利物浦", "Arsenal FC": "阿森纳",
@@ -796,7 +801,8 @@ class BotUI:
         这类容错较高的符号；主视觉由品牌头图承担，避免长边框错位。
         """
         return (
-            "👋 <b>欢迎使用</b>\n"
+            f"👋 <b>欢迎使用 {BRAND_CN}</b>\n"
+            f"<code>{BRAND_EN}</code> · AI 赛事情报\n"
             "\n"
             "用泊松分布拆解每一场比赛，\n"
             "让预测可量化、可追溯。\n"
@@ -823,7 +829,8 @@ class BotUI:
     @staticmethod
     def format_menu(settings) -> str:
         return (
-            "⚽ <b>足球量化预测机器人</b>\n"
+            "⚽ <b>Football Insight</b>\n"
+            "AI 赛事情报 · 数据驱动洞察\n"
             f"{SEP}\n"
             "\n"
             "⚙️ <b>运行环境</b>\n"
