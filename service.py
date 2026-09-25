@@ -8,7 +8,16 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from analyzer import LeagueModel, MatchAnalyzer, TeamStrength, build_league_model, collect_1x2_odds, consensus_odds
+from repository import PredictionRepository
+from analyzer import (
+    LeagueModel,
+    MatchAnalyzer,
+    TeamStrength,
+    build_league_model,
+    calculate_prediction_level,
+    collect_1x2_odds,
+    consensus_odds,
+)
 from api_client import APIError, FootballAPI
 from data_source import DataSourceError
 from config import Settings
@@ -176,6 +185,15 @@ class Prediction:
         return "部分" if self.low_sample else "完整"
 
     @property
+    def level(self) -> dict:
+        """信心等级：只由概率计算，不允许手工指定。"""
+        return calculate_prediction_level({
+            "home_win": self.analysis["win_prob"],
+            "draw": self.analysis["draw_prob"],
+            "away_win": self.analysis["loss_prob"],
+        })
+
+    @property
     def model_version(self) -> str:
         """模型版本：结论可追溯，不同版本的结果不能直接比较。"""
         return self.inputs.get("model_version") or MODEL_VERSION
@@ -220,6 +238,8 @@ class PredictionService:
         self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
         self._store: OrderedDict[int, Prediction] = OrderedDict()
+        # 预测落盘到机器人自身存储（SQLite），重启不丢，支撑命中率统计
+        self.repo: PredictionRepository = PredictionRepository(getattr(settings, "db_path", None))
 
     @property
     def source_label(self) -> str:
@@ -637,10 +657,52 @@ class PredictionService:
         return await self.api.get_standings(self.settings.league_id, self.season_in_use)
 
     # ---- 存取（按钮回调用） -----------------------------------------------------
+    def settle_result(self, fixture_id, home_score: int | None, away_score: int | None) -> bool:
+        """回写真实赛果，供命中率统计使用。"""
+        return self.repo.settle(fixture_id, home_score, away_score)
+
+    async def sync_results(self, fixtures: list[dict] | None = None) -> int:
+        """把已完场比赛的真实比分回写到数据库。返回本次结算条数。
+
+        只处理库里已有预测、但还没回填比分的比赛；取不到赛程时不报错。
+        """
+        pending = self.repo.pending()
+        if not pending:
+            return 0
+        if fixtures is None:
+            try:
+                fixtures = await self.get_today_fixtures()
+            except Exception as exc:  # 取不到赛程只是暂时无法结算，不影响机器人
+                log.warning("同步赛果时获取赛程失败：%s", exc)
+                return 0
+        by_id = {str((fx.get("fixture") or {}).get("id")): fx for fx in fixtures}
+        done = 0
+        for row in pending:
+            fx = by_id.get(str(row["fixture_id"]))
+            if not fx:
+                continue
+            short = ((fx.get("fixture") or {}).get("status") or {}).get("short")
+            if short not in _FINISHED:
+                continue
+            goals = fx.get("goals") or {}
+            home, away = goals.get("home"), goals.get("away")
+            if home is None or away is None:
+                continue
+            if self.repo.settle(row["fixture_id"], int(home), int(away)):
+                done += 1
+        if done:
+            log.info("已回写 %d 场赛果", done)
+        return done
+
+    def stats(self) -> dict:
+        """命中率统计（含各信心等级）。"""
+        return self.repo.stats()
+
     def _remember(self, prediction: Prediction) -> None:
         key = str(prediction.fixture_id)  # 主源数字 ID 与备用源 'fd-' ID 统一为字符串键
         self._store[key] = prediction
         self._store.move_to_end(key)
+        self.repo.save(prediction)  # 落盘：机器人重启后仍可统计命中率
         while len(self._store) > STORE_LIMIT:
             self._store.popitem(last=False)
 
