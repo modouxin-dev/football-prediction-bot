@@ -254,7 +254,12 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
         text = f"❌ <b>获取今日赛程失败</b>\n{esc(describe_error(exc))}"
         markup = back_to_menu_markup()
     else:
-        text, markup, page, _ = ui.format_fixtures_page(items, tz, page, FX_PER_PAGE, label)
+        # 今日无比赛时会自动扩展到未来，此时用实际覆盖的日期范围做标题，并标记跨天
+        multi_day = bool(getattr(service, "using_upcoming", False))
+        day_label = getattr(service, "fixture_day_label", "") or label
+        text, markup, page, _ = ui.format_fixtures_page(
+            items, tz, page, FX_PER_PAGE, day_label, multi_day=multi_day
+        )
         if not items and service.last_note:
             text = f"{text}\n\n{esc(service.last_note)}"
     finally:
