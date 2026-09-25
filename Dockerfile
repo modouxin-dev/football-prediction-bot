@@ -15,6 +15,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         fonts-noto-cjk \
         fontconfig \
+        gosu \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,7 +30,11 @@ RUN mkdir -p /data && chmod 777 /data
 # 以非 root 用户运行
 RUN useradd --create-home --uid 10001 bot
 COPY --chown=bot:bot . .
-USER bot
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# 挂载卷 /data 的属主通常是 root，启动脚本会修正后再降权启动
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # 这是一个长轮询的 worker，不监听端口，也不需要 Railway 的 cron 设置
 CMD ["python", "main.py"]
