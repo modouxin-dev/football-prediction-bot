@@ -371,6 +371,15 @@ class PredictionService:
         now = now or datetime.now(timezone.utc)
         day = now.astimezone(s.timezone).date()
         fixtures, season, note = await self._fetch_fixtures(day, day)
+        if not fixtures and getattr(self.api, "using_fallback", False):
+            # 备用源正常响应但今日无比赛：如实说明，不伪装成主源的权限错误，
+            # 也不把「今天没比赛」说成数据源故障。
+            primary_err = self.api.last_error("api-football") if hasattr(self.api, "last_error") else None
+            note = (
+                f"ℹ️ 主数据源当前赛季不可用，已切换到备用数据源 {self.source_label}；今日暂无比赛。"
+                if primary_err
+                else f"ℹ️ 当前使用备用数据源 {self.source_label}；今日暂无比赛。"
+            )
         self.last_note = note
         if note:
             log.warning("今日赛程：%s", note)
