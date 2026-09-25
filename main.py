@@ -52,6 +52,7 @@ log = logging.getLogger("bot")
 ui = BotUI()
 
 DAILY_JOB = "daily_push"
+SETTLE_JOB = "settle_results"
 
 # 机器人指令表 / Bot command list
 # 每项为 (命令, 说明)；说明为中英双语，方便中文用户与英文用户各自识别。
@@ -192,6 +193,18 @@ async def run_push(app: Application, *, widen: bool = False) -> PushResult:
     return PushResult(len(predictions), note)
 
 
+async def settle_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """定时任务：把已完场比赛的真实比分回写，供命中率统计（失败不影响机器人）。"""
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    try:
+        done = await service.sync_results()
+        if done:
+            log.info("定时结算完成：%d 场", done)
+    except Exception as exc:  # 结算失败绝不能影响主流程
+        log.warning("定时结算失败：%s", exc)
+
+
 async def daily_push(context: ContextTypes.DEFAULT_TYPE) -> None:
     app = context.application
     try:
@@ -296,6 +309,45 @@ async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["fx_page"] = 0
     context.application.bot_data["fx_cache"] = None
     await _dispatch_menu_cmd(update, context, "fixtures")
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stats — 命中率统计（基于落盘到机器人存储的预测记录）。"""
+    s: Settings = context.application.bot_data["settings"]
+    if not is_admin(update, s):
+        return await deny(update)
+    service: PredictionService = context.application.bot_data["service"]
+    await _dispatch_cmd_typing(update)
+    st = service.stats()
+    tz = s.timezone
+    rate = st["rate"]
+    lines = [
+        "📈 <b>预测命中率</b>",
+        f"已结算：<code>{st['total']}</code> 场 · 命中 <code>{st['hit']}</code> 场"
+        + (f" · 命中率 <code>{rate:.1%}</code>" if rate is not None else ""),
+        f"待结算：<code>{st['pending']}</code> 场",
+        f"存储：{'✅ 已落盘（重启不丢）' if st['persistent'] else '⚠️ 内存回退（重启会丢）'}",
+    ]
+    if st["total"] == 0:
+        lines += ["", "暂无已结算的预测，赛果会在比赛结束后自动同步。"]
+    else:
+        streak = st["streak"]
+        tail = f"连续命中 <code>{streak}</code>" if streak > 0 else (
+            f"连续未中 <code>{-streak}</code>" if streak < 0 else "")
+        if tail:
+            lines.append(tail)
+        if st["by_level"]:
+            lines += ["", "按信心等级："]
+            names = {"high": "🟢 高", "medium": "🟡 中", "low": "🔴 低", "unknown": "未知"}
+            for key in ("high", "medium", "low", "unknown"):
+                slot = st["by_level"].get(key)
+                if not slot:
+                    continue
+                r = slot["hit"] / slot["total"] if slot["total"] else 0
+                lines.append(f"│ {names.get(key, key)}：<code>{slot['hit']}/{slot['total']}</code>（{r:.0%}）")
+    await update.effective_message.reply_text(
+        "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True
+    )
 
 
 async def web_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -882,6 +934,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("refresh", refresh_cmd))
     app.add_handler(CommandHandler("web", web_cmd))
     app.add_handler(CommandHandler("next", next_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\\d+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_mode, pattern=r"^fxm:(today|upcoming|next)$"))
@@ -897,6 +950,8 @@ def build_application(settings: Settings) -> Application:
         raise RuntimeError('缺少定时任务依赖，请安装 "python-telegram-bot[job-queue]"')
     if settings.chat_id:
         app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
+        # 每 6 小时同步一次赛果，保证命中率统计能及时更新
+        app.job_queue.run_repeating(settle_job, interval=6 * 3600, first=300, name=SETTLE_JOB)
     else:
         log.warning("未设置 CHAT_ID：定时推送已停用（仍可使用命令）")
     return app
