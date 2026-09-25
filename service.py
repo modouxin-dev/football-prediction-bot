@@ -21,7 +21,18 @@ MODEL_VERSION = "poisson-v0.1"  # 展示给用户，便于判断结论来自哪�
 FORM_MATCHES = 5  # 深度分析取近期几场
 H2H_MATCHES = 10  # 历史交锋取几场
 SEASON_FALLBACK_STEPS = 3  # 赛季不可用时，最多再向下降级几个赛季（不硬编码具体年份）
-UPCOMING_DAYS = 7  # 今日无比赛时，自动向前查找的天数（避免"今天没比赛"就显示空白）
+UPCOMING_DAYS = 7
+
+# 赛程查询模式 / Fixture query modes
+MODE_TODAY = "today"        # 今日
+MODE_UPCOMING = "upcoming"  # 未来 N 天
+MODE_NEXT = "next"          # 下一场（不早于今天的第一场）
+MODE_DATE = "date"          # 指定日期
+
+# 查询结果状态 / Query result status
+ST_OK = "ok"                  # 窗口内有比赛
+ST_WINDOW_EMPTY = "window_empty"  # 接口有数据，但请求窗口内没有比赛
+ST_NO_DATA = "no_data"        # 接口无数据或故障  # 今日无比赛时，自动向前查找的天数（避免"今天没比赛"就显示空白）
 
 _FINISHED = {"FT", "AET", "PEN"}  # 已完场的状态缩写
 
@@ -364,6 +375,94 @@ class PredictionService:
         if first_error is not None:
             raise first_error
         return [], s.season, None
+
+    def _season_range(self) -> tuple | None:
+        """当前数据源记录的赛季日期范围（最早 / 最晚比赛日），用于排查窗口命中情况。"""
+        fb = getattr(self.api, "fallback", None)
+        return getattr(fb, "season_range", None) if fb else None
+
+    async def query_fixtures(self, mode: str = MODE_TODAY, target: date | None = None,
+                             now: datetime | None = None) -> dict:
+        """统一赛程查询入口：今日 / 未来 N 天 / 下一场 / 指定日期。
+
+        明确区分三种状态，避免把「接口无数据」和「窗口内没比赛」混为一谈：
+        - ok          请求窗口内有比赛
+        - window_empty 接口有数据（返回整季赛程），但请求窗口内没有
+        - no_data     接口无数据或故障（保留真实原因）
+        """
+        s = self.settings
+        now = now or datetime.now(timezone.utc)
+        today = now.astimezone(s.timezone).date()
+
+        if mode == MODE_DATE:
+            day = target or today
+            date_from = date_to = day
+        elif mode == MODE_NEXT:
+            date_from, date_to = today, today + timedelta(days=365)
+        elif mode == MODE_UPCOMING:
+            date_from, date_to = today, today + timedelta(days=UPCOMING_DAYS)
+        else:
+            date_from = date_to = today
+
+        self.using_upcoming = mode in (MODE_UPCOMING, MODE_NEXT)
+        self.fixture_day_label = (
+            f"{date_from.isoformat()} ~ {date_to.isoformat()}" if date_from != date_to
+            else date_from.isoformat()
+        )
+
+        result = {
+            "mode": mode, "status": ST_OK, "fixtures": [],
+            "season": self.season_in_use, "day_label": self.fixture_day_label,
+            "season_range": None, "note": None,
+        }
+
+        try:
+            fixtures, season, note = await self._fetch_fixtures(date_from, date_to)
+        except APIError as exc:
+            # 接口故障 / 权限问题：保留真实原因与原始异常（供上层翻译成用户可读文案）
+            result.update(status=ST_NO_DATA, note=str(exc), error=exc)
+            self.last_note = str(exc)
+            return result
+
+        result["season"] = season
+        result["season_range"] = self._season_range()
+
+        if mode == MODE_NEXT and fixtures:
+            # 只看不早于当前时刻的第一场
+            upcoming = [fx for fx in fixtures
+                        if (parse_kickoff((fx.get("fixture") or {}).get("date")) or now) >= now]
+            upcoming.sort(key=lambda fx: parse_kickoff((fx.get("fixture") or {}).get("date")) or now)
+            fixtures = upcoming[:1]
+            if fixtures:
+                k = parse_kickoff((fixtures[0].get("fixture") or {}).get("date"))
+                self.fixture_day_label = k.astimezone(s.timezone).date().isoformat()
+                result["day_label"] = self.fixture_day_label
+
+        fb = getattr(self.api, "fallback", None)
+        if fixtures:
+            result["fixtures"] = fixtures
+            if fb and getattr(fb, "last_shifted_date", None):
+                result["status"] = ST_WINDOW_EMPTY
+                result["note"] = f"ℹ️ {fb.last_note}"
+            self.last_note = result["note"]
+            return result
+
+        # 无比赛：区分「接口没数据」还是「窗口内没比赛」
+        span = result["season_range"]
+        if span:
+            result["status"] = ST_WINDOW_EMPTY
+            detail = f"该赛季数据范围 {span[0]} ~ {span[1]}"
+            result["note"] = (
+                f"ℹ️ {date_from} ~ {date_to} 内没有比赛。{detail}，"
+                f"可尝试「下一场」或指定其它日期。"
+            )
+        else:
+            result["status"] = ST_NO_DATA
+            result["note"] = f"ℹ️ 数据源未返回该联赛赛程（{self.source_label}）。"
+        self.last_note = result["note"]
+        if result["note"]:
+            log.warning("赛程查询[%s]：%s", mode, result["note"])
+        return result
 
     async def get_today_fixtures(self, now: datetime | None = None) -> list[dict]:
         """取「今天」（按 TIMEZONE，默认 Asia/Shanghai）的全部赛程。
