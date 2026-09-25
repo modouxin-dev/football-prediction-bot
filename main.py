@@ -33,6 +33,11 @@ from bot_handler import MENU_ITEMS, BotUI, esc
 from config import ConfigError, Settings, load_settings
 from service import Prediction, PredictionService
 
+try:  # 图表依赖缺失时机器人仍要能正常跑，只是不出图
+    import chart
+except ImportError:  # pragma: no cover
+    chart = None
+
 log = logging.getLogger("bot")
 ui = BotUI()
 
@@ -142,11 +147,13 @@ async def run_push(app: Application, *, widen: bool = False) -> PushResult:
         raise RuntimeError("未设置 CHAT_ID，无法推送")
 
     predictions = await service.build_predictions()
-    note = None
+    note = service.last_note
     if not predictions and widen:
         predictions = await service.build_predictions(lookahead_hours=WIDE_HOURS)
         if predictions:
             note = f"未来 {settings.lookahead_hours} 小时内没有未开赛的比赛，已放宽到 {WIDE_HOURS // 24} 天内用于测试。"
+        elif service.last_note:
+            note = service.last_note  # 降级/空结果的真实原因，必须让用户看到
 
     for p in predictions:
         await app.bot.send_message(
@@ -370,6 +377,77 @@ async def on_analysis_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE
     await edit_view(query, ui.format_deep_report(report, settings.timezone), ui.analysis_keyboard(fixture_id))
 
 
+async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """图表按钮：chart:<类型>:<fixture_id>，图片以新消息发送并附返回按钮。"""
+    query = update.callback_query
+    parts = (query.data or "").split(":")
+    if len(parts) != 3:
+        await query.answer("无效的图表请求")
+        return
+    kind, raw = parts[1], parts[2]
+    await query.answer()
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    try:
+        fixture_id = int(raw)
+    except ValueError:
+        return
+    if not await begin_task(app.bot_data, user_id, f"chart:{kind}:{fixture_id}"):
+        await query.answer("正在生成图表，请稍候…")
+        return
+
+    try:
+        if chart is None:  # matplotlib 未安装时优雅降级，不崩机器人
+            await query.answer("图表功能不可用：缺少绘图依赖", show_alert=True)
+            return
+        cache = app.bot_data.get("fx_cache")
+        fixtures = cache["items"] if cache else None
+        if kind == "prob":
+            try:
+                prediction = service.get(fixture_id)
+            except KeyError:
+                prediction = await service.predict_fixture(fixture_id, fixtures)
+            blob = chart.prob_chart(prediction, settings.timezone)
+            caption = f"📈 胜平负概率 · {esc(prediction.home)} vs {esc(prediction.away)}"
+        else:
+            report = await service.analyze_fixture(fixture_id, fixtures)
+            blob = {
+                "form": chart.form_chart,
+                "goals": chart.goals_chart,
+                "h2h": chart.h2h_chart,
+            }[kind](report, settings.timezone)
+            caption = {
+                "form": "📊 近 5 场战绩对比",
+                "goals": "📊 场均进失球对比",
+                "h2h": "📊 历史交锋",
+            }[kind] + " · " + esc(report["home"]) + " vs " + esc(report["away"])
+    except (KeyError, ValueError):
+        await query.answer("该场比赛已不在今日赛程中，请返回赛程重新选择。", show_alert=True)
+        return
+    except APIError as exc:
+        await query.answer(f"获取数据失败：{exc}"[:180], show_alert=True)
+        return
+    except Exception as exc:  # 图表失败不能连累机器人
+        log.exception("生成图表失败")
+        await query.answer(f"生成图表失败：{type(exc).__name__}", show_alert=True)
+        return
+    finally:
+        end_task(app.bot_data, user_id, f"chart:{kind}:{fixture_id}")
+
+    if blob is None:  # 数据不足：明确提示，不发误导性图片
+        await query.answer("暂无足够数据生成该图表", show_alert=True)
+        return
+    await query.message.reply_photo(
+        photo=blob,
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        reply_markup=ui.chart_keyboard(fixture_id, kind),
+    )
+
+
 async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """页码指示器（不可点），只用于占位。"""
     await update.callback_query.answer()
@@ -568,6 +646,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:\d+$"))
     app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|form|goals|h2h):\d+$"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
