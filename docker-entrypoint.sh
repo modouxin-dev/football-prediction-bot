@@ -1,14 +1,25 @@
 #!/bin/sh
-# Volume 挂载后 /data 的属主通常是 root，而容器以非 root 运行，会导致数据库无法写入。
-# 启动时先把挂载点改归 bot 用户，再降权执行主程序。
 set -e
 
 USER_NAME="${APP_USER:-bot}"
+DATA_ROOT="/data"
+MPL_CONFIG="/tmp/mplconfig"
 
-mkdir -p /data
-chown -R "$USER_NAME":"$USER_NAME" /data 2>/dev/null || true
+echo "[Entrypoint] Starting environment audit..."
+mkdir -p "$DATA_ROOT" "$MPL_CONFIG"
 
-mkdir -p /tmp/mplconfig
-chown -R "$USER_NAME":"$USER_NAME" /tmp/mplconfig 2>/dev/null || true
+echo "[Entrypoint] Fixing permissions for $USER_NAME..."
+chown -R "$USER_NAME":"$USER_NAME" "$DATA_ROOT" "$MPL_CONFIG"
 
+for dir in cache charts exports backups; do
+    mkdir -p "$DATA_ROOT/$dir"
+    chown "$USER_NAME":"$USER_NAME" "$DATA_ROOT/$dir"
+done
+
+if ! sudo -u "$USER_NAME" touch "$DATA_ROOT/.mount_test"; then
+    echo "[CRITICAL] $DATA_ROOT is NOT writable by $USER_NAME. Data will be lost on reboot!"
+fi
+rm -f "$DATA_ROOT/.mount_test"
+
+echo "[Entrypoint] Audit complete. Handing over to application..."
 exec gosu "$USER_NAME":"$USER_NAME" "$@"
