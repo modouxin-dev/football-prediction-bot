@@ -6,7 +6,7 @@ import logging
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from repository import PredictionRepository
 from analyzer import (
