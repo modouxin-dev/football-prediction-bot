@@ -1,0 +1,41 @@
+# Fly.io 部署配置（Dockerfile 直出，无需改动业务代码）
+#
+# 前置：fly auth login
+# 创建应用：fly apps create <app-name>
+# 建持久卷（SQLite 落盘用）：fly volumes create bot_data --size 1 --region nrt
+# 设环境变量：fly secrets set TELEGRAM_TOKEN=xxx API_FOOTBALL_KEY=xxx CHAT_ID=xxx
+# 部署：fly deploy
+#
+# 费用参考（2026）：约 $2/月（shared-cpu-1x 256MB 常驻）+ 卷存储 $0.15/GB/月。
+# 新账号已无永久免费额度，只有 2 小时试用，之后按量计费。
+
+app = "football-prediction-bot"
+primary_region = "nrt" # 东京，亚太延迟低
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # 与 paths.py 的默认一致，显式写出便于排查
+  DATA_DIR = "/data"
+  DATABASE_PATH = "/data/football.db"
+  LOG_LEVEL = "INFO"
+  TZ = "Asia/Shanghai"
+
+# 长轮询 worker：不监听端口，因此不配置 [[services]] 与 http_service
+[processes]
+  app = "python main.py"
+
+# SQLite 落盘挂载点，对应 docker-entrypoint.sh 里的 /data
+[[mounts]]
+  source = "bot_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# 常驻不休眠：必须显式禁止自动停机，否则机器人会下线
+[experimental]
+  auto_rollback = true
