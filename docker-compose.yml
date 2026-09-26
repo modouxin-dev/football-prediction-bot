@@ -1,0 +1,33 @@
+# 自托管部署（Oracle Cloud 免费 ARM / 任意 VPS）用的编排文件。
+#
+# 适用：任何装了 Docker 的机器，不依赖特定云厂商，也不依赖 Railway。
+# 用法：把 .env.example 复制成 .env 填好，然后 docker compose up -d
+#
+# 注意：这是长轮询的常驻 worker，不监听端口，所以没有 ports 映射。
+services:
+  bot:
+    build: .
+    image: football-prediction-bot:latest
+    container_name: football-prediction-bot
+    # 容器退出后自动拉起（含宿主重启），保证 24/7 在线
+    restart: unless-stopped
+    env_file:
+      - .env
+    # 与容器内非 root 用户的 uid 保持一致，避免挂载卷权限问题
+    user: "10001:10001"
+    volumes:
+      # SQLite 数据库与图表缓存落盘：重部署/重启不丢预测历史与命中率统计
+      - ./data:/data
+    # 日志滚动，避免长期运行把磁盘写满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 健康检查：数据库文件存在即视为存活
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/football.db || exit 1"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 60s
