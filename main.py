@@ -1089,6 +1089,25 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.error("处理更新时出错", exc_info=context.error)
 
 
+# --- Heartbeat Start ---
+import logging
+from datetime import datetime
+
+async def send_heartbeat(application):
+    admin_id = os.getenv("ADMIN_CHAT_ID")
+    if admin_id:
+        try:
+            await application.bot.send_message(
+                chat_id=admin_id, 
+                text=f"🚀 [Bot Online]\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n状态: 工业级部署已生效，心跳正常。"
+            )
+            logging.info("Heartbeat message sent to admin.")
+        except Exception as e:
+            logging.error(f"Heartbeat failed: {e}")
+
+# --- Heartbeat End ---
+
+
 # ---- 应用装配 ---------------------------------------------------------------
 async def post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
@@ -1120,6 +1139,9 @@ async def post_init(app: Application) -> None:
                  first.get("received", 0), first.get("saved", 0), service.repo.matches_count())
     except Exception as exc:  # 启动同步失败也要让机器人正常起来
         log.warning("启动同步失败（将按需回源）：%s", exc)
+
+    # 在 application 启动后调用（异步上下文）
+    await send_heartbeat(app)
     try:
         await app.bot.set_my_commands([BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS])
     except TelegramError as exc:
