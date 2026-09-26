@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date, time
 
 import paths
+from paths import DB_PATH
 import pytz
 
 log = logging.getLogger(__name__)
@@ -190,7 +191,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     football_data_timeout = float(_get_int(env, "FOOTBALL_DATA_TIMEOUT", 10) or 10)
 
     # 预测落盘：统一走 paths 模块（DATA_DIR/DATABASE_PATH），挂载卷生效时重启不丢
-    db_path = (_get(env, "DB_PATH") or _get(env, "DATABASE_PATH") or "").strip() or str(paths.DB_PATH)
+    DATABASE_FILE = DB_PATH
 
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
