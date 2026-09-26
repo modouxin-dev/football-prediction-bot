@@ -7,11 +7,9 @@
 from __future__ import annotations
 
 import logging
-import asyncio
 import os
 from pathlib import Path
 
-import bot_runner
 import paths
 import sys
 from dataclasses import dataclass
@@ -1094,6 +1092,15 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---- 应用装配 ---------------------------------------------------------------
 async def post_init(app: Application) -> None:
     settings: Settings = app.bot_data["settings"]
+    # Webhook 残留会让 getUpdates 返回 409 并终止进程，必须在轮询前清掉。
+    # 这一步只能放在 post_init（即 run_polling 内部的 event loop 里）：
+    # 若在 main() 里用 asyncio.run() 提前清理，asyncio.run 结束时会关闭并置空
+    # 当前 event loop，run_polling 内部的 get_event_loop 随即报错，
+    # 导致 Updater.start_polling 协程从未被 await（容器启动几秒即退出、命令无响应）。
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+    except TelegramError as exc:
+        log.warning("清理 Webhook 失败（继续启动）：%s", exc)
     api = FootballAPI(settings.api_key, provider=settings.api_provider)
     # 备用源：仅在配置了 Token 且启用时创建，否则为 None（行为与改动前完全一致）
     fallback = None
@@ -1153,7 +1160,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(CommandHandler("storage", storage_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
-    app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\\d+$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_mode, pattern=r"^fxm:(today|upcoming|next|date)$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
     app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:.+$"))
@@ -1195,17 +1202,12 @@ def main() -> None:
         len(settings.admin_ids),
     )
     app = build_application(settings)
-    # 之前直接调用 app.run_polling()，线上出现
-    # "coroutine 'Updater.start_polling' was never awaited"：
-    # 轮询协程没被 await，机器人虽打印 Application started 却收不到任何
-    # update（所有命令无响应），且启动函数无阻塞点而立即返回，容器几秒后退出。
-    # 改用 bot_runner.serve 显式 await 轮询并阻塞到收到停止信号。
-    asyncio.run(
-        bot_runner.serve(
-            app,
-            allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY],
-        )
-    )
+    # run_polling 自行创建并管理 event loop，内部 await Updater.start_polling，
+    # 并阻塞到收到停止信号——它是唯一的阻塞点，容器因此保持存活。
+    # 事故复盘：此前"coroutine never awaited"的真正原因不是 run_polling 本身，
+    # 而是它之前有一次 asyncio.run() 把 event loop 关闭置空了。
+    # 异步清理（delete_webhook）已移入 post_init，故此处禁止再引入 asyncio.run。
+    app.run_polling(allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY])
 
 
 if __name__ == "__main__":
