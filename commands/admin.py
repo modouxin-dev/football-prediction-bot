@@ -205,6 +205,44 @@ async def storage_cmd(update, context) -> None:
     )
 
 
+async def backfill_cmd(update, context) -> None:
+    """/backfill — 拉整季赛程入库，用于填充强度榜所需的历史样本。
+
+    只补 **赛程与赛果**（matches 表），**不伪造预测记录**。
+    理由：健康度曲线要反映模型「事前」的判断，而回填时用现在的积分榜去
+    算过去的比赛会引入前视偏差（look-ahead bias），得出的命中率是虚高的
+    假象。宁可曲线空着，也不要一条骗人的曲线。
+    """
+    await _typing(update)
+    service = context.application.bot_data["service"]
+    progress = await update.effective_message.reply_text("⏳ 正在拉取整季赛程（约 380 场），请稍候…")
+    try:
+        result = await service.sync.sync_full_season()
+    except Exception as exc:
+        log.exception("/backfill 失败")
+        await progress.edit_text(f"❌ 拉取失败：{describe_error(exc)}")
+        return
+
+    received = result.get("received", 0)
+    saved = result.get("saved", 0)
+    # 已完赛（有比分）的场次才是强度榜的有效样本
+    finished = service.repo.count_finished_matches(service.sync.competition)
+
+    lines = [f"✅ 整季赛程已入库：收到 {received} 场，保存 {saved} 场。"]
+    if finished is not None:
+        lines.append(f"其中<b>已完赛 {finished} 场</b>（强度榜的有效样本）。")
+        need = 60
+        if finished >= need:
+            lines.append("强度榜已可正常展示。")
+        else:
+            lines.append(
+                f"强度榜需 ≥{need} 场，还差 {need - finished} 场；"
+                f"随着赛季推进会自动补齐。")
+    lines.append("")
+    lines.append("ℹ️ 预测命中率曲线仍需等机器人日常推送积累，本命令不会补。")
+    await progress.edit_text("\n".join(lines), parse_mode="HTML")
+
+
 async def _typing(update) -> None:
     """统一先发「正在输入」。发送失败不影响主流程——这只是体验优化。"""
     try:
@@ -218,3 +256,5 @@ def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("status", status_cmd, admin_only=True, description="运行状态诊断")
     dispatcher.register("stats", stats_cmd, admin_only=True, description="命中率统计")
     dispatcher.register("storage", storage_cmd, admin_only=True, description="存储自检")
+    dispatcher.register("backfill", backfill_cmd, admin_only=True,
+                        description="拉取整季赛程，填充强度榜样本")
