@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, time
 
-import paths
 from paths import DB_PATH
 import pytz
 
@@ -97,6 +96,7 @@ class Settings:
     football_data_timeout: float
     data_source_mode: str  # "auto" / "api-football" / "football-data"
     db_path: str  # 预测落盘路径（SQLite）；目录不可写时自动回退内存存储
+    web_url: str  # 网页看板地址（WEB_URL）；为空时 /web 提示未部署
 
     @property
     def requested_season(self) -> int:
@@ -190,8 +190,15 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     football_data_enabled = parse_bool(_get(env, "FOOTBALL_DATA_ENABLED"), default=True)
     football_data_timeout = float(_get_int(env, "FOOTBALL_DATA_TIMEOUT", 10) or 10)
 
-    # 预测落盘：统一走 paths 模块（DATA_DIR/DATABASE_PATH），挂载卷生效时重启不丢
-    DATABASE_FILE = DB_PATH
+    # 预测落盘：默认走 paths 模块（DATA_DIR/DATABASE_PATH），挂载卷生效时重启不丢。
+    # DATABASE_PATH 与 DB_PATH 等价，前者优先；两者都未设置时才用 paths.DB_PATH。
+    # 用 str 而非 Path：repository 以该值做连接缓存的 dict key，
+    # 类型需与回退路径 str(paths.DB_PATH) 一致，否则同一库会打开两条连接。
+    db_path = _get(env, "DATABASE_PATH") or _get(env, "DB_PATH") or str(DB_PATH)
+
+    # 网页看板地址。Railway 上可用 ${{RAILWAY_PUBLIC_DOMAIN}} 之类的变量注入；
+    # 未配置时 /web 会明确提示未部署，而不是给出一条打不开的链接。
+    web_url = (_get(env, "WEB_URL") or "").strip().rstrip("/")
 
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
@@ -218,4 +225,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         football_data_timeout=football_data_timeout,
         data_source_mode=data_source_mode,
         db_path=db_path,
+        web_url=web_url,
     )

@@ -8,9 +8,21 @@ Telegram 足球量化预测机器人：用泊松模型估算比赛结果概率�
 
 | 命令 | 说明 | 权限 |
 | --- | --- | --- |
-| `/start` `/help` | 欢迎信息、命令说明 | 所有人 |
+| `/start` | 欢迎信息与推送时间 | 所有人 |
+| `/help` | 命令说明 | 所有人 |
+| `/menu` | 功能菜单（Inline 按钮，点击后原地切换） | 所有人 |
+| `/fixtures` | 今日赛程，按联赛分组、支持翻页 | 所有人 |
+| `/predict` | 比赛预测：胜平负概率、比分、信心等级 | 所有人 |
+| `/analysis` | 深度分析：近期状态、主客场、历史交锋 | 所有人 |
+| `/standings` | 实时积分榜与攻防数据 | 所有人 |
+| `/refresh` | 清空缓存重新拉取 | 所有人 |
+| `/next` | 下一场比赛 | 所有人 |
+| `/date YYYY-MM-DD` | 指定日期的赛程，例如 `/date 2026-10-10` | 所有人 |
+| `/web` | 网页端入口（开发中） | 所有人 |
 | `/test` | 立即生成并推送一次预测（与定时任务同一路径，失败会显示具体原因） | 管理员 |
-| `/status` | 版本、赛季、下次推送时间、数据源套餐与今日请求数 | 管理员 |
+| `/status` | 版本、赛季、下次推送时间、数据源套餐与今日请求数、持久化状态 | 管理员 |
+| `/stats` | 命中率统计（基于落盘的预测记录） | 管理员 |
+| `/storage` | 存储自检：写入/读取/数据库/挂载/最后写入时间 | 管理员 |
 
 推送消息下方的按钮会**在原消息上切换视图**：📈 预测 · 🔍 深度分析（比分 Top5、大小球、双方进球、球队强度）· 📊 历史交锋 · 💰 赔率对比 · 🔄 刷新赔率。
 
@@ -29,14 +41,137 @@ Telegram 足球量化预测机器人：用泊松模型估算比赛结果概率�
 | `MAX_MATCHES` / `LOOKAHEAD_HOURS` | | 每次最多 3 场 / 只推未来 36 小时内开赛的比赛 |
 | `LOG_LEVEL` | | 默认 `INFO` |
 
-`DB_PATH`、`MONGODB_URI` 目前没有被使用，可以在 Railway 里删除。
+### 存储与持久化
+
+| 变量 | 说明 |
+| --- | --- |
+| `DATA_DIR` | 数据目录，默认 `/data`。**必须挂载持久卷** |
+| `DATABASE_PATH` | SQLite 路径，默认 `$DATA_DIR/football.db`。`DB_PATH` 与其等价，前者优先 |
+| `CACHE_DIR` / `CHART_DIR` / `EXPORT_DIR` / `BACKUP_DIR` | 各类子目录，默认在 `DATA_DIR` 下 |
+| `SAVE_CHARTS` | 默认 `false`，图表只在内存生成不落盘 |
+
+> ⚠️ **未挂载持久卷时，预测记录、赛果回写、Elo 评分会在容器重启后全部清零。**
+> 启动日志会打印警告；也可发 `/storage` 确认。目录不可写时程序会自动回退到
+> 系统临时目录以保证不崩溃，但数据同样不保留。
+
+### 赛季策略
+
+| 变量 | 说明 |
+| --- | --- |
+| `REQUESTED_SEASON` | 优先级高于 `SEASON` |
+| `SEASON_MODE` | `auto`（不可用自动降级）/ `fixed` |
+| `ALLOW_SEASON_FALLBACK` | 默认 `true`，无数据时自动改用有数据的赛季 |
+
+### 备用数据源（football-data.org，免费）
+
+| 变量 | 说明 |
+| --- | --- |
+| `FOOTBALL_DATA_API_TOKEN` | 不填则备用源自动禁用 |
+| `DATA_SOURCE_MODE` | `auto` / `api-football` / `football-data` |
+| `FOOTBALL_DATA_BASE_URL` / `FOOTBALL_DATA_ENABLED` / `FOOTBALL_DATA_TIMEOUT` | 备用源细节配置 |
+
+主数据源失败、超额度或 403 时自动切换，赛程照推不误。
+
+`MONGODB_URI` 目前没有被使用，可以在 Railway 里删除。
+
+## 架构
+
+命令走 **Command Pattern**：`main.py` 只装配依赖并注册，`commands/` 下每个模块
+负责一类指令，`CommandDispatcher` 统一查表 + 权限拦截 + 调用。新增一条指令只需
+在对应模块 `register` 一行，**入口文件不会因此变长**。
+
+```
+main.py            装配 + 注册 + 启动（760 行，重构前 1242 行）
+├── commands/      指令层：basic / matches / admin + dispatcher
+├── scheduler.py   定时推送、赛程同步、赛果结算 + NotificationManager
+├── support.py     权限、异常翻译、消息渲染（被命令层与调度层共用）
+├── service.py     业务逻辑（SSOT）
+└── repository.py  SQLite（WAL + 原子事务 + 指数退避）
+```
+
+**为什么不引入 apscheduler**：python-telegram-bot 自带 `JobQueue`，已用
+`run_daily` / `run_repeating` 实现定时推送。再加一个调度器会形成两个互不知晓的
+调度器同时运行，最直接后果是同一场比赛被推送两次。`scheduler.py` 做的是把已有
+JobQueue 逻辑抽出来，不是换调度器。
+
+**并发**：`repository.py` 强制 `PRAGMA journal_mode=WAL`，写操作走
+`BEGIN IMMEDIATE` 原子事务 + 指数退避重试（20ms→40ms→80ms，带随机抖动防惊群）。
+实测 10 线程写 400 场的同时开一个持续读取线程，0 错误。
+
+## Web 看板 API（可选）
+
+```bash
+pip install -r requirements-web.txt
+python -m uvicorn api:app --host 0.0.0.0 --port 8000
+# 浏览器打开 http://localhost:8000 即可看到看板
+```
+
+然后在 Railway 设置 `WEB_URL=https://你的域名`，Telegram 的 `/web` 命令就会给出可点击地址。
+
+| 端点 | 用途 |
+|---|---|
+| `/` | 看板页面（单文件 HTML，零 CDN 依赖，离线可渲染） |
+| `/health` | 健康状态 + 持久化是否生效 |
+| `/stats` | 命中率（与 `/stats` 命令同一份数据） |
+| `/health/model` | Log Loss 趋势、校准曲线、各信心等级命中率 |
+| `/audit` | 预测审计：历史预测 vs 实际赛果 |
+| `/strength` | 球队攻防强度榜 |
+| `/commands` | 指令清单 |
+
+**看板不联网**：全部数据来自本地 SQLite，刷新页面不消耗 API 免费额度，
+数据源挂掉时看板仍能查看历史。实测最慢端点 25ms（预算 200ms）。
+
+**口径说明**：强度榜展示的是**模型在用的泊松攻防强度**（`build_league_model`）。
+Dixon-Coles 只修正低比分概率，**不改变强度值**，因此不存在「DC 版强度」这种东西。
+
+**样本不足时不画假图**：已结算 <20 场、或本地已完赛 <60 场时，
+对应卡片会明确显示「样本不足」而非画出看似可信的曲线。
+
+FastAPI **不写入** `requirements.txt`：机器人本体不需要它，装进去只会让
+Docker 镜像变大、多一个用不到的攻击面。需要时单独装 `requirements-web.txt`。
+
+## 模板层结构
+
+模板层曾是一个 1135 行的单体类，现按**视图垂直切分**：
+
+```
+bot_handler.py (88 行)  ── 纯门面：Mixin 组装 BotUI + 兼容导出
+├── templates.py (114)     静态文案与常量（零依赖，最底层）
+├── formatkit.py (264)     原子工具：转义/概率条/队名/积分榜摘要
+├── keyboards.py (118)     按钮键盘
+└── views/ (5 个文件)      各视图：文案与它的组装逻辑同处一地
+    common / prediction / analysis / fixtures / standings / menu
+```
+
+**为什么不把文案抽成 JSON/YAML**：实测文案行只占原文件 40%~60%，其余是循环与
+条件分支；抽走文案后体积压不下来。更关键的是，文案与「在什么条件下说这句话」
+强耦合——拆开后改一句文案要跨两个文件，反而更难维护。
+
+按视图切分后，改文案只动 `views/` 里对应的一个文件；不引入模板引擎，
+因此没有占位符拼写错误导致的运行时 KeyError（f-string 在编译期就能发现）。
+
+**迁移已做等价性验证**：22 个视图方法在迁移前后输出逐字节一致
+（含时间戳的方法归一化后比对），543 个测试全绿。
+
+## 文档
+
+| 文档 | 用途 |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 最终架构图、分层依赖规则、模块清单 |
+| [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md) | 部署清单与故障速查 |
+| [PROGRESS.md](PROGRESS.md) | 各阶段详情与实测记录 |
 
 ## 部署到 Railway
 
 1. 服务连接到本仓库的 `main` 分支，构建方式为 Dockerfile。
 2. 在 Railway 的 Variables 里填上面的环境变量。
-3. **不要**给服务设置 Cron Schedule：这是长轮询的常驻进程，定时推送由程序内部完成。
-4. 推送到 `main` 后 Railway 会自动构建并部署。部署后在 Telegram 里发送 `/status` 检查，再发 `/test` 验证整条链路。
+3. **新建 Volume 并挂载到 `/data`**。注意挂载整个目录而非单个 db 文件——WAL 模式会生成 `football.db-wal`、`football.db-shm`，必须与主库一起持久化，否则可能丢最近未合并的写入。
+4. **不要**给服务设置 Cron Schedule：这是长轮询的常驻进程，定时推送由程序内部完成。
+5. 推送到 `main` 后 Railway 会自动构建并部署。部署后在 Telegram 里发送 `/status` 检查，再发 `/test` 验证整条链路。
+
+验证持久卷是否生效：部署后发 `/storage`，**重新部署一次再发一次**，第二次若仍能看到第一次的标记文件及其时间，即证明 Volume 生效。
+
+CI 与分支保护配置见 [`CI.md`](CI.md)。
 
 ## 本地运行与测试
 
@@ -45,14 +180,48 @@ pip install -r requirements-dev.txt
 cp .env.example .env   # 填好之后
 python main.py
 pytest                 # 不联网，使用仿真的 API 响应
+
+# 回测：验证模型改动是否真的有效（真实数据）
+python backtest_cli.py --db /data/football.db
+# 或用模拟数据自检管线
+python backtest_cli.py --simulate 1140 --seeds 1,2,3
 ```
+
+测试在 Python 3.10 与 3.12 上均验证通过（CI 双版本矩阵）。数据存储表：
+`matches`（赛程缓存）、`predictions`（预测 + 回写赛果）、`sync_log`（拉取记录）、
+`elo_ratings` / `elo_processed` / `elo_log`（Elo 相关）。
 
 ## 模型说明
 
 - 用积分榜（一次请求）得到每支球队的主/客场场均进球与失球，除以联赛平均得到攻防强度，并向 1.0 收缩（相当于补 5 场平均水平的先验比赛），避免赛季初样本太少。
 - `λ主 = 主队主场进攻 × 客队客场防守 × 联赛主队场均进球`，`λ客` 同理；比分矩阵覆盖 0–10 球并归一化，汇总得到胜平负、最可能比分、大小球、双方进球概率。
 - 赔率取各博彩公司「胜平负」盘口的中位数。**价值偏差 = 模型概率 − 1/赔率**，大于 0 等价于期望收益为正；超过 5% 标记为 Value Bet。
-- 尚未考虑：伤停、赛程密度、Dixon-Coles 低比分修正、近期状态权重。
+- **Elo 融合**：赛果回写后更新各队 Elo 评分（基准 1500，主场加成 65 分，净胜球加权，新队 K=40 / 老队 K=20）。预测时用「份额归一」把 Elo 差融进 λ：主队进球占比按系数平移后按总进球数还原，因此 λ主+λ客 精确守恒，**不影响大小球判断**；系数夹在 [0.8, 1.25]，实测极端分差下胜率偏移不超过 ±7.4pp。
+- **冷启动**：`python migrate_elo.py --dry-run` 可预览；正式执行会把库里已有的历史赛果按时间正序重放一遍，可重复执行（幂等）。免费套餐若拿不到历史赛季，机器人从 1500 分起步，靠 `PRIOR_GAMES` 收缩保证赛季初不失真。
+- **⚠️ Elo 已实现但刻意未接入预测主流程**。回测（`python backtest_cli.py --db /data/football.db`）在 7 个随机种子 + 真实结构数据上一致显示：接入 Elo 后对数损失、RPS、Brier、校准误差**全部变差**（对数损失改善均值 −0.0033），且 blend 参数扫描呈单调恶化（最佳值 0.0，即完全不用）。原因：积分榜攻防强度已充分捕捉球队实力，Elo 提供的是冗余信息加噪声。**在拿出有效证据前不接入**，避免让线上预测变糟。
+- **回测方法**：滚动前进（walk-forward），预测第 i 场时只允许使用第 i 场之前的数据，杜绝前视偏差。主判据为对数损失与 RPS（越低越好），准确率仅作参考——准确率把「预测 30% 却说成 90%」和「诚实预测 30%」同等对待，会掩盖过度自信。
+- **⚠️ Dixon-Coles 已实现但同样未接入预测主流程**（原因见下）。
+- 尚未考虑：伤停、赛程密度、近期状态权重。
+
+### 已实现但未接入的两个模块（原因与证据）
+
+| 模块 | 回测结论 | 处置 |
+| --- | --- | --- |
+| Elo 评分 | 7 种子 ΔLogLoss 均值 **−0.0033**，0/7 为正 | 不接入 |
+| Dixon-Coles | 7 种子 ΔLogLoss 均值 **+0.0015**，**6/7 为正**，t=+1.89 | 暂不接入（未达显著性死线） |
+
+**为何不接入 Dixon-Coles**：接入标准为「7 个以上随机种子 ΔLogLoss 均为正，且统计显著（t>2.5）」。
+实测 seed 99 为 −0.00106，t=1.89，**未达死线**。它有真实的方向性收益（6/7 正，远好于 Elo 的 0/7），
+但效应量被 λ/μ 估计误差淹没：`ρ` 的真实效应仅在 |ρ|≥0.15 时才显著
+（ρ=−0.15 时 +0.00244，t=+4.46；ρ=−0.10 时 +0.00089，t=+2.10）。
+**在拿出更强证据前不接入**，避免以「准确率提升」为由做伪增强。
+
+**Dixon-Coles 实现已按 Dixon & Coles (1997) 原文严格完成**，可随时启用：
+- 修正项 τ 覆盖 0-0 / 1-0 / 0-1 / 1-1 四个格子，`tests/test_dixon_coles.py` 用手算值逐项验证（精度 1e-12）
+- `ρ` 由黄金分割搜索最大化对数似然拟合（大样本无偏：n=3000 时估计 −0.096 对真实 −0.10）
+- `ρ` 自动夹紧到可行区间，保证全部 τ ≥ 0；NaN / 极端 λ 安全退化
+- 单场延迟增量 **0.0091 ms**（预算 10ms）
+- ρ=0 时与纯泊松逐元素等价，向后兼容
 
 ## 常见问题
 
@@ -64,11 +233,19 @@ pytest                 # 不联网，使用仿真的 API 响应
 ## 项目结构
 
 ```
-main.py         入口：命令、按钮、定时任务、日志
-config.py       环境变量解析与校验
-api_client.py   API-Football 异步客户端（超时、重试、缓存、错误翻译）
-analyzer.py     泊松模型与赔率工具（纯计算）
-service.py      赛程 + 积分榜 + 赔率 → 预测
-bot_handler.py  消息模板与按钮键盘
-tests/          单元测试
+main.py          入口：命令、按钮、定时任务、日志
+config.py        环境变量解析与校验
+paths.py         统一存储路径 + 持久卷自检
+api_client.py    API-Football 异步客户端（超时、重试、缓存、错误翻译）
+data_source.py   主源与备用源统一入口
+football_data.py 备用源 football-data.org
+normalize.py     数据归一化
+analyzer.py      泊松模型与赔率工具（纯计算）
+service.py       赛程 + 积分榜 + 赔率 → 预测
+repository.py    SQLite 落盘、赛果回写、命中率统计、Elo 评分存储
+sync.py          比赛同步
+bot_handler.py   消息模板与按钮键盘
+chart.py         图表渲染
+verify_deploy.py 部署自检
+tests/           单元测试（不联网，用仿真 API 响应）
 ```

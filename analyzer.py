@@ -18,9 +18,167 @@ DEFAULT_AVG_AWAY_GOALS = 1.2
 PRIOR_GAMES = 5  # 收缩强度：相当于给每支球队补 5 场"联赛平均水平"的先验比赛
 OUTCOMES = ("home", "draw", "away")
 
+# Elo 融合系数的安全边界。即便上游算错，λ 最多偏移 25%，不会把模型带崩。
+# 与 elo.ELO_CLAMP 保持一致，此处再夹一次防止调用方传入越界值。
+ELO_FACTOR_MIN = 0.8
+ELO_FACTOR_MAX = 1.25
+
 
 def poisson_pmf(lmbda: float, k: int) -> float:
     return math.exp(-lmbda) * (lmbda**k) / math.factorial(k)
+
+
+# ============================================================================
+# Dixon-Coles 低比分修正
+# ============================================================================
+# 标准泊松假设主客队进球相互独立，这会系统性低估 0-0 与 1-1、高估 1-0 与 0-1。
+# Dixon & Coles (1997) 引入修正项 τ 与参数 ρ，只调整这四个格子的概率，其余不变。
+#
+# 严格按原文定义（λ = 主队期望进球，μ = 客队期望进球）：
+#     τ(0,0) = 1 − λμρ
+#     τ(0,1) = 1 + λρ
+#     τ(1,0) = 1 + μρ
+#     τ(1,1) = 1 − ρ
+#     其余   = 1
+# ρ 通常为负（约 −0.1），此时 0-0 与 1-1 被抬高、1-0 与 0-1 被压低。
+
+DEFAULT_RHO = 0.0        # 默认关闭（等价于纯泊松）；经回测验证后再决定是否启用
+RHO_SEARCH_MIN = -0.30   # ρ 拟合搜索下界
+RHO_SEARCH_MAX = 0.30    # ρ 拟合搜索上界
+RHO_MIN_SAMPLES = 20     # 少于这么多场样本时不拟合，直接退回 0.0
+
+
+def dc_tau(x: int, y: int, lambda_home: float, lambda_away: float, rho: float) -> float:
+    """Dixon-Coles 修正项 τ(x, y)。严格遵循 Dixon & Coles (1997) 原文。"""
+    if rho == 0.0:
+        return 1.0
+    if x == 0 and y == 0:
+        return 1.0 - lambda_home * lambda_away * rho
+    if x == 0 and y == 1:
+        return 1.0 + lambda_home * rho
+    if x == 1 and y == 0:
+        return 1.0 + lambda_away * rho
+    if x == 1 and y == 1:
+        return 1.0 - rho
+    return 1.0
+
+
+def dc_rho_bounds(lambda_home: float, lambda_away: float) -> tuple[float, float]:
+    """保证全部 τ ≥ 0 的 ρ 可行区间。
+
+    由四个约束联立求解：
+        1 − λμρ ≥ 0  →  ρ ≤ 1/(λμ)
+        1 + λρ  ≥ 0  →  ρ ≥ −1/λ
+        1 + μρ  ≥ 0  →  ρ ≥ −1/μ
+        1 − ρ   ≥ 0  →  ρ ≤ 1
+    """
+    if lambda_home <= 0 or lambda_away <= 0:
+        return (0.0, 0.0)
+    lo = max(-1.0 / lambda_home, -1.0 / lambda_away)
+    hi = min(1.0 / (lambda_home * lambda_away), 1.0)
+    if lo > hi:
+        return (0.0, 0.0)
+    return (lo, hi)
+
+
+def clamp_rho(rho: float | None, lambda_home: float, lambda_away: float) -> float:
+    """把 ρ 夹进可行区间，防止 τ 为负产生负概率；非法值（NaN/inf）退回 0。"""
+    if rho is None:
+        return 0.0
+    try:
+        value = float(rho)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    lo, hi = dc_rho_bounds(lambda_home, lambda_away)
+    return min(max(value, lo), hi)
+
+
+def dc_score_matrix(lambda_home: float, lambda_away: float,
+                    max_goals: int = MAX_GOALS, rho: float = 0.0) -> list[list[float]]:
+    """经 Dixon-Coles 修正并归一化的比分概率矩阵。
+
+    rho=0 时与纯泊松逐元素等价（τ 恒为 1），故向后兼容。
+    """
+    n = max_goals + 1
+    # 夹紧 λ，防止极端数据导致 exp 下溢/上溢
+    lh = min(max(float(lambda_home), 1e-9), 20.0)
+    la = min(max(float(lambda_away), 1e-9), 20.0)
+    r = clamp_rho(rho, lh, la)
+
+    p_home = [poisson_pmf(lh, k) for k in range(n)]
+    p_away = [poisson_pmf(la, k) for k in range(n)]
+    matrix = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            val = p_home[i] * p_away[j] * dc_tau(i, j, lh, la, r)
+            if not math.isfinite(val) or val <= 0.0:
+                val = 0.0     # ρ 已夹紧，理论上不会为负；仍兜底防 NaN
+            matrix[i][j] = val
+
+    total = sum(sum(row) for row in matrix)
+    if not math.isfinite(total) or total <= 0:
+        # 退化路径：退回纯泊松，宁可不准也不能崩
+        matrix = [[ph * pa for pa in p_away] for ph in p_home]
+        total = sum(sum(row) for row in matrix)
+        if not math.isfinite(total) or total <= 0:
+            return [[1.0 / (n * n)] * n for _ in range(n)]
+    return [[v / total for v in row] for row in matrix]
+
+
+def _dc_log_likelihood(rho: float, observations: list[tuple],
+                       max_goals: int = MAX_GOALS) -> float:
+    """给定 ρ 时，全部观测赛果的对数似然（越大越好）。"""
+    total = 0.0
+    for lh, la, hs, as_ in observations:
+        if hs is None or as_ is None or hs > max_goals or as_ > max_goals:
+            continue
+        p = dc_score_matrix(lh, la, max_goals=max_goals, rho=rho)[hs][as_]
+        if p <= 0.0:
+            return -1e18     # 不可能事件
+        total += math.log(p)
+    return total
+
+
+def fit_rho(observations: list[tuple], max_goals: int = MAX_GOALS,
+            lo: float = RHO_SEARCH_MIN, hi: float = RHO_SEARCH_MAX,
+            iterations: int = 40) -> float:
+    """用黄金分割搜索拟合 ρ（最大化对数似然）—— 适应不同联赛的进球分布。
+
+    observations: [(lambda_home, lambda_away, home_score, away_score), ...]
+    样本不足或全部不可用时返回 0.0（退回纯泊松），绝不猜测。
+    """
+    obs = [
+        o for o in observations
+        if o[2] is not None and o[3] is not None
+        and o[2] <= max_goals and o[3] <= max_goals
+    ]
+    if len(obs) < RHO_MIN_SAMPLES:
+        return 0.0
+
+    # 黄金分割（最大化）：单峰假设下稳定收敛，无需导数
+    inv_phi = (math.sqrt(5.0) - 1.0) / 2.0
+    a, b = lo, hi
+    c = b - inv_phi * (b - a)
+    d = a + inv_phi * (b - a)
+    fc = _dc_log_likelihood(c, obs, max_goals)
+    fd = _dc_log_likelihood(d, obs, max_goals)
+    for _ in range(iterations):
+        if fc > fd:
+            b, d, fd = d, c, fc
+            c = b - inv_phi * (b - a)
+            fc = _dc_log_likelihood(c, obs, max_goals)
+        else:
+            a, c, fc = c, d, fd
+            d = a + inv_phi * (b - a)
+            fd = _dc_log_likelihood(d, obs, max_goals)
+        if abs(b - a) < 1e-6:
+            break
+    best = c if fc > fd else d
+    if not math.isfinite(best):
+        return 0.0
+    return round(best, 6)
 
 
 def _num(value: Any) -> float:
@@ -94,13 +252,17 @@ class MatchAnalyzer:
         """泊松分布概率质量函数。"""
         return poisson_pmf(lmbda, x)
 
-    def predict_match(self, model: LeagueModel, home_id: int, away_id: int) -> dict:
+    def predict_match(self, model: LeagueModel, home_id: int, away_id: int,
+                      elo_factor: float | None = None,
+                      rho: float = DEFAULT_RHO) -> dict:
         h, a = model.strength(home_id), model.strength(away_id)
         return self.calculate_prediction(
             {"attack": h.attack_home, "defense": h.defense_home},
             {"attack": a.attack_away, "defense": a.defense_away},
             league_avg_home=model.avg_home_goals,
             league_avg_away=model.avg_away_goals,
+            elo_factor=elo_factor,
+            rho=rho,
         )
 
     def calculate_prediction(
@@ -110,23 +272,42 @@ class MatchAnalyzer:
         league_avg_home: float = DEFAULT_AVG_HOME_GOALS,
         league_avg_away: float = DEFAULT_AVG_AWAY_GOALS,
         max_goals: int = MAX_GOALS,
+        elo_factor: float | None = None,
+        rho: float = DEFAULT_RHO,
     ) -> dict:
         """
         home_stats: 主队主场 {'attack': 进攻强度, 'defense': 防守强度}
         away_stats: 客队客场 {'attack': ..., 'defense': ...}
         （强度 1.0 = 联赛平均；防守强度 <1 表示失球比平均少，防守更好）
+
+        elo_factor: Elo 融合系数（由 elo.elo_multiplier 计算，>1 表示主队更强）。
+            采用「份额归一」：先算主队进球占比 s，用系数把占比平移为 s'，
+            再按原总进球数还原。因此 λ主+λ客 **精确守恒**，
+            大小球（over/under）判断完全不受 Elo 影响，只在两队间重新分配。
+            传 None 时保持纯泊松行为（向后兼容，已有测试不受影响）。
         """
         lambda_home = home_stats["attack"] * away_stats["defense"] * league_avg_home
         lambda_away = away_stats["attack"] * home_stats["defense"] * league_avg_away
+        if elo_factor is not None and elo_factor > 0:
+            f = min(max(float(elo_factor), ELO_FACTOR_MIN), ELO_FACTOR_MAX)
+            total = lambda_home + lambda_away
+            if total > 0:
+                share = lambda_home / total
+                # logit 平移：s' = s·f / (s·f + (1−s))，保证 s'∈(0,1) 且 f=1 时不变
+                tilted = share * f
+                denom = tilted + (1.0 - share)
+                if denom > 0:
+                    share_new = tilted / denom
+                    lambda_home = total * share_new
+                    lambda_away = total * (1.0 - share_new)
         lambda_home = min(max(lambda_home, 0.05), 6.0)
         lambda_away = min(max(lambda_away, 0.05), 6.0)
 
         n = max_goals + 1
-        p_home = [poisson_pmf(lambda_home, k) for k in range(n)]
-        p_away = [poisson_pmf(lambda_away, k) for k in range(n)]
-        matrix = [[ph * pa for pa in p_away] for ph in p_home]
-        total = sum(sum(row) for row in matrix)
-        matrix = [[p / total for p in row] for row in matrix]  # 截断尾部后归一化，三项概率之和恒为 1
+        rho = clamp_rho(rho, lambda_home, lambda_away)
+        # rho=0 时与纯泊松逐元素等价，行为完全不变
+        matrix = dc_score_matrix(lambda_home, lambda_away,
+                                 max_goals=max_goals, rho=rho)
 
         win = sum(matrix[h][a] for h in range(n) for a in range(h))
         draw = sum(matrix[i][i] for i in range(n))
@@ -149,6 +330,8 @@ class MatchAnalyzer:
             "btts": btts,
             "lambda_home": lambda_home,
             "lambda_away": lambda_away,
+            "rho": rho,
+            "dixon_coles": abs(rho) > 1e-12,
         }
 
     @staticmethod
