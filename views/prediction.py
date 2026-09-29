@@ -35,38 +35,51 @@ from formatkit import (
     _num,
     _row_line,
     _row_summary,
+    align_cjk,
     bar,
     esc,
+    hbar,
     league_label,
+    pad_cjk,
     team_name,
     web_entry_text,
 )
+
+# 三种结果对应的图标。键是视图内部使用的中文标签，与 OUTCOME_LABEL 的值一致。
+# 放在模块级而不是类里：views/ 下多个模块都要用，且它是纯常量不会变。
+OUTCOME_ICON = {"主胜": "🏠", "平局": "🤝", "客胜": "✈️"}
 
 class PredictionView:
         @staticmethod
         def format_prediction(p, tz) -> str:
             a = p.analysis
             probs = (("主胜", a["win_prob"]), ("平局", a["draw_prob"]), ("客胜", a["loss_prob"]))
-            top = max(prob for _, prob in probs)
     
             title = f"🏆 <b>{esc(p.league)}</b>" + (f" · {esc(p.round_label)}" if p.round_label else "")
             when = f"🕐 <code>{CommonView.fmt_time(p.kickoff, tz)}</code> ({CommonView.tz_label(tz, p.kickoff)})"
             if p.venue:
                 when += f" · 🏟 {esc(p.venue)}"
     
+            top_label, top_prob = max(probs, key=lambda kv: kv[1])
+
             lines = [
                 title,
+                when,
                 SEP,
                 f"🏠 <b>{esc(team_name(p.home))}</b>",
-                "      🆚",
+                "　　　⚔️",
                 f"✈️ <b>{esc(team_name(p.away))}</b>",
-                when,
                 SEP,
                 "📈 <b>胜平负概率</b>",
             ]
             for label, prob in probs:
-                pct = f"<b>{prob:.1%}</b>" if prob == top else f"{prob:.1%}"
-                lines.append(f"{label} <code>{bar(prob)}</code> {pct}")
+                # 百分比放等宽块内并用 >3 补位，避免「9%」与「100%」错开。
+                # 条形仍用 bar()（▰▱）：/predict 与每日推送卡片刻意区分字形，
+                # 卡片用 hbar() 的实心方块更醒目，这里是常规查询用圆角条。
+                mark = " 👈" if label == top_label else ""
+                lines.append(
+                    f"{OUTCOME_ICON[label]} {label}　<code>{bar(prob)} {prob:>3.0%}</code>{mark}"
+                )
             lines += [
                 SEP,
                 f"⚽ 预期进球 <code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code> · 预期比分 <code>{a['best_score']}</code>",
@@ -187,40 +200,52 @@ class PredictionView:
             else:
                 quality = "GOOD"
     
+            # 概率行：图标 + 两字标签 + 等宽条与百分比。
+            # 百分比放进 <code> 而不是用 <b> 包在外面——正文是比例字体，
+            # 「9%」和「100%」宽度不同会错开；等宽块里用 >3 补位才真正对齐。
+            # 最高概率那行用 👈 标出，比加粗更醒目（加粗在等宽块里不生效）。
+            prob_lines = []
+            for label, prob in probs:
+                mark = " 👈" if prob == top_prob else ""
+                prob_lines.append(
+                    f"{OUTCOME_ICON[label]} {label}　<code>{hbar(prob)} {prob:>3.0%}</code>{mark}"
+                )
+
             lines = [
                 "<b>⚽ FOOTBALL INSIGHT</b>",
-                f"<code>{esc(p.league)} · {CommonView.fmt_time(p.kickoff, tz, '%Y-%m-%d %H:%M')}</code>",
-                "",
-                f"<b>{home}</b>  <code>VS</code>  <b>{away}</b>",
-                "",
+                f"🏆 <code>{esc(p.league)} · {CommonView.fmt_time(p.kickoff, tz, '%m-%d %H:%M')}</code>",
+                SEP,
+                f"🏠 <b>{home}</b>",
+                "　　　⚔️",
+                f"✈️ <b>{away}</b>",
                 SEP,
                 "<b>🔮 比赛预测</b>",
                 "",
-            ]
-            for label, prob in probs:
-                lines.append(f"{label}　<b>{prob:.0%}</b>  {cls._hbar(prob)}")
-            lines += [
+                *prob_lines,
                 "",
-                f"预测结果：<b>{verdict}</b>",
-                f"预计比分：<b>{esc(a['best_score'])}</b>",
-                f"信心等级：<b>{level['emoji']} {level['name']}</b>",
+                f"🎯 预测结果　<b>{verdict}</b>",
+                f"⚽ 预计比分　<b>{esc(a['best_score'])}</b>",
+                f"💎 信心等级　<b>{level['emoji']} {level['name']}</b>",
             ]
-    
+
             # 核心数据：详细指标集中在此，正文不再堆砌
-            core = [SEP, "", "<b>📊 核心数据</b>", ""]
-            core.append(f"预期进球：<b>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</b>")
+            core = [SEP, "<b>📊 核心数据</b>", ""]
+            core.append(
+                f"⚽ 预期进球　<code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>"
+            )
             if p.has_team_data:
                 core.append(
-                    f"攻防强度：<b>主 {p.home_strength.attack_home:.2f} / 客 {p.away_strength.attack_away:.2f}</b>"
+                    f"💪 攻防强度　<code>主 {p.home_strength.attack_home:.2f}"
+                    f" / 客 {p.away_strength.attack_away:.2f}</code>"
                 )
-            core.append(f"数据完整性：<b>{esc(p.data_completeness)}</b>")
+            core.append(f"🧩 数据完整性　<b>{esc(p.data_completeness)}</b>")
             lines += core
     
             # 模型分析：结论式短句，不做长篇说明
             notes = cls._model_notes(p, home, away, verdict)
             if notes:
-                lines += [SEP, "", "<b>📝 模型分析</b>", ""]
-                lines += [f"• {n}" for n in notes]
+                lines += [SEP, "<b>📝 模型分析</b>", ""]
+                lines += [f"▸ {n}" for n in notes]
     
             # 脚注：来源/赛季/模型版本/更新时间一律小字，不占正文篇幅
             lines += [
@@ -269,11 +294,26 @@ class PredictionView:
                 return f"{title}\n{CommonView.matchup(p, tz)}\n{SEP}\n暂无赔率数据（该场比赛可能尚未开盘）。"
             a = p.analysis
             probs = {"home": a["win_prob"], "draw": a["draw_prob"], "away": a["loss_prob"]}
-            table = [f"{'博彩公司':<12}{'主':>6}{'平':>6}{'客':>6}"]
+            # 列宽按显示宽度算，且表头与数据行必须同宽：原来表头用 12、
+            # 「中位数」行用 10，两列直接错开两格。
+            name_w, num_w = 12, 6
+            header = (
+                pad_cjk("博彩公司", name_w)
+                + align_cjk("主", num_w, "right")
+                + align_cjk("平", num_w, "right")
+                + align_cjk("客", num_w, "right")
+            )
+            table = [header]
             for row in sorted(p.bookmakers, key=lambda r: str(r["bookmaker"]))[:6]:
-                table.append(f"{str(row['bookmaker'])[:12]:<12}{row['home']:>6.2f}{row['draw']:>6.2f}{row['away']:>6.2f}")
+                table.append(
+                    pad_cjk(row["bookmaker"], name_w)
+                    + f"{row['home']:>{num_w}.2f}{row['draw']:>{num_w}.2f}{row['away']:>{num_w}.2f}"
+                )
             o = p.odds
-            table.append(f"{'中位数':<10}{o['home']:>6.2f}{o['draw']:>6.2f}{o['away']:>6.2f}")
+            table.append(
+                pad_cjk("中位数", name_w)
+                + f"{o['home']:>{num_w}.2f}{o['draw']:>{num_w}.2f}{o['away']:>{num_w}.2f}"
+            )
             lines = [
                 title,
                 CommonView.matchup(p, tz),
