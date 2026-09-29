@@ -26,8 +26,11 @@ RUN apt-get update \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+COPY requirements.txt requirements-web.txt ./
+# 两个都装：web 依赖只是 fastapi + uvicorn，体积很小。
+# 分开装本来是为了让机器人镜像保持精简，但在 Railway 上拆成两个服务
+# 会导致看板读不到数据（Volume 不能跨服务共享），所以只能合到一个镜像里。
+RUN pip install -r requirements-web.txt
 
 # 让非 root 用户也能读写 matplotlib 缓存
 RUN mkdir -p /tmp/mplconfig && chmod 777 /tmp/mplconfig
@@ -37,11 +40,14 @@ RUN mkdir -p /data && chmod 777 /data
 # 以非 root 用户运行
 RUN useradd --create-home --uid 10001 bot
 COPY --chown=bot:bot . .
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY docker-entrypoint.sh start.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/start.sh
 
 # 挂载卷 /data 的属主通常是 root，启动脚本会修正后再降权启动
 ENTRYPOINT ["docker-entrypoint.sh"]
 
-# 这是一个长轮询的 worker，不监听端口，也不需要 Railway 的 cron 设置
-CMD ["python", "main.py"]
+# 由 start.sh 同时拉起看板与机器人：
+#   - uvicorn api:app 监听 $PORT（Railway 生成域名后即可访问看板）
+#   - main.py 长轮询跑在前台，它退出则容器退出并被自动重启
+# 机器人本身不需要 Cron Schedule，定时推送由程序内部调度。
+CMD ["start.sh"]
