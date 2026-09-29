@@ -10,12 +10,19 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# 图表中文显示：slim 镜像不含任何中文字体，不装会渲染成方块
+# 图表中文显示：slim 镜像不含任何中文字体，不装会渲染成方块。
+# build-essential / libfreetype6-dev / libpng-dev：ARM（aarch64）机器上 matplotlib
+# 可能拿不到预编译 wheel 而需要本地编译，缺这几个包会直接构建失败。
+# x86 上它们用不到，但保留可让同一份 Dockerfile 在两种架构下都能构建。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         fonts-noto-cjk \
         fontconfig \
         gosu \
+        build-essential \
+        pkg-config \
+        libfreetype6-dev \
+        libpng-dev \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
