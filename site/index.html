@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Football Prediction Bot</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { max-width: 46rem; margin: 2rem auto; padding: 0 1.25rem;
+         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+         line-height: 1.7; }
+  code { background: rgba(127,127,127,.15); padding: .1em .35em; border-radius: 4px; }
+  pre  { background: rgba(127,127,127,.12); padding: .9rem 1rem; border-radius: 8px; overflow-x: auto; }
+  .warn { border-left: 3px solid #e8a33d; padding-left: .9rem; margin: 1.5rem 0; }
+  footer { margin-top: 3rem; font-size: .9rem; opacity: .65; }
+</style>
+</head>
+<body>
+
+<h1>⚽ Football Prediction Bot</h1>
+
+<p>Telegram 足球量化预测机器人：用<strong>泊松模型</strong>结合 <strong>Elo 评分</strong>估算比赛结果概率，
+对照市场赔率找出「价值偏差」，每天定时推送。</p>
+
+<div class="warn">
+  <strong>⚠️ 不构成投注建议。</strong>
+  市场赔率通常比简单模型更准；模型与市场差距大时，先怀疑模型。
+</div>
+
+<h2>快速开始</h2>
+
+<pre><code>git clone https://github.com/modouxin-dev/football-prediction-bot.git
+cd football-prediction-bot
+pip install -r requirements-dev.txt
+cp .env.example .env   # 填入 TELEGRAM_TOKEN 等变量
+python main.py
+pytest                 # 不联网，使用仿真 API 响应</code></pre>
+
+<h2>部署</h2>
+
+<p>推荐部署到 Railway：服务连接本仓库 <code>main</code> 分支，构建方式为 Dockerfile。</p>
+
+<p><strong>务必挂载持久卷到 <code>/data</code></strong>——预测记录、赛果回写、Elo 评分都存
+在 SQLite 里，未挂载时容器重启即清零。部署后发 <code>/status</code> 可确认持久化是否生效。</p>
+
+<p>详见仓库中的 <code>DEPLOY.md</code>。</p>
+
+<h2>免责声明</h2>
+
+<p>本项目仅用于概率模型的学习与研究，输出不构成任何投资、投注或决策建议。</p>
+
+<footer>
+  源码：<a href="https://github.com/modouxin-dev/football-prediction-bot">modouxin-dev/football-prediction-bot</a>
+</footer>
+
+</body>
+</html>
