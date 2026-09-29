@@ -235,7 +235,7 @@ def test_deep_report_includes_injury_note():
 # ---- 联赛排名 ------------------------------------------------------------------
 def test_standings_page_formats_rows():
     rows = standings_with_points()
-    text = BotUI.format_standings_page(rows, SETTINGS.timezone, league_label="英超 · 2026")
+    text = BotUI.format_standings_page(rows, SETTINGS.timezone, league_name="英超 · 2026")
     assert "联赛排名" in text
     assert "T1" in text and "18分" in text
     assert "6-0-1" in text
@@ -367,7 +367,7 @@ def test_standings_highlights_top_three():
          "all": {"win": 10 - i, "draw": 0, "lose": i}}
         for i in range(1, 6)
     ]
-    text = BotUI.format_standings_page(rows, SETTINGS.timezone, league_label="英超 · 2026")
+    text = BotUI.format_standings_page(rows, SETTINGS.timezone, league_name="英超 · 2026")
     assert "🥇" in text and "🥈" in text and "🥉" in text
     assert "28分" in text  # 榜首积分
     assert "└" in text  # 前三副行战绩
