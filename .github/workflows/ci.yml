@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 与 Pages 部署（group: "pages"）分开，避免互相抢占导致其中一个被取消。
+# 同一分支的新推送会取消上一次未跑完的测试，省 CI 时长。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # 3.10 是本机开发常用版本，3.12 与 Dockerfile 保持一致；
+    # fail-fast: false 让两个版本都跑完，任一失败都能看到。
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        # pytest.ini 已配置 pythonpath = . 与 testpaths = tests
+        # 测试不联网，使用 tests/sample_data.py 的仿真响应
+        run: python -m pytest -q
+
+      - name: Smoke check (config + import)
+        # 冒烟：配置加载与模块导入必须成功，否则部署后必崩。
+        # 用假 token，只验证启动前置路径，不连接 Telegram。
+        env:
+          TELEGRAM_TOKEN: "1:fake-token-for-ci"
+          RAPID_API_KEY: "fake-key-for-ci"
+          DATA_DIR: "/tmp/ci-smoke"
+        run: |
+          python - <<'PY'
+          import main, paths, config
+          s = config.load_settings()
+          assert s.db_path, "db_path 不能为空"
+          print("smoke ok: db_path =", s.db_path)
+          PY
