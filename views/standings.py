@@ -44,7 +44,6 @@ from formatkit import (
 
 class StandingsView:
         @staticmethod
-        @staticmethod
         def format_standings_page(rows: list[dict], tz, limit: int = 20, league_name: str = "", updated=None) -> str:
             """联赛排名：前 3 名做成数据卡片突出重点，其余用紧凑单行，避免 20 行糊成一片。
 
@@ -54,7 +53,7 @@ class StandingsView:
             """
             lines = ["🏆 <b>联赛排名</b>"]
             if league_name:
-                lines.append(f"<code>{esc(league_name)}</code>")
+                lines.append(f"🏅 <code>{esc(league_name)}</code>")
             if updated is not None:
                 lines.append(
                     f"🕑 <code>UPDATED: {CommonView.fmt_time(updated, tz, '%m-%d %H:%M')}</code>"
@@ -80,11 +79,18 @@ class StandingsView:
                     if summary and summary["avg_against"] is not None else "-"
                 )
                 if i <= 3:
-                    # 前三：两行卡片，积分大字突出
+                    # 前三：两行卡片。战绩保留 6-0-1 紧凑式（这是对外承诺的格式，
+                    # 有测试断言），场均进失球作为补充信息追加在后面。
                     lines.append(f"{medals[i]} <b>{name}</b>　<b>{points}</b>")
-                    lines.append(f"└ <code>{record}</code> · 进 {avg_for} / 失 {avg_against}")
+                    # summary 可能为 None（积分榜行缺字段），此时只显示占位符，
+                    # 不能去下标取值——那会让整条 /standings 崩掉
+                    detail = f"{record} · 场均 {avg_for} / {avg_against}" if summary else "战绩数据缺失"
+                    lines.append(f"└ <code>{esc(detail)}</code>")
                 else:
-                    # 其余：紧凑单行，靠点线引导视线，避免堆成表格
-                    lines.append(f"<code>{rank:>2}</code> {name} <b>{points}</b>　<code>{record}</code>")
+                    # 其余：紧凑单行。序号用等宽 2 位补位（个位数与两位数才不会错开）；
+                    # 队名长度不一，不对它做列对齐——比例字体下补空格无效。
+                    lines.append(
+                        f"<code>{str(rank):>2}</code> {name}　<code>{points} · {record}</code>"
+                    )
             lines += [SEP, DISCLAIMER]
             return "\n".join(lines)
