@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import html
+import unicodedata
 from datetime import datetime
 
 from analyzer import OUTCOMES, calculate_prediction_level, overround
@@ -61,6 +62,73 @@ def bar(prob: float, width: int = 10) -> str:
     """概率条：▰▰▰▰▱▱▱▱▱▱"""
     filled = max(0, min(width, round(prob * width)))
     return "▰" * filled + "▱" * (width - filled)
+
+
+def hbar(prob: float, width: int = 10) -> str:
+    """实心概率条：█████░░░░░
+
+    与 bar() 的区别只是字形（方块 vs 圆角方块），用于预测主卡等需要更重视觉
+    分量的位置。放在 formatkit 而不是某个 View 上，是因为 prediction / analysis
+    都要用——挂在类上会让跨模块调用拿到不存在的方法（历史上就出过这个 bug）。
+    """
+    filled = max(0, min(width, round(prob * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def display_width(text: str) -> int:
+    """显示宽度：CJK/全角按 2 列，其余按 1 列。
+
+    Telegram 的 <code>/<pre> 是等宽渲染，中文占两列。按字符数补空格会让
+    中英混排的表格错开，所以对齐必须按显示宽度算。
+    """
+    width = 0
+    for ch in text:
+        width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def align_cjk(text: str, width: int, align: str = "left") -> str:
+    """按显示宽度对齐补空格（left/right），超出则截断并以 … 收尾。
+
+    只用于 <code>/<pre> 内部——Telegram 只有等宽块里的空格才真正对齐，
+    正文是比例字体，补多少空格都对不齐。
+    """
+    text = str(text)
+    if display_width(text) >= width:
+        # 逐字累加，留最后一列给省略号
+        out = ""
+        for ch in text:
+            if display_width(out) + display_width(ch) > width - 1:
+                break
+            out += ch
+        # 省略号宽度只有 1，若刚好截在双宽字符后，总宽会差 1 列；
+        # 补空格补齐，保证返回值严格等于目标列宽（否则表格仍会错开）
+        out = (out + "…") if align == "left" else ("…" + out)
+        gap = " " * (width - display_width(out))
+        return out + gap if align == "left" else gap + out
+    gap = " " * (width - display_width(text))
+    return text + gap if align == "left" else gap + text
+
+
+def pad_cjk(text: str, width: int) -> str:
+    """align_cjk 的左对齐别名，语义更直白，读代码时一眼看出在补列宽。"""
+    return align_cjk(text, width, "left")
+
+
+# 比赛状态 → 图标。未收录的状态返回 ⚪，而不是抛异常或留空。
+STATUS_EMOJI = {
+    "NS": "🕐", "TBD": "🕐",
+    "1H": "🔴", "2H": "🔴", "ET": "🔴", "BT": "⏸",
+    "HT": "⏸", "P": "🎯", "PEN": "🎯", "LIVE": "🔴",
+    "FT": "✅", "AET": "✅",
+    "PST": "⏸", "CANC": "❌", "ABD": "❌",
+    "SUSP": "⚠️", "INT": "⚠️", "WO": "❌",
+}
+
+
+def status_emoji(short: str) -> str:
+    """比赛状态短码 → 图标；未收录返回 ⚪。"""
+    return STATUS_EMOJI.get(str(short or "").upper(), "⚪")
 
 def split_html_blocks(text: str, limit: int = 3500) -> list[str]:
     """按行拆分超长 HTML 文本，避免超过 Telegram 单条 4096 字符限制。
