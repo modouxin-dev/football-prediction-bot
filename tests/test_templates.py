@@ -170,8 +170,11 @@ def test_bot_commands_registered_and_bilingual():
     """每个指令都要有中英双语说明，且都有对应的 CommandHandler。"""
     from main import BOT_COMMANDS
 
-    source = open("main.py", encoding="utf-8").read()
+    # 注册改由 commands 包的 dispatcher 数据驱动，因此查运行时注册表，
+    # 不再匹配源码字符串——后者在重构后会误报，前者才是真正有效的校验。
+    from commands import build_dispatcher
+
+    dispatcher = build_dispatcher()
     for cmd, desc in BOT_COMMANDS:
-        assert "/" in desc or True
         assert " / " in desc, f"{cmd} 说明缺少中英双语分隔"
-        assert f'CommandHandler("{cmd}"' in source, f"{cmd} 未注册处理函数"
+        assert cmd in dispatcher, f"{cmd} 未注册处理函数"
