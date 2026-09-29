@@ -17,12 +17,39 @@ import json
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import random
+import time
 
 log = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = None  # 由 paths.DB_PATH 统一决定（默认 /data/football.db）
+
+# 写锁重试：云环境（Railway Volume）下 SQLite 并发写冲突远高于本地
+DEFAULT_WRITE_RETRIES = 3        # 取锁失败后的重试次数
+BACKOFF_BASE_SECONDS = 0.02      # 退避基数：20ms → 40ms → 80ms
+BACKOFF_MAX_SECONDS = 0.5        # 单次退避上限，避免长时间阻塞机器人
+CONNECTION_BUSY_TIMEOUT_MS = 15000   # 普通查询的等待上限（与既有行为一致）
+TRANSACTION_BUSY_TIMEOUT_MS = 100    # 原子事务内的等待上限：快速失败 + 退避接管
+
+
+def _restore_busy_timeout(conn: sqlite3.Connection) -> None:
+    """事务结束后把 busy_timeout 还原为连接建立时的值。"""
+    try:
+        conn.execute(f"PRAGMA busy_timeout={CONNECTION_BUSY_TIMEOUT_MS}")
+    except Exception:
+        pass
+
+
+def _sleep_backoff(attempt: int, reason: str = "") -> None:
+    """指数退避 + 随机抖动。抖动用于打散多个任务的同时重试（惊群）。"""
+    delay = min(BACKOFF_BASE_SECONDS * (2 ** attempt), BACKOFF_MAX_SECONDS)
+    delay *= 0.5 + random.random() * 0.5  # 50%~100% 抖动
+    log.warning("SQLite 写锁冲突（%s），第 %d 次退避 %.0fms 后重试",
+                reason or "locked", attempt + 1, delay * 1000)
+    time.sleep(delay)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS matches (
@@ -81,6 +108,43 @@ CREATE TABLE IF NOT EXISTS predictions (
     settled_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_predictions_kickoff ON predictions(kickoff);
+
+-- Elo 评分：按联赛隔离，team_id 为主键的一部分（同一队在不同联赛各有一套分）
+CREATE TABLE IF NOT EXISTS elo_ratings (
+    team_id      TEXT NOT NULL,
+    competition  TEXT NOT NULL,
+    rating       REAL NOT NULL,
+    matches      INTEGER NOT NULL DEFAULT 0,
+    last_match   TEXT,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (competition, team_id)
+);
+
+-- Elo 幂等标记：已计入评分的比赛不再重复计算
+CREATE TABLE IF NOT EXISTS elo_processed (
+    fixture_id   TEXT PRIMARY KEY,
+    competition  TEXT,
+    season       INTEGER,
+    home_team_id TEXT,
+    away_team_id TEXT,
+    home_score   INTEGER,
+    away_score   INTEGER,
+    processed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_elo_processed_comp ON elo_processed(competition, season);
+
+-- Elo 变更留痕：便于排查「评分是否被重复计算」
+CREATE TABLE IF NOT EXISTS elo_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    fixture_id   TEXT NOT NULL,
+    team_id      TEXT NOT NULL,
+    competition  TEXT NOT NULL,
+    before       REAL NOT NULL,
+    after        REAL NOT NULL,
+    delta        REAL NOT NULL,
+    processed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_elo_log_fixture ON elo_log(fixture_id);
 """
 
 _local = threading.local()
@@ -206,6 +270,181 @@ class PredictionRepository:
         except Exception as exc:
             log.warning("回写赛果失败（fixture=%s）：%s", fixture_id, exc)
             return False
+
+    # ---- 原子事务 -----------------------------------------------------------
+    @contextmanager
+    def atomic(self, *, retries: int = DEFAULT_WRITE_RETRIES):
+        """原子写事务（BEGIN IMMEDIATE），供批量且必须一致的写入使用。
+
+        为什么需要：Python sqlite3 默认 isolation_level='' 会隐式开启事务，
+        直接 execute("BEGIN IMMEDIATE") 会报
+        "cannot start a transaction within a transaction"。
+        故此处临时切到 isolation_level=None（autocommit）手动控制事务边界，
+        用完再还原，不影响本文件其它方法的既有行为。
+
+        BEGIN IMMEDIATE 立刻取写锁，避免多个定时任务并发时
+        先读后写造成的 `database is locked` 死锁。
+
+        **悲观并发 + 指数退避**：云环境（Railway 挂载卷）下 SQLite 写锁冲突
+        比本地频繁得多。取锁失败时按 20ms → 40ms → 80ms… 退避重试，
+        并叠加少量随机抖动，避免多个任务同时重试造成「惊群」。
+        全部重试失败后才抛出，调用方捕获后降级（不影响机器人主流程）。
+        """
+        conn = self._connect()
+        previous = conn.isolation_level
+        conn.isolation_level = None
+        # 连接级 busy_timeout 默认 15s：单次等待太久，且会与退避叠加成
+        # 「(retries+1) × 15s」的长阻塞（实测 45s）。事务期间降到 100ms，
+        # 让锁冲突快速暴露，交由下面的指数退避接管，总耗时可控在 1s 内。
+        try:
+            conn.execute(f"PRAGMA busy_timeout={TRANSACTION_BUSY_TIMEOUT_MS}")
+        except Exception:
+            pass
+        last_exc: Exception | None = None
+        for attempt in range(max(0, int(retries)) + 1):
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                break
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    conn.isolation_level = previous
+                    _restore_busy_timeout(conn)
+                    raise
+                _sleep_backoff(attempt, str(exc))
+        else:  # pragma: no cover - retries<0 的极端情况
+            conn.isolation_level = previous
+            _restore_busy_timeout(conn)
+            raise last_exc or sqlite3.OperationalError("无法开启事务")
+
+        try:
+            try:
+                yield conn
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+        except sqlite3.OperationalError as exc:
+            # 提交阶段仍可能被锁：再退避重试一轮整体事务
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            if "locked" not in str(exc).lower():
+                raise
+            if retries > 0:
+                _sleep_backoff(0, str(exc))
+                with self.atomic(retries=retries - 1) as c2:
+                    yield c2
+                return
+            raise
+        finally:
+            conn.isolation_level = previous
+            _restore_busy_timeout(conn)
+
+    # ---- Elo 评分持久化 -----------------------------------------------------
+    def elo_ratings(self, competition: str) -> dict[str, float]:
+        """读取某联赛全部球队的当前 Elo 分，返回 {team_id: rating}。"""
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT team_id, rating FROM elo_ratings WHERE competition=?", (competition,)
+            ).fetchall()
+            return {r["team_id"]: float(r["rating"]) for r in rows}
+        except Exception as exc:
+            log.warning("读取 Elo 评分失败（competition=%s）：%s", competition, exc)
+            return {}
+
+    def save_elo_ratings(self, competition: str, ratings: dict[str, float],
+                         *, matches_played: dict[str, int] | None = None,
+                         last_match: dict[str, str] | None = None) -> None:
+        """整批写回 Elo 分。同队重复写入为更新，不产生重复行。"""
+        if not ratings:
+            return
+        try:
+            conn = self._connect()
+            now = _now_iso()
+            for team_id, rating in ratings.items():
+                conn.execute(
+                    """INSERT INTO elo_ratings
+                       (team_id, competition, rating, matches, last_match, updated_at)
+                       VALUES (?,?,?,?,?,?)
+                       ON CONFLICT(competition, team_id) DO UPDATE SET
+                         rating=excluded.rating,
+                         matches=excluded.matches,
+                         last_match=excluded.last_match,
+                         updated_at=excluded.updated_at""",
+                    (
+                        str(team_id), competition, float(rating),
+                        int((matches_played or {}).get(str(team_id), 0)),
+                        (last_match or {}).get(str(team_id)),
+                        now,
+                    ),
+                )
+            conn.commit()
+        except Exception as exc:
+            log.warning("写入 Elo 评分失败（competition=%s）：%s", competition, exc)
+
+    def elo_is_processed(self, fixture_id) -> bool:
+        """该场比赛是否已计入 Elo（幂等检查，防止重复计算）。"""
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT 1 FROM elo_processed WHERE fixture_id=?", (str(fixture_id),)
+            ).fetchone()
+            return row is not None
+        except Exception as exc:
+            log.warning("查询 Elo 处理标记失败（fixture=%s）：%s", fixture_id, exc)
+            return False
+
+    def mark_elo_processed(self, fixture_id, *, competition: str = "", season: int | None = None,
+                           home_team_id: str = "", away_team_id: str = "",
+                           home_score: int | None = None, away_score: int | None = None) -> None:
+        """标记比赛已计入 Elo，并记录比分用于排查。"""
+        try:
+            conn = self._connect()
+            conn.execute(
+                """INSERT INTO elo_processed
+                   (fixture_id, competition, season, home_team_id, away_team_id,
+                    home_score, away_score, processed_at)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(fixture_id) DO UPDATE SET
+                     home_score=excluded.home_score,
+                     away_score=excluded.away_score,
+                     processed_at=excluded.processed_at""",
+                (str(fixture_id), competition, season, str(home_team_id), str(away_team_id),
+                 home_score, away_score, _now_iso()),
+            )
+            conn.commit()
+        except Exception as exc:
+            log.warning("写入 Elo 处理标记失败（fixture=%s）：%s", fixture_id, exc)
+
+    def log_elo_change(self, fixture_id, competition: str, team_id,
+                       before: float, after: float) -> None:
+        """记录单场比赛引起的 Elo 变化，便于核验是否被重复计算。"""
+        try:
+            conn = self._connect()
+            conn.execute(
+                """INSERT INTO elo_log
+                   (fixture_id, team_id, competition, before, after, delta, processed_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (str(fixture_id), str(team_id), competition,
+                 float(before), float(after), float(after) - float(before), _now_iso()),
+            )
+            conn.commit()
+        except Exception as exc:
+            log.warning("写入 Elo 变更日志失败（fixture=%s）：%s", fixture_id, exc)
+
+    def elo_history(self, fixture_id) -> list[sqlite3.Row]:
+        """某场比赛产生的 Elo 变更记录；正常情况下每个队最多一条。"""
+        try:
+            conn = self._connect()
+            return list(conn.execute(
+                "SELECT * FROM elo_log WHERE fixture_id=? ORDER BY id", (str(fixture_id),)
+            ))
+        except Exception as exc:
+            log.warning("读取 Elo 变更记录失败（fixture=%s）：%s", fixture_id, exc)
+            return []
 
     def pending(self, limit: int = 200) -> list[sqlite3.Row]:
         """尚未回写赛果的已开赛比赛，供定时任务同步结果。"""
