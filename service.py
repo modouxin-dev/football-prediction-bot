@@ -244,6 +244,15 @@ class PredictionService:
         from sync import MatchSync
 
         self.sync: MatchSync = MatchSync(self, self.repo)
+        # Elo 引擎：赛果回写后更新评分，预测时用评分修正 λ。
+        # 必须在 self.sync 之后初始化——联赛标识取自 sync.competition。
+        from elo import EloEngine
+
+        self.elo: EloEngine = EloEngine(
+            repo=self.repo,
+            competition=getattr(self.sync, "competition", "") or str(settings.league_id),
+        )
+        self.elo_enabled: bool = True  # 排障时可关掉，退回纯泊松
         # 本地优先开关：默认开启；关掉则退回每次回源（排障用）
         self.local_first: bool = True
 
@@ -763,9 +772,46 @@ class PredictionService:
                 continue
             if self.repo.settle(row["fixture_id"], int(home), int(away)):
                 done += 1
+                # Elo 闭环：赛果落盘后立刻更新评分。
+                # 幂等由 elo_processed 保证——重启后重复触发不会让评分虚高。
+                self._sync_elo(fx, int(home), int(away))
         if done:
             log.info("已回写 %d 场赛果", done)
         return done
+
+    def _sync_elo(self, fixture: dict, home_score: int, away_score: int) -> None:
+        """把一场已结束比赛计入 Elo。任何异常都不影响结算主流程。"""
+        if not getattr(self, "elo_enabled", False):
+            return
+        try:
+            teams = (fixture.get("teams") or {})
+            home_id = (teams.get("home") or {}).get("id")
+            away_id = (teams.get("away") or {}).get("id")
+            fx_id = (fixture.get("fixture") or {}).get("id")
+            if home_id is None or away_id is None or fx_id is None:
+                return
+            self.elo.apply_match(fx_id, home_id, away_id, home_score, away_score,
+                                 season=self.settings.season)
+        except Exception as exc:
+            # Elo 出错绝不能拖垮赛果回写
+            log.warning("Elo 更新失败（不影响结算）：%s", exc)
+
+    def elo_factor_for(self, home_team_id, away_team_id) -> float | None:
+        """预测时用的 Elo 融合系数；评分为空或未启用时返回 None（退回纯泊松）。"""
+        if not getattr(self, "elo_enabled", False):
+            return None
+        try:
+            ratings = self.repo.elo_ratings(self.elo.competition)
+            if not ratings:
+                return None  # 冷启动尚无数据，不硬套
+            from elo import elo_multiplier
+
+            home = float(ratings.get(str(home_team_id), self.elo.base_rating))
+            away = float(ratings.get(str(away_team_id), self.elo.base_rating))
+            return elo_multiplier(home, away)
+        except Exception as exc:
+            log.warning("读取 Elo 系数失败，退回纯泊松：%s", exc)
+            return None
 
     def stats(self) -> dict:
         """命中率统计（含各信心等级）。"""
