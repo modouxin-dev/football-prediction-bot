@@ -37,6 +37,7 @@ from formatkit import (
     _row_summary,
     bar,
     esc,
+    hbar,
     league_label,
     team_name,
     web_entry_text,
@@ -105,9 +106,13 @@ class AnalysisView:
                 "🧭 <b>分析总结</b>",
             ]
             pros, cons, unknowns = _factors(report)
-            lines.append("✅ 有利：" + ("；".join(pros) if pros else NO_DATA))
-            lines.append("⚠️ 不利：" + ("；".join(cons) if cons else NO_DATA))
-            lines.append("❓ 不确定：" + "；".join(unknowns))
+            # 逐条分行：手机上「；」拼接的长句会被折行成一坨，看不出有几条
+            lines.append("✅ <b>有利</b>")
+            lines += [f"▸ {esc(x)}" for x in pros] or [f"▸ {NO_DATA}"]
+            lines.append("⚠️ <b>不利</b>")
+            lines += [f"▸ {esc(x)}" for x in cons] or [f"▸ {NO_DATA}"]
+            lines.append("❓ <b>不确定</b>")
+            lines += [f"▸ {esc(x)}" for x in unknowns] or [f"▸ {NO_DATA}"]
             top = max(
                 (("主胜", analysis["win_prob"]), ("平局", analysis["draw_prob"]), ("客胜", analysis["loss_prob"])),
                 key=lambda kv: kv[1],
@@ -131,8 +136,14 @@ class AnalysisView:
                 f"⚙️ 预期进球 λ：<code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>",
                 "🎯 <b>最可能比分 Top 5</b>",
             ]
+            top_score_prob = a["top_scores"][0][1] or 1.0  # 防除零：全 0 概率时不炸
             for score, prob in a["top_scores"]:
-                lines.append(f"<code>{score:<5}</code> <code>{bar(prob / a['top_scores'][0][1], 8)}</code> {prob:.1%}")
+                # 三段都放等宽块：比分左对齐、条形定长、百分比右对齐补位，
+                # 这样「9.8%」和「12.4%」才不会把右侧数字推得一前一后
+                lines.append(
+                    f"<code>{score:<5}</code> <code>{hbar(prob / top_score_prob, 8)}</code>"
+                    f" <code>{prob:>5.1%}</code>"
+                )
             lines += [
                 SEP,
                 f"📊 大 2.5 球 <code>{a['over_2_5']:.1%}</code> · 小 2.5 球 <code>{1 - a['over_2_5']:.1%}</code>",
