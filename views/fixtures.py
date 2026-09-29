@@ -36,7 +36,9 @@ from formatkit import (
     _row_summary,
     bar,
     esc,
+    hbar,
     league_label,
+    status_emoji,
     team_name,
     web_entry_text,
 )
@@ -61,7 +63,7 @@ class FixturesView:
             title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
             lines = [
                 title,
-                f"日期：<code>{esc(day_label)}</code> · 时区：<code>{esc(tz.zone)}</code>",
+                f"📆 <code>{esc(day_label)}</code> · 🌍 <code>{esc(tz.zone)}</code>",
                 SEP,
             ]
             rows: list[list[InlineKeyboardButton]] = []
@@ -69,7 +71,7 @@ class FixturesView:
                 # 空状态要说清三件事：没比赛、查了哪段时间、数据源是否正常。
                 # 绝不能把「窗口内没比赛」说成「数据源无数据」。
                 lines.extend([
-                    "<b>NO FIXTURE IN THIS WINDOW</b>",
+                    "🔭 <b>NO FIXTURE IN THIS WINDOW</b>",
                     "📅 当前时间范围内暂无比赛",
                     SEP,
                 ])
@@ -105,9 +107,15 @@ class FixturesView:
                     status = STATUS_TEXT.get(short, short or "未知")
                     goals = fx.get("goals") or {}
                     gh, ga = goals.get("home"), goals.get("away")
-                    score = f" <b>{esc(gh)}-{esc(ga)}</b>" if gh is not None and ga is not None else ""
-                    lines.append(f"{idx}. <code>{when}</code> {esc(home)} 🆚 {esc(away)}{score}")
-                    lines.append(f"     状态：{esc(status)} · ID <code>{esc(info.get('id'))}</code>")
+                    score = f" <b>{esc(gh)}-{esc(ga)}</b>" if gh is not None and ga is not None else " ⚔️ "
+                    # 序号用等宽 2 位补位：个位数与两位数在比例字体下会错开半格
+                    lines.append(
+                        f"<code>{idx:>2}</code> ⏰ <code>{when}</code>　🏠 {esc(home)}{score}{esc(away)}"
+                    )
+                    lines.append(
+                        f"　　 {status_emoji(short)} <code>{esc(status)}</code>"
+                        f" · <code>#{esc(info.get('id'))}</code>"
+                    )
                     rows.append(
                         [
                             InlineKeyboardButton(f"⚽ 预测 {idx}", callback_data=f"fx:{info.get('id')}"),
