@@ -37,6 +37,7 @@ from formatkit import (
     bar,
     esc,
     fmt_time as _fmt_time,
+    hbar,
     league_label,
     team_name,
     web_entry_text,
@@ -67,8 +68,11 @@ class CommonView:
             )
     
         @staticmethod
-        # 概率条：用方块横向条，不用特殊符号堆叠
-        @staticmethod
         def _hbar(prob: float, width: int = 10) -> str:
-            filled = max(0, min(width, round(prob * width)))
-            return "█" * filled + "░" * (width - filled)
+            """概率条（方块）。
+
+            实现下沉到 formatkit.hbar：原来挂在 CommonView 上，prediction.py
+            却用 cls._hbar 调用（cls 是 PredictionView），取不到该方法会直接
+            AttributeError。共用工具放 formatkit 才能被多个视图安全引用。
+            """
+            return hbar(prob, width)
