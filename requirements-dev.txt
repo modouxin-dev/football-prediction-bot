@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8.0
+# Web 看板为可选功能，但 api.py 的测试需要在 CI 里跑，故开发环境装上
+fastapi>=0.110
+uvicorn>=0.27
