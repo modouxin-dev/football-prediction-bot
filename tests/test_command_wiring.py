@@ -2,12 +2,18 @@
 
 /storage 曾因调用未定义的 _dispatch_cmd_typing 而在运行时抛 NameError，
 本地 pytest 没覆盖到，只有线上日志才暴露。这里用 AST 静态扫描堵住这个口子。
+
+命令已迁移到 commands/ 包（Command Pattern），因此本文件同时扫描
+main.py 与 commands/ 下的全部模块。
 """
 import ast
 import builtins
+import inspect
 from pathlib import Path
 
 import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _module_scope_names(tree: ast.AST) -> set[str]:
@@ -25,90 +31,85 @@ def _module_scope_names(tree: ast.AST) -> set[str]:
                 if isinstance(target, ast.Name):
                     names.add(target.id)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(node.target.id)
+            names.add(target.id)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 names.add(alias.asname or alias.name.split(".")[0])
     return names
 
 
-def test_main_has_no_undefined_module_level_calls():
-    """main.py 里调用的函数必须真实存在（模块级定义或内置函数）。"""
-    src = Path(__file__).resolve().parent.parent / "main.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
-
+def _scan_module(path: Path):
+    src = path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
     defined = _module_scope_names(tree)
     builtin_names = set(dir(builtins))
-
-    undefined = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            name = node.func.id
-            if name not in defined and name not in builtin_names:
-                undefined.add(name)
-
-    assert not undefined, f"main.py 调用了未定义的名字：{sorted(undefined)}"
+    undefined = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id not in defined and node.func.id not in builtin_names
+    }
+    return undefined
 
 
-def test_command_handlers_point_to_existing_callbacks():
-    """注册的每个命令回调都必须是 main 模块里真实存在的协程函数。"""
-    import inspect
-
-    import main
-
-    src = Path(main.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-
-    registered = []
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "CommandHandler"
-            and node.args
-            and isinstance(node.args[1], ast.Name)
-        ):
-            registered.append(node.args[1].id)
-
-    assert registered, "没有解析到任何 CommandHandler 注册"
-
-    missing = []
-    for name in registered:
-        fn = getattr(main, name, None)
-        if fn is None or not inspect.iscoroutinefunction(fn):
-            missing.append(name)
-
-    assert not missing, f"命令回调缺失或不是协程：{missing}"
+@pytest.mark.parametrize("rel", [
+    "main.py", "support.py", "scheduler.py",
+    "commands/__init__.py", "commands/adapters.py",
+    "commands/basic.py", "commands/admin.py", "commands/matches.py",
+])
+def test_no_undefined_module_level_calls(rel):
+    """每个模块里调用的函数名必须真实存在（模块定义或内置函数）。"""
+    undefined = _scan_module(ROOT / rel)
+    assert not undefined, f"{rel} 调用了未定义的名字：{sorted(undefined)}"
 
 
-def test_date_command_registered_and_callable():
-    """/date 指定日期查询必须注册，且回调是真实协程。
+def test_registered_commands_point_to_real_coroutines():
+    """dispatcher 里每条指令的回调都必须是真实协程函数。"""
+    from commands import build_dispatcher
 
-    规范要求支持「指定日期」查询，之前只有今日/未来7天/下一场，缺这一档。
+    dispatcher = build_dispatcher()
+    assert len(dispatcher) >= 15, f"指令数量异常：{len(dispatcher)}"
+    missing = [
+        s.name for s in dispatcher.specs
+        if not inspect.iscoroutinefunction(s.handler)
+    ]
+    assert not missing, f"指令回调缺失或不是协程：{missing}"
+
+
+def test_every_bot_command_is_registered():
+    """BOT_COMMANDS 里列出的每条指令都必须在 dispatcher 中注册。
+
+    迁移前该校验靠源码字符串匹配（CommandHandler("x"...）；
+    迁移后注册改为数据驱动，直接查运行时注册表更严格。
     """
-    import inspect
+    from commands import build_dispatcher
+    from main import BOT_COMMANDS
 
-    import main
+    dispatcher = build_dispatcher()
+    missing = [cmd for cmd, _ in BOT_COMMANDS if cmd not in dispatcher]
+    assert not missing, f"以下指令未注册：{missing}"
 
-    assert hasattr(main, "date_cmd"), "缺少 date_cmd"
-    assert inspect.iscoroutinefunction(main.date_cmd), "date_cmd 必须是协程"
 
-    src = Path("main.py").read_text(encoding="utf-8")
-    assert 'CommandHandler("date", date_cmd)' in src, "/date 未注册到 Application"
+def test_admin_commands_are_flagged():
+    """管理员指令必须打上 admin_only 标记，否则权限会被绕过。"""
+    from commands import build_dispatcher
+
+    admin_cmds = {s.name for s in build_dispatcher().specs if s.admin_only}
+    assert {"test", "status", "stats", "storage"} <= admin_cmds, admin_cmds
 
 
 def test_date_command_handles_bad_and_missing_args():
     """/date 缺参数或格式错误时要给用法提示，不能崩。"""
     import asyncio
-    import inspect
 
-    import main
+    from commands.matches import date_cmd
 
-    assert inspect.iscoroutinefunction(main.date_cmd)
+    assert inspect.iscoroutinefunction(date_cmd)
 
     class Msg:
         def __init__(self):
             self.sent = []
+
         async def reply_text(self, text, **kw):
             self.sent.append(text)
             return None
@@ -127,5 +128,5 @@ def test_date_command_handles_bad_and_missing_args():
 
     for args in ([], ["2026/10/10"], ["not-a-date"]):
         upd, ctx = Upd(), Ctx(args)
-        asyncio.run(main.date_cmd(upd, ctx))
+        asyncio.run(date_cmd(upd, ctx))
         assert upd.effective_message.sent, f"args={args} 时应给出提示"
