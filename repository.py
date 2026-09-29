@@ -599,6 +599,28 @@ class PredictionRepository:
         self.log_sync(source, competition, "", "", http_status, len(matches), saved, message)
         return saved
 
+    def count_finished_matches(self, competition: str | None = None) -> int:
+        """已完赛（有比分）的场次。
+
+        这是强度榜的有效样本量：未开赛的比赛没有比分，不能参与攻防强度估计。
+        传入 competition 则只统计该联赛，不传则统计全部。
+        """
+        try:
+            conn = self._connect()
+            if competition:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM matches "
+                    "WHERE competition_code=? AND home_score IS NOT NULL",
+                    (str(competition),)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM matches "
+                    "WHERE home_score IS NOT NULL").fetchone()
+            return int(row[0]) if row else 0
+        except Exception as exc:
+            log.warning("统计已完赛场次失败：%s", exc)
+            return 0
+
     def load_matches(self, competition: str, date_from: str, date_to: str,
                      *, limit: int = 500) -> list[dict]:
         """从本地库读取指定日期范围内的比赛（不再回源）。
