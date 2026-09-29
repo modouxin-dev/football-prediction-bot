@@ -9,6 +9,8 @@ import pytest
 from telegram.error import BadRequest
 
 import main
+from commands import admin as admin_cmds
+from commands import build_dispatcher
 from api_client import APIError
 from config import load_settings
 from data_source import DataSourceError
@@ -125,9 +127,15 @@ def test_daily_push_failure_notifies_admins_instead_of_failing_silently():
 
 # ---- 命令 -------------------------------------------------------------------
 def test_test_command_is_admin_only_and_shows_the_users_id():
+    """/test 非管理员必须被拦截。
+
+    权限检查已上移到 dispatcher（命令模块不再各自重复判权），
+    因此这里走 dispatcher.execute 而非直接调用 handler，测的是真实路径。
+    """
     app, _, _ = make_app(warm=False)
     update, msg = command_update(user_id=999)
-    run(main.test_cmd(update, SimpleNamespace(application=app)))
+    dispatcher = build_dispatcher()
+    run(dispatcher.execute("test", update, SimpleNamespace(application=app)))
     assert "仅管理员" in msg.replies[-1] and "999" in msg.replies[-1]
     app.bot.send_message.assert_not_awaited()
 
@@ -141,14 +149,14 @@ def test_test_command_reports_real_failure_instead_of_claiming_success():
 
     app, _, _ = make_app(Failing({}), warm=False)
     update, msg = command_update()
-    run(main.test_cmd(update, SimpleNamespace(application=app)))
+    run(admin_cmds.test_cmd(update, SimpleNamespace(application=app)))
     assert msg.edits and "❌" in msg.edits[-1] and "not subscribed" in msg.edits[-1] and "✅" not in msg.edits[-1]
 
 
 def test_test_command_with_no_matches_says_nothing_was_sent():
     app, _, _ = make_app(FakeAPI({2026: []}), warm=False)
     update, msg = command_update()
-    run(main.test_cmd(update, SimpleNamespace(application=app)))
+    run(admin_cmds.test_cmd(update, SimpleNamespace(application=app)))
     assert "没有可推送的比赛" in msg.edits[-1] and "✅" not in msg.edits[-1]
 
 
@@ -156,7 +164,7 @@ def test_status_shows_account_plan_schedule_and_stale_season_warning():
     stale = dataclasses.replace(SETTINGS, season=SETTINGS.expected_season - 1)
     app, _, _ = make_app(settings=stale)
     update, msg = command_update()
-    run(main.status_cmd(update, SimpleNamespace(application=app)))
+    run(admin_cmds.status_cmd(update, SimpleNamespace(application=app)))
     text = msg.replies[-1]
     assert "套餐：Pro" in text and "数据源连通：✅" in text and "今日请求：12 / 7500" in text
     assert "按日期应为" in text and "下次推送" in text and "RapidAPI" in text
@@ -169,7 +177,7 @@ def test_status_surfaces_data_source_errors():
 
     app, _, _ = make_app(NoAccess({2026: []}))
     update, msg = command_update()
-    run(main.status_cmd(update, SimpleNamespace(application=app)))
+    run(admin_cmds.status_cmd(update, SimpleNamespace(application=app)))
     # 状态页对任何数据源异常都要给出结论，不得整体崩溃（含 DataSourceError）
     assert "数据源连通：❌" in msg.replies[-1]
     assert "HTTP 403" in msg.replies[-1]
@@ -188,7 +196,7 @@ def test_status_survives_non_api_errors():
 
     app, _, _ = make_app(NoSource({2026: []}))
     update, msg = command_update()
-    run(main.status_cmd(update, SimpleNamespace(application=app)))
+    run(admin_cmds.status_cmd(update, SimpleNamespace(application=app)))
     text = msg.replies[-1]
     assert "运行状态" in text and "版本：" in text
     assert "数据源连通：❌" in text
