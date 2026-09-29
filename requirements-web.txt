@@ -1,0 +1,5 @@
+# Web 看板可选依赖 —— 机器人本体不需要，只在跑 api.py 时安装
+# 用法：pip install -r requirements-web.txt
+-r requirements.txt
+fastapi>=0.110
+uvicorn>=0.27
