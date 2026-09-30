@@ -114,3 +114,29 @@ async def edit_view(query, text: str, keyboard: InlineKeyboardMarkup) -> None:
         # 点击的正是当前页面时 Telegram 会报这个，忽略即可
         if "not modified" not in str(exc).lower():
             raise
+
+
+# ---- 底部面板的收放状态 ---------------------------------------------------------
+# Reply 键盘是「随消息下发」的：只有发一条带新 reply_markup 的消息，客户端的
+# 底部键盘才会更新。因此面板状态必须可跨消息读取（存 user_data），切换时再
+# 补发一条提示消息把新键盘带下去。
+PANEL_STATE_KEY = "panel_state"
+
+
+def panel_state(context) -> str:
+    """读取当前用户的面板状态，未设置时默认展开。"""
+    data = getattr(context, "user_data", None)
+    if not data:
+        return "expanded"
+    return data.get(PANEL_STATE_KEY, "expanded")
+
+
+def set_panel_state(context, state: str) -> None:
+    """记住当前用户的面板选择，后续消息沿用。"""
+    data = getattr(context, "user_data", None)
+    if data is not None:
+        data[PANEL_STATE_KEY] = state
+
+
+def panel_expanded(context) -> bool:
+    return panel_state(context) == "expanded"

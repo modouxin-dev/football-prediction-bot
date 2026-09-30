@@ -40,9 +40,13 @@ from commands import CommandRuntime, build_dispatcher
 from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
 from tghtml import normalize
 from support import (back_to_menu_markup, begin_task, deny, describe_error,
-                     edit_view, end_task, is_admin, reply_html)
+                     edit_view, end_task, is_admin,
+                     panel_state, reply_html, set_panel_state)
+from templates import (PANEL_CLOSE_LABEL, PANEL_COLLAPSED, PANEL_EXPANDED,
+                       PANEL_HINTS, PANEL_OPEN_LABEL)
 from commands.adapters import FakeUpdate
 from commands.admin import storage_cmd
+from commands.basic import toggle_panel_message
 from config import ConfigError, Settings, load_settings
 from service import (
     MODE_DATE,
@@ -503,6 +507,26 @@ async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+def _panel_key_from_text(text: str) -> str | None:
+    """识别底部面板的收放按钮，命中则返回目标状态。
+
+    必须排在 _menu_key_from_text 之前判断：面板标签不是菜单项，若先走菜单
+    解析会落到兜底分支，被误报成「功能正在开发中」。
+    同时支持去掉 emoji 后的写法（手打「收起面板」/「菜单」同样生效）。
+    """
+    raw = (text or "").strip()
+    if raw == PANEL_CLOSE_LABEL:
+        return PANEL_COLLAPSED
+    if raw == PANEL_OPEN_LABEL:
+        return PANEL_EXPANDED
+    normalized = _strip_emoji(raw)
+    if normalized and normalized == _strip_emoji(PANEL_CLOSE_LABEL):
+        return PANEL_COLLAPSED
+    if normalized and normalized == _strip_emoji(PANEL_OPEN_LABEL):
+        return PANEL_EXPANDED
+    return None
+
+
 def _menu_key_from_text(text: str) -> str | None:
     """把用户输入或键盘文字解析成菜单 key。
 
@@ -538,7 +562,12 @@ def _is_emoji(ch: str) -> bool:
 
 async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """底部 Reply 键盘：点击后按同一套逻辑处理。"""
-    key = _menu_key_from_text(update.effective_message.text)
+    message = update.effective_message
+    # 面板收放优先于菜单解析：两者都是底部文字按钮，但面板按钮不是功能入口
+    panel = _panel_key_from_text(message.text)
+    if panel:
+        return await toggle_panel_message(message, context, panel)
+    key = _menu_key_from_text(message.text)
     if not key:
         return
     settings: Settings = context.application.bot_data["settings"]

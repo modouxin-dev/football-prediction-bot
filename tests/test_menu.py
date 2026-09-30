@@ -10,6 +10,7 @@ from telegram import InlineKeyboardButton, KeyboardButton
 import main
 from api_client import APIError
 from bot_handler import BotUI, STATUS_TEXT
+from templates import PANEL_CLOSE_LABEL, PANEL_OPEN_LABEL
 from config import load_settings
 from repository import PredictionRepository
 from service import PredictionService
@@ -97,12 +98,15 @@ def test_reply_menu_keyboard_matches_menu_items():
     """底部键盘与 Inline 菜单必须共用同一份 MENU_ITEMS，保证两边完全一致。"""
     from bot_handler import MENU_ITEMS
 
-    markup = BotUI.reply_menu_keyboard()
+    markup = BotUI.reply_menu_keyboard(expanded=True)
     flat = [b for row in markup.keyboard for b in row]
-    assert len(flat) == len(MENU_ITEMS)  # 与 MENU_ITEMS 保持一致，不写死数量
+    labels = [b.text for b in flat]
+    # 展开态：全部功能按钮 + 末行「收起面板」，故比 MENU_ITEMS 多一个
+    assert len(flat) == len(MENU_ITEMS) + 1
     assert all(isinstance(b, KeyboardButton) for b in flat)
-    assert [b.text for b in flat] == [label for _, label in MENU_ITEMS]
-    assert [b.text for b in flat] == [b.text for row in main.ui.menu_keyboard().inline_keyboard for b in row]
+    assert labels[:-1] == [label for _, label in MENU_ITEMS]
+    assert labels[-1] == PANEL_CLOSE_LABEL  # 收起按钮独占末行，避免被误当功能
+    assert labels[:-1] == [b.text for row in main.ui.menu_keyboard().inline_keyboard for b in row]
 
 
 def test_format_menu_shows_league_season_timezone():

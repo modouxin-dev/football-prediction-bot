@@ -8,7 +8,12 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from formatkit import league_label
-from templates import MENU_ITEMS, TABS
+from templates import (
+    MENU_ITEMS,
+    PANEL_CLOSE_LABEL,
+    PANEL_OPEN_LABEL,
+    TABS,
+)
 
 class Keyboards:
         @staticmethod
@@ -105,11 +110,25 @@ class Keyboards:
             return InlineKeyboardMarkup([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
     
         @staticmethod
-        def reply_menu_keyboard() -> ReplyKeyboardMarkup:
-            """底部常驻键盘：与 Inline 菜单共用 MENU_ITEMS，保证两边一致。"""
+        def reply_menu_keyboard(expanded: bool = True) -> ReplyKeyboardMarkup:
+            """底部常驻键盘：与 Inline 菜单共用 MENU_ITEMS，保证两边一致。
+
+            面板占屏近一半高度，与正文抢空间，所以做成可收放的：
+            - expanded：全部功能按钮 + 末行「✖️ 收起面板」
+            - collapsed：整块缩成一行「☰ 菜单」，把屏幕还给正文
+            收起只是改变键盘形态，不影响任何命令的可用性。
+            """
+            if not expanded:
+                return ReplyKeyboardMarkup(
+                    [[KeyboardButton(PANEL_OPEN_LABEL)]],
+                    resize_keyboard=True,
+                    is_persistent=True,
+                )
             labels = [label for _, label in MENU_ITEMS]
             # 每行 2 个，跟随 MENU_ITEMS 自动适配数量
             rows = [[KeyboardButton(x) for x in labels[i : i + 2]] for i in range(0, len(labels), 2)]
+            # 收起按钮单独一行：混在功能里容易被误当成某个功能
+            rows.append([KeyboardButton(PANEL_CLOSE_LABEL)])
             return ReplyKeyboardMarkup(
                 rows,
                 resize_keyboard=True,
