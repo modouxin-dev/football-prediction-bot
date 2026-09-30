@@ -38,6 +38,7 @@ from commands import CommandRuntime, build_dispatcher
 # 定时任务已迁到 scheduler.py。以下两个名字仍是既有测试与调用方的入口，
 # 保留再导出；其余不再从 main 暴露。
 from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
+from tghtml import normalize
 from support import (back_to_menu_markup, begin_task, deny, describe_error,
                      edit_view, end_task, is_admin, reply_html)
 from commands.adapters import FakeUpdate
@@ -447,7 +448,7 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = None if kind == "schedule" else ui.chart_keyboard(fixture_id, kind)
     await query.message.reply_photo(
         photo=blob,
-        caption=caption,
+        caption=normalize(caption),
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard,
     )

@@ -34,6 +34,7 @@ from formatkit import (
     _num,
     _row_line,
     _row_summary,
+    BLANK,
     bar,
     esc,
     hbar,
@@ -94,6 +95,7 @@ class FixturesView:
                     if league != current:  # 按联赛分组，只在切换联赛时打印标题
                         current = league
                         lines.append(f"🏆 <b>{esc(league)}</b>")
+                        lines.append(THIN_SEP)
                     teams = fx.get("teams") or {}
                     home = team_name((teams.get("home") or {}).get("name"))
                     away = team_name((teams.get("away") or {}).get("name"))
@@ -109,13 +111,15 @@ class FixturesView:
                     gh, ga = goals.get("home"), goals.get("away")
                     score = f" <b>{esc(gh)}-{esc(ga)}</b>" if gh is not None and ga is not None else " ⚔️ "
                     # 序号用等宽 2 位补位：个位数与两位数在比例字体下会错开半格
-                    lines.append(
-                        f"<code>{idx:>2}</code> ⏰ <code>{when}</code>　🏠 {esc(home)}{score}{esc(away)}"
-                    )
+                    # 每场独立成块：序号+时间一行、对阵一行、状态一行，块间空行。
+                    # 挤在一行时队名长的比赛会被折行，序号和状态就对不上了。
+                    lines.append(f"<code>{idx:>2}</code> ⏰ <code>{when}</code>")
+                    lines.append(f"　　🏠 {esc(home)}{score}{esc(away)}")
                     lines.append(
                         f"　　 {status_emoji(short)} <code>{esc(status)}</code>"
                         f" · <code>#{esc(info.get('id'))}</code>"
                     )
+                    lines.append(BLANK)
                     rows.append(
                         [
                             InlineKeyboardButton(f"⚽ 预测 {idx}", callback_data=f"fx:{info.get('id')}"),

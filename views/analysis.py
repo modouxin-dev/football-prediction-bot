@@ -28,6 +28,7 @@ from templates import (
     VALUE_LOW,
 )
 from formatkit import (
+    BLANK,
     _factors,
     _form_line,
     _is_fallback,
@@ -38,7 +39,10 @@ from formatkit import (
     bar,
     esc,
     hbar,
+    kv_line,
     league_label,
+    section,
+    section_join,
     team_name,
     web_entry_text,
 )
@@ -59,103 +63,131 @@ class AnalysisView:
                 else "无数据"
             )
     
-            lines = [
-                "📊 <b>深度分析</b>",
-                f"🏠 <b>{esc(report['home'])}</b> 🆚 <b>{esc(report['away'])}</b> ✈️",
-                f"🕐 <code>{CommonView.fmt_time(report['kickoff'], tz)}</code>（{CommonView.tz_label(tz, report['kickoff'])}） · {esc(report['league'])}",
-                SEP,
-                "🕑 <b>近期状态</b>（近 5 场已完场）",
+            # 分节统一走 section()：图标+标题 → 分隔线 → 内容 → 空行。
+            # 原来各段直接堆 SEP，相邻两块之间没有任何留白，手机上读起来
+            # 是一整片；空行才是移动端可读性的关键。
+            form_body = [
                 f"🏠 {esc(report['home'])}：{_form_line(report['home_form'])}",
                 f"✈️ {esc(report['away'])}：{_form_line(report['away_form'])}",
             ]
             # 可选数据拉取失败：附真实原因，不伪装成“没有数据”
             for key, prefix in (("home_form", "主队近期"), ("away_form", "客队近期"), ("h2h", "历史交锋")):
                 if errors.get(key):
-                    lines.append(f"   ⚠️ {prefix}数据获取失败：{esc(errors[key])}")
-            lines += [
-                SEP,
-                "🏆 <b>联赛信息</b>",
-                f"🏠 {esc(report['home'])}：{_row_line(report['home_row'])}",
-                f"✈️ {esc(report['away'])}：{_row_line(report['away_row'])}",
-                SEP,
-                "🤝 <b>历史交锋</b>",
-            ]
+                    form_body.append(f"　 ⚠️ {prefix}数据获取失败：{esc(errors[key])}")
+
             if h2h["played"]:
-                lines.append(
-                    f"近 {h2h['played']} 次交锋（{esc(report['home'])} 视角）："
+                h2h_body = [
+                    f"近 {h2h['played']} 次交锋（{esc(report['home'])} 视角）：",
                     f"<b>{h2h['win']} 胜 {h2h['draw']} 平 {h2h['lose']} 负</b>"
-                    f" · 进球 {h2h['goals_for']}-{h2h['goals_against']}"
-                )
+                    f" · 进球 {h2h['goals_for']}-{h2h['goals_against']}",
+                ]
             else:
-                lines.append(NO_DATA)
-            lines += [
-                SEP,
-                "🧮 <b>模型因素</b>",
-                f"🏠 主队主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
-                f"✈️ 客队客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
-                "（1.00 = 联赛平均；攻击 &gt;1 进球更多，防守 &lt;1 失球更少即防守更好）",
-                f"⚖️ 主场优势：联赛主队场均 <code>{report['model']['avg_home_goals']:.2f}</code>"
-                f" / 客队场均 <code>{report['model']['avg_away_goals']:.2f}</code>",
-                f"⚽ 预期进球 λ：<code>{analysis['lambda_home']:.2f} - {analysis['lambda_away']:.2f}</code>",
-                f"🛰 数据源：<code>{esc(report.get('source', 'API-Football'))}</code>",
-                f"🧩 数据完整性：<b>{integrity}</b>",
-                "🩹 伤停信息：数据源未提供（当前套餐不支持）",
-                f"🤖 模型版本：<code>{esc(model_version)}</code>",
-                f"🕑 数据更新时间：<code>{CommonView.fmt_time(report['created_at'], tz, '%Y-%m-%d %H:%M:%S')}</code>",
-                SEP,
-                "🧭 <b>分析总结</b>",
-            ]
+                h2h_body = [NO_DATA]
+
             pros, cons, unknowns = _factors(report)
             # 逐条分行：手机上「；」拼接的长句会被折行成一坨，看不出有几条
-            lines.append("✅ <b>有利</b>")
-            lines += [f"▸ {esc(x)}" for x in pros] or [f"▸ {NO_DATA}"]
-            lines.append("⚠️ <b>不利</b>")
-            lines += [f"▸ {esc(x)}" for x in cons] or [f"▸ {NO_DATA}"]
-            lines.append("❓ <b>不确定</b>")
-            lines += [f"▸ {esc(x)}" for x in unknowns] or [f"▸ {NO_DATA}"]
+            summary_body = ["✅ <b>有利</b>"]
+            summary_body += [f"▸ {esc(x)}" for x in pros] or [f"▸ {NO_DATA}"]
+            summary_body += ["", "⚠️ <b>不利</b>"]
+            summary_body += [f"▸ {esc(x)}" for x in cons] or [f"▸ {NO_DATA}"]
+            summary_body += ["", "❓ <b>不确定</b>"]
+            summary_body += [f"▸ {esc(x)}" for x in unknowns] or [f"▸ {NO_DATA}"]
+
+            blocks = [
+                [
+                    "📊 <b>深度分析</b>",
+                    f"🏠 <b>{esc(report['home'])}</b> 🆚 <b>{esc(report['away'])}</b> ✈️",
+                    f"🕐 <code>{CommonView.fmt_time(report['kickoff'], tz)}</code>"
+                    f"（{CommonView.tz_label(tz, report['kickoff'])}） · {esc(report['league'])}",
+                    BLANK,
+                ],
+                section("🕑", "近期状态 · 近 5 场已完场", *form_body),
+                section(
+                    "🏆", "联赛信息",
+                    f"🏠 {esc(report['home'])}：{_row_line(report['home_row'])}",
+                    f"✈️ {esc(report['away'])}：{_row_line(report['away_row'])}",
+                ),
+                section("🤝", "历史交锋", *h2h_body),
+                section(
+                    "🧮", "模型因素",
+                    f"🏠 主队主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
+                    f"✈️ 客队客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
+                    "（1.00 = 联赛平均；攻击 &gt;1 进球更多，防守 &lt;1 失球更少即防守更好）",
+                    "",
+                    f"⚖️ 主场优势：联赛主队场均 <code>{report['model']['avg_home_goals']:.2f}</code>"
+                    f" / 客队场均 <code>{report['model']['avg_away_goals']:.2f}</code>",
+                    f"⚽ 预期进球 λ：<code>{analysis['lambda_home']:.2f} - {analysis['lambda_away']:.2f}</code>",
+                    f"🧩 数据完整性：<b>{integrity}</b>",
+                    "🩹 伤停信息：数据源未提供（当前套餐不支持）",
+                    f"🛰 数据源：<code>{esc(report.get('source', 'API-Football'))}</code>",
+                    f"🤖 模型版本：<code>{esc(model_version)}</code>",
+                    f"🕑 更新时间：<code>{CommonView.fmt_time(report['created_at'], tz, '%Y-%m-%d %H:%M:%S')}</code>",
+                ),
+                section("🧭", "分析总结", *summary_body),
+            ]
+
             top = max(
                 (("主胜", analysis["win_prob"]), ("平局", analysis["draw_prob"]), ("客胜", analysis["loss_prob"])),
                 key=lambda kv: kv[1],
             )
+            lines = section_join(blocks).split("\n")
             if _is_fallback_source(report):
                 lines += [
                     SEP,
-                    "ℹ️ <b>当前备用数据源仅提供基础比赛数据，暂无法生成完整深度分析</b>"
+                    BLANK,
+                    "ℹ️ <b>当前备用数据源仅提供基础比赛数据，暂无法生成完整深度分析</b>",
                     "（无历史交锋、无赔率、无球员统计）。",
                 ]
-            lines += [f"🎯 <b>模型倾向</b>：{top[0]}（{top[1]:.1%}）", SEP, DISCLAIMER]
+            lines += [
+                SEP,
+                BLANK,
+                f"🎯 <code>模型倾向　</code><b>{top[0]}</b> <code>{top[1]:.1%}</code>",
+                BLANK,
+                SEP,
+                BLANK,
+                DISCLAIMER,
+            ]
             return "\n".join(lines)
     
         @staticmethod
         def format_deep_analysis(p, tz) -> str:
             a, hs, aws = p.analysis, p.home_strength, p.away_strength
-            lines = [
-                "🔍 <b>深度分析</b>",
-                CommonView.matchup(p, tz),
-                SEP,
-                f"⚙️ 预期进球 λ：<code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>",
-                "🎯 <b>最可能比分 Top 5</b>",
-            ]
             top_score_prob = a["top_scores"][0][1] or 1.0  # 防除零：全 0 概率时不炸
+            score_rows = []
             for score, prob in a["top_scores"]:
                 # 三段都放等宽块：比分左对齐、条形定长、百分比右对齐补位，
                 # 这样「9.8%」和「12.4%」才不会把右侧数字推得一前一后
-                lines.append(
+                score_rows.append(
                     f"<code>{score:<5}</code> <code>{hbar(prob / top_score_prob, 8)}</code>"
                     f" <code>{prob:>5.1%}</code>"
                 )
-            lines += [
-                SEP,
-                f"📊 大 2.5 球 <code>{a['over_2_5']:.1%}</code> · 小 2.5 球 <code>{1 - a['over_2_5']:.1%}</code>",
-                f"🤝 双方都进球 <code>{a['btts']:.1%}</code>",
-                SEP,
-                "🧮 <b>球队强度</b>（1.00 = 联赛平均）",
-                f"🏠 {esc(team_name(p.home))} 主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
-                f"✈️ {esc(team_name(p.away))} 客场：攻击 <code>{aws.attack_away:.2f}</code> · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
-                "攻击 &gt;1：进球高于平均；防守 &lt;1：失球低于平均（防守更好）。",
-                SEP,
-                DISCLAIMER,
+
+            blocks = [
+                ["🔍 <b>深度分析</b>", CommonView.matchup(p, tz), BLANK],
+                section(
+                    "⚙️", "预期进球 λ",
+                    f"<code>{a['lambda_home']:.2f} - {a['lambda_away']:.2f}</code>",
+                ),
+                section("🎯", "最可能比分 Top 5", *score_rows),
+                section(
+                    "📊", "进球指标",
+                    kv_line("⚽", "大 2.5 球",
+                            f"{a['over_2_5']:.1%}　{hbar(a['over_2_5'])}", 12),
+                    kv_line("🤝", "双方都进球",
+                            f"{a['btts']:.1%}　{hbar(a['btts'])}", 12),
+                ),
+                section(
+                    "🧮", "球队强度 · 1.00 = 联赛平均",
+                    f"🏠 {esc(team_name(p.home))} 主场：攻击 <code>{hs.attack_home:.2f}</code>"
+                    f" · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
+                    f"✈️ {esc(team_name(p.away))} 客场：攻击 <code>{aws.attack_away:.2f}</code>"
+                    f" · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
+                    "",
+                    "攻击 &gt;1：进球高于平均；防守 &lt;1：失球低于平均（防守更好）。",
+                ),
             ]
+            lines = section_join(blocks).split("\n")
+            lines += [SEP, BLANK, DISCLAIMER]
             return "\n".join(lines)
     
         @staticmethod
@@ -187,7 +219,21 @@ class AnalysisView:
                     f"{mark} <code>{date}</code> {esc((teams.get('home') or {}).get('name', '?'))} "
                     f"<b>{goals['home']}-{goals['away']}</b> {esc((teams.get('away') or {}).get('name', '?'))}"
                 )
-            summary = f"近 {len(finished)} 次交锋（{esc(team_name(p.home))} 视角）：<b>{win} 胜 {draw} 平 {loss} 负</b>，进 {gf} / 失 {ga}"
-            return "\n".join(
-                [title, CommonView.matchup(p, tz), SEP, summary, *rows, SEP, "🟢 胜 · 🟡 平 · 🔴 负；球队阵容与状态可能已大不相同，仅供参考。"]
-            )
+            # 战绩与进球分两行：挤在一行时「3胜1平1负」和「进8/失5」会在窄屏
+            # 折行，读起来像第四场比赛。
+            blocks = [
+                [title, CommonView.matchup(p, tz), BLANK],
+                section(
+                    "📈", f"近 {len(finished)} 次交锋战绩",
+                    f"<b>{win} 胜 {draw} 平 {loss} 负</b>（{esc(team_name(p.home))} 视角）",
+                    f"进 <code>{gf}</code> / 失 <code>{ga}</code>",
+                ),
+                section("🗓", "近期交手记录", *rows),
+            ]
+            lines = section_join(blocks).split("\n")
+            lines += [
+                SEP,
+                BLANK,
+                "🟢 胜 · 🟡 平 · 🔴 负；球队阵容与状态可能已大不相同，仅供参考。",
+            ]
+            return "\n".join(lines)

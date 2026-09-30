@@ -9,6 +9,7 @@ import logging
 from datetime import datetime
 
 from bot_handler import esc
+from tghtml import normalize
 
 from . import CommandDispatcher
 
@@ -58,13 +59,15 @@ async def date_cmd(update, context) -> None:
     args = context.args or []
     usage = "📆 请带上日期，例如：<code>/date 2026-10-10</code>"
     if not args:
-        await update.effective_message.reply_text(usage, parse_mode="HTML")
+        await update.effective_message.reply_text(normalize(usage), parse_mode="HTML")
         return
     try:
         day = datetime.strptime(args[0].strip(), "%Y-%m-%d").date()
     except ValueError:
         await update.effective_message.reply_text(
-            f"❌ 日期格式不对（{esc(args[0])}），请用 YYYY-MM-DD，例如 /date 2026-10-10",
+            normalize(
+                f"❌ 日期格式不对（{esc(args[0])}），请用 YYYY-MM-DD，例如 /date 2026-10-10"
+            ),
             parse_mode="HTML",
         )
         return

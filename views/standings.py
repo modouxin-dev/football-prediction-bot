@@ -28,6 +28,7 @@ from templates import (
     VALUE_LOW,
 )
 from formatkit import (
+    BLANK,
     _factors,
     _form_line,
     _is_fallback,
@@ -79,14 +80,21 @@ class StandingsView:
                     if summary and summary["avg_against"] is not None else "-"
                 )
                 if i <= 3:
-                    # 前三：两行卡片。战绩保留 6-0-1 紧凑式（这是对外承诺的格式，
-                    # 有测试断言），场均进失球作为补充信息追加在后面。
+                    # 前三：两行卡片，卡片之间留空行——三张卡挤在一起时
+                    # 视觉上会连成一整块，分不清哪里是第二名的开始。
+                    if i > 1:
+                        lines.append(BLANK)
+                    # 战绩保留 6-0-1 紧凑式（这是对外承诺的格式，有测试断言），
+                    # 场均进失球作为补充信息追加在后面。
                     lines.append(f"{medals[i]} <b>{name}</b>　<b>{points}</b>")
                     # summary 可能为 None（积分榜行缺字段），此时只显示占位符，
                     # 不能去下标取值——那会让整条 /standings 崩掉
                     detail = f"{record} · 场均 {avg_for} / {avg_against}" if summary else "战绩数据缺失"
                     lines.append(f"└ <code>{esc(detail)}</code>")
                 else:
+                    # 前三与其余之间空一行：两块视觉上分开，不会读成连续的一列
+                    if i == 4:
+                        lines.append(THIN_SEP)
                     # 其余：紧凑单行。序号用等宽 2 位补位（个位数与两位数才不会错开）；
                     # 队名长度不一，不对它做列对齐——比例字体下补空格无效。
                     lines.append(

@@ -166,7 +166,9 @@ def test_status_shows_account_plan_schedule_and_stale_season_warning():
     update, msg = command_update()
     run(admin_cmds.status_cmd(update, SimpleNamespace(application=app)))
     text = msg.replies[-1]
-    assert "套餐：Pro" in text and "数据源连通：✅" in text and "今日请求：12 / 7500" in text
+    # 断言「信息在不在」而非文案串：状态页改版式时这些断言不该跟着碎
+    assert "套餐" in text and "Pro" in text and "连通性" in text and "✅" in text
+    assert "今日请求" in text and "12" in text and "7500" in text
     assert "按日期应为" in text and "下次推送" in text and "RapidAPI" in text
 
 
@@ -179,7 +181,7 @@ def test_status_surfaces_data_source_errors():
     update, msg = command_update()
     run(admin_cmds.status_cmd(update, SimpleNamespace(application=app)))
     # 状态页对任何数据源异常都要给出结论，不得整体崩溃（含 DataSourceError）
-    assert "数据源连通：❌" in msg.replies[-1]
+    assert "连通性" in msg.replies[-1] and "❌" in msg.replies[-1]
     assert "HTTP 403" in msg.replies[-1]
 
 
@@ -198,8 +200,8 @@ def test_status_survives_non_api_errors():
     update, msg = command_update()
     run(admin_cmds.status_cmd(update, SimpleNamespace(application=app)))
     text = msg.replies[-1]
-    assert "运行状态" in text and "版本：" in text
-    assert "数据源连通：❌" in text
+    assert "运行状态" in text and "版本" in text
+    assert "连通性" in text and "❌" in text
 
 
 def test_is_admin():

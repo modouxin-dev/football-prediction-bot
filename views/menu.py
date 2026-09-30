@@ -28,6 +28,7 @@ from templates import (
     VALUE_LOW,
 )
 from formatkit import (
+    BLANK,
     _factors,
     _form_line,
     _is_fallback,
@@ -36,8 +37,13 @@ from formatkit import (
     _row_line,
     _row_summary,
     bar,
+    display_width,
     esc,
+    kv_line,
     league_label,
+    pad_cjk,
+    section,
+    section_join,
     team_name,
     web_entry_text,
 )
@@ -90,40 +96,47 @@ class MenuView:
                 f"└ 时区　<code>{esc(settings.timezone.zone)}</code>\n"
                 "\n"
                 f"{SEP}\n"
+                "\n"
                 "📌 <b>请选择功能</b>"
             )
     
         @staticmethod
         def format_help() -> str:
-            return (
-                "ℹ️ <b>使用帮助</b>\n"
-                f"{SEP}\n"
-                "\n"
-                f"◆ <b>功能说明</b>\n"
-                f"{THIN_SEP}\n"
-                "📅 <b>今日赛程</b>　当日比赛，按联赛分组、支持翻页\n"
-                "⚽ <b>比赛预测</b>　胜平负概率、比分与信心等级\n"
-                "📊 <b>深度分析</b>　近期状态、主客场、历史交锋\n"
-                "🏆 <b>联赛排名</b>　实时积分榜与攻防数据\n"
-                "🔄 <b>刷新数据</b>　清空缓存，重新拉取\n"
-                "🌐 <b>网页端</b>　　浏览器查询入口（规划中）\n"
-                "\n"
-                f"◆ <b>命令列表 / Commands</b>\n"
-                f"{THIN_SEP}\n"
-                "<code>/start</code>　欢迎与推送时间 / Welcome\n"
-                "<code>/menu</code>　功能菜单 / Main menu\n"
-                "<code>/help</code>　本指南 / This help\n"
-                "<code>/fixtures</code>　今日赛程 / Fixtures\n"
-                "<code>/predict</code>　比赛预测 / Prediction\n"
-                "<code>/standings</code>　联赛排名 / Standings\n"
-                "<code>/refresh</code>　刷新数据 / Refresh\n"
-                "<code>/web</code>　网页端 / Web app\n"
-                "<code>/test</code>　立即推送（管理员）/ Push now (admin)\n"
-                "<code>/status</code>　状态诊断（管理员）/ Status (admin)\n"
-                "\n"
-                f"{SEP}\n"
-                f"{DISCLAIMER}"
-            )
+            # 功能与命令各成一节。命令名放进等宽块并按最长命令补位：
+            # 「/start」与「/standings」长度不同，不补位说明文字会参差。
+            features = [
+                ("📅", "今日赛程", "当日比赛，按联赛分组、支持翻页"),
+                ("⚽", "比赛预测", "胜平负概率、比分与信心等级"),
+                ("📊", "深度分析", "近期状态、主客场、历史交锋"),
+                ("🏆", "联赛排名", "实时积分榜与攻防数据"),
+                ("🔄", "刷新数据", "清空缓存，重新拉取"),
+                ("🌐", "网页端", "浏览器查询入口"),
+            ]
+            # 整行进 <code>：功能名 4 字为主、说明长短不一，只有等宽块能对齐
+            feature_rows = [kv_line(icon, name, desc, 10) for icon, name, desc in features]
+            commands = [
+                ("/start", "欢迎与推送时间"),
+                ("/menu", "功能菜单"),
+                ("/help", "本指南"),
+                ("/fixtures", "今日赛程"),
+                ("/predict", "比赛预测"),
+                ("/standings", "联赛排名"),
+                ("/refresh", "刷新数据"),
+                ("/web", "网页端"),
+                ("/test", "立即推送（管理员）"),
+                ("/status", "状态诊断（管理员）"),
+            ]
+            cmd_w = max(len(c) for c, _ in commands) + 1
+            command_rows = [f"<code>{pad_cjk(cmd, cmd_w)}</code>{desc}" for cmd, desc in commands]
+
+            blocks = [
+                ["ℹ️ <b>使用帮助</b>", BLANK],
+                section("🧭", "功能说明", *feature_rows),
+                section("⌨️", "命令列表 / Commands", *command_rows),
+            ]
+            lines = section_join(blocks).split("\n")
+            lines += [SEP, BLANK, DISCLAIMER]
+            return "\n".join(lines)
     
         @staticmethod
         def format_coming(key: str) -> str:

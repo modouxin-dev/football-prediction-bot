@@ -10,6 +10,7 @@ import html
 import unicodedata
 from datetime import datetime
 
+import tghtml
 from analyzer import OUTCOMES, calculate_prediction_level, overround
 from service import MODEL_VERSION, parse_kickoff
 from templates import (
@@ -94,7 +95,10 @@ def align_cjk(text: str, width: int, align: str = "left") -> str:
     正文是比例字体，补多少空格都对不齐。
     """
     text = str(text)
-    if display_width(text) >= width:
+    # 严格大于才截断：宽度正好等于目标时原样返回。
+    # 用 >= 会把「数据完整性」(5 字 = 10 列) 在 width=10 下截成「数据完整…」，
+    # 标签被吃掉一字 —— 这个 bug 真实发生过，故此处边界必须是 >。
+    if display_width(text) > width:
         # 逐字累加，留最后一列给省略号
         out = ""
         for ch in text:
@@ -115,6 +119,51 @@ def pad_cjk(text: str, width: int) -> str:
     return align_cjk(text, width, "left")
 
 
+def kv_line(icon: str, label: str, value: str, width: int = 12) -> str:
+    """一行「标签 + 值」，两者放进**同一个** <code> 等宽块。
+
+    为什么必须同块：Telegram 正文是比例字体，在 code 外补多少空格都对不齐
+    ——4 字标签与 5 字标签各补到 10 列，渲染出来仍会差半格。只有整行进
+    <code> 时，pad_cjk 按显示宽度补的空格才是「真正的列」。
+
+    第二个理由：补位空格落在标签与值**中间**，而不是行尾。若写成
+    `<code>标签  </code>值`，尾部空格有被渲染器 trim 的风险，对齐就白做了。
+
+    宽度默认 12：最长标签「最可能比分」占 10 列，留 2 列间隔，
+    否则 5 字标签会与值贴死。
+
+    值里不能含 <b>/<code> 等标签（Telegram 不支持嵌套），需要富文本的值
+    请改用全角空格分栏（见 prediction.py 的结论行）。
+    """
+    return f"{icon} <code>{pad_cjk(label, width)}{value}</code>"
+
+
+BLANK = ""  # 分节之间的空行：移动端可读性的关键，没有它各块会挤成一坨
+
+
+def section(icon: str, title: str, *body: str) -> list[str]:
+    """统一分节：图标+标题 → 分隔线 → 内容 → 空行。
+
+    所有视图（预测主卡 / 常规预测 / 赛程 / 积分榜 / 深度分析）共用这一套排版，
+    改一处即全局生效，避免各视图各自拼字符串导致风格漂移。
+
+    返回的最后带一个空行，调用方直接 extend 即可，无需再手动补 ""。
+    """
+    out = [f"{icon} <b>{title}</b>", SEP, *body, BLANK]
+    return out
+
+
+def section_join(blocks: list[list[str]]) -> str:
+    """把若干 section() 拼成最终文本，块之间不额外加空行（section 自带）。"""
+    lines: list[str] = []
+    for block in blocks:
+        lines.extend(block)
+    # 收尾去掉最后一个空行，避免消息底部多一行空白
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines)
+
+
 # 比赛状态 → 图标。未收录的状态返回 ⚪，而不是抛异常或留空。
 STATUS_EMOJI = {
     "NS": "🕐", "TBD": "🕐",
@@ -133,20 +182,11 @@ def status_emoji(short: str) -> str:
 def split_html_blocks(text: str, limit: int = 3500) -> list[str]:
     """按行拆分超长 HTML 文本，避免超过 Telegram 单条 4096 字符限制。
 
-    整段 <code>/<b> 标签不会被拆断（按行切分已足够安全，因为标签不跨行）。
+    实现下沉到 tghtml.split_message：旧版「按行切了就完事」，一旦 <pre>
+    表格被切在中间，前半块结尾的 <pre> 没闭合会让 Telegram 整条 400 拒绝，
+    后半块开头也退化成纯文本。新版在拆口处闭合/重开标签，见 tghtml 模块。
     """
-    if len(text) <= limit:
-        return [text]
-    blocks, current = [], ""
-    for line in text.split("\n"):
-        if len(current) + len(line) + 1 > limit:
-            blocks.append(current.rstrip())
-            current = line + "\n"
-        else:
-            current += line + "\n"
-    if current.strip():
-        blocks.append(current.rstrip())
-    return blocks
+    return tghtml.split_message(text, limit)
 
 def _is_fallback(p) -> bool:
     """预测结果是否来自备用数据源 football-data.org。"""
@@ -305,21 +345,25 @@ def web_entry_text(web_url: str = "") -> str:
     `https://...` 变成可点击链接，写示例地址等于给用户一条死链。
     """
     if not web_url:
-        return (
-            "🌐 <b>网页端</b>\n\n"
-            "看板代码已就绪，但当前实例<b>未部署 Web 服务</b>。\n\n"
-            "启用方法：\n"
-            "· 安装可选依赖 <code>pip install -r requirements-web.txt</code>\n"
-            "· 启动 <code>uvicorn api:app --host 0.0.0.0 --port 8000</code>\n"
-            "· 设置环境变量 <code>WEB_URL</code>，值为该服务的完整访问地址\n\n"
-            "未启用期间，下方菜单功能不受影响。"
-        )
-    return (
-        "🌐 <b>网页统计看板</b>\n\n"
-        f"🔗 {esc(web_url)}\n\n"
-        "可查看：\n"
-        "· 模型健康度（Log Loss 趋势、校准曲线）\n"
-        "· 球队攻防强度榜\n"
-        "· 历史预测审计（预测 vs 实际赛果）\n\n"
-        "数据取自本地库，刷新页面不消耗 API 额度。"
-    )
+        return section_join([
+            ["🌐 <b>网页端</b>", BLANK],
+            section("🚧", "当前状态", "看板代码已就绪，但当前实例<b>未部署 Web 服务</b>。"),
+            section(
+                "🛠", "启用方法",
+                "• 安装可选依赖 <code>pip install -r requirements-web.txt</code>",
+                "• 启动 <code>uvicorn api:app --host 0.0.0.0 --port 8000</code>",
+                "• 设置环境变量 <code>WEB_URL</code>，值为该服务的完整访问地址",
+            ),
+            section("✅", "未启用期间", "下方菜单功能不受影响。"),
+        ])
+    return section_join([
+        ["🌐 <b>网页统计看板</b>", BLANK],
+        section("🔗", "访问地址", esc(web_url)),
+        section(
+            "📊", "可查看",
+            "• 模型健康度（Log Loss 趋势、校准曲线）",
+            "• 球队攻防强度榜",
+            "• 历史预测审计（预测 vs 实际赛果）",
+        ),
+        section("💡", "说明", "数据取自本地库，刷新页面不消耗 API 额度。"),
+    ])

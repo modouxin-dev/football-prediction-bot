@@ -25,6 +25,7 @@ from telegram.ext import ContextTypes
 from bot_handler import BotUI
 from config import Settings
 from service import PredictionService
+from tghtml import normalize
 from support import describe_error, notify_admins
 
 log = logging.getLogger("bot")
@@ -63,7 +64,9 @@ class NotificationManager:
         settings = self.settings
         await self.app.bot.send_message(
             chat_id=settings.chat_target,
-            text=ui.format_prediction(prediction, settings.timezone),
+            # 推送是唯一「无人值守」的出口：一条畸形标签会让整条推送 400 失败
+            # 且没人会发现，因此这里必须过规范化层。
+            text=normalize(ui.format_prediction(prediction, settings.timezone)),
             parse_mode="HTML",
             reply_markup=ui.get_main_keyboard(prediction.fixture_id, "home"),
         )

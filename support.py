@@ -15,6 +15,7 @@ from telegram.error import TelegramError
 
 from api_client import APIError
 from bot_handler import split_html_blocks
+from tghtml import normalize
 from config import Settings
 
 log = logging.getLogger("bot")
@@ -78,8 +79,12 @@ def back_to_menu_markup() -> InlineKeyboardMarkup:
 
 
 async def reply_html(message, text: str, markup) -> None:
-    """发送 HTML 消息：统一加无链接预览，超长时拆分（后续块不带键盘）。"""
-    blocks = split_html_blocks(text)
+    """发送 HTML 消息：统一加无链接预览，超长时拆分（后续块不带键盘）。
+
+    出口先过一遍 tghtml.normalize：它是幂等的，对已合规的文本不做改动，
+    只修「未闭合标签 / 裸尖括号 / 连续空行」这类会让 Telegram 整条 400 的问题。
+    """
+    blocks = split_html_blocks(normalize(text))
     for idx, block in enumerate(blocks):
         await message.reply_text(
             block,
@@ -93,6 +98,7 @@ async def edit_view(query, text: str, keyboard: InlineKeyboardMarkup) -> None:
     """就地编辑上一条消息。文本过长时按行拆分，只编辑第一块。"""
     from telegram.error import BadRequest
 
+    text = normalize(text)
     blocks = split_html_blocks(text)
     if len(blocks) > 1:
         log.warning("消息过长（%d 字符），已拆分为 %d 块，仅展示第一块", len(text), len(blocks))

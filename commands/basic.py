@@ -7,6 +7,7 @@ from bot_handler import BotUI
 from telegram.constants import ParseMode
 
 from support import reply_html
+from tghtml import normalize
 
 from . import CommandDispatcher
 
@@ -29,13 +30,13 @@ async def start(update, context) -> None:
         # 品牌头图 + 文案说明（图片失败时降级为纯文字，不影响使用）
         await update.effective_message.reply_photo(
             photo=banner,
-            caption=text,
+            caption=normalize(text),
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard,
         )
     else:
         await update.effective_message.reply_text(
-            text, parse_mode=ParseMode.HTML,
+            normalize(text), parse_mode=ParseMode.HTML,
             disable_web_page_preview=True, reply_markup=keyboard,
         )
 
@@ -49,7 +50,7 @@ async def menu_cmd(update, context) -> None:
     """/menu — 功能菜单（Inline 按钮，点击后原地切换）。"""
     settings = context.application.bot_data["settings"]
     await update.effective_message.reply_text(
-        ui.format_menu(settings), parse_mode=ParseMode.HTML,
+        normalize(ui.format_menu(settings)), parse_mode=ParseMode.HTML,
         reply_markup=ui.menu_keyboard(),
     )
 
