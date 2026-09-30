@@ -150,6 +150,68 @@ def test_strength_accepts_competition_filter(client):
     assert client.get("/strength?competition=PL").status_code == 200
 
 
+def _seed_mixed_competitions(db_path: str) -> None:
+    """写入英超(PL) 与英冠(ELC)两类赛果，用于验证默认按当前联赛过滤。"""
+    from datetime import date, timedelta
+
+    repo = repository.PredictionRepository(db_path)
+    conn = repo._connect()
+    pl = [(1, "Arsenal FC"), (2, "Manchester City FC"),
+          (3, "Liverpool FC"), (4, "Chelsea FC")]
+    elc = [(101, "Hull City AFC"), (102, "Ipswich Town FC")]
+
+    rows = []
+    # 英超：4 队双循环重复多轮，凑够强度榜门槛（MIN_MATCHES_FOR_STRENGTH=60）
+    while len(rows) < 64:
+        for h in pl:
+            for a in pl:
+                if h[0] != a[0]:
+                    rows.append(("PL", h, a))
+    # 英冠：少量比赛，模拟早期同步混入的脏数据
+    rows.extend([("ELC", elc[0], elc[1])] * 5)
+
+    base = date(2026, 1, 1)
+    for k, (comp, h, a) in enumerate(rows):
+        d = (base + timedelta(days=k)).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO matches (competition_code, season, utc_date,"
+            " status, home_team_id, home_team_name, away_team_id, away_team_name,"
+            " home_score, away_score, source, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (comp, 2026, d, "FINISHED", str(h[0]), h[1], str(a[0]), a[1],
+             1, 0, "test", d))
+    conn.commit()
+    conn.close()
+
+
+def test_strength_defaults_to_configured_league(client, monkeypatch):
+    """默认必须按当前联赛过滤——否则英冠球队会混进英超强度榜。"""
+    monkeypatch.setenv("LEAGUE_ID", "39")
+    _seed_mixed_competitions(api._DB_PATH)
+    body = client.get("/strength").json()
+    assert body["status"] == "ok", body.get("message")
+    teams = {t["name"] for t in body["teams"]}
+    assert "Arsenal FC" in teams
+    assert "Hull City AFC" not in teams
+    assert "Ipswich Town FC" not in teams
+
+
+def test_strength_empty_competition_means_no_filter(client, monkeypatch):
+    """显式传空才表示「不过滤」，此时英冠球队应当出现。"""
+    monkeypatch.setenv("LEAGUE_ID", "39")
+    _seed_mixed_competitions(api._DB_PATH)
+    body = client.get("/strength?competition=").json()
+    teams = {t["name"] for t in body["teams"]}
+    assert "Hull City AFC" in teams
+
+
+def test_default_competition_follows_league_id(monkeypatch):
+    monkeypatch.setenv("LEAGUE_ID", "39")
+    assert api._default_competition() == "PL"
+    monkeypatch.setenv("LEAGUE_ID", "40")
+    assert api._default_competition() == "ELC"
+
+
 def test_commands_endpoint_is_fast(client):
     """启动时已预热，响应必须在 200ms 预算内（实测未预热时约 800ms）。"""
     import time

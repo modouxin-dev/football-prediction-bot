@@ -39,6 +39,28 @@ import analytics
 import paths
 from repository import PredictionRepository
 
+# 联赛 ID → 竞赛代码（用于给统计端点一个「当前联赛」默认值）。
+# 单独 try 包一层：football_data 依赖 httpx，若将来被拆成可选依赖，
+# 看板仍应能启动，只是拿不到默认联赛名，退化为「不过滤」而非崩溃。
+try:
+    from football_data import LEAGUE_ID_TO_CODE
+except Exception:  # pragma: no cover - 防御性
+    LEAGUE_ID_TO_CODE = {}
+
+
+def _default_competition() -> str:
+    """当前配置联赛对应的竞赛代码（英超 → PL）。
+
+    本地库可能同时存着其他竞赛的比赛（例如早期同步混入的英冠赛果）。
+    统计端点若不按竞赛过滤，强度榜会把它们一起算进来，
+    导致 Hull City、Ipswich Town 这类英冠球队出现在英超榜单里。
+    """
+    try:
+        league_id = int(os.getenv("LEAGUE_ID", "39") or 39)
+    except ValueError:
+        return ""
+    return LEAGUE_ID_TO_CODE.get(league_id, "")
+
 # 指令清单在启动时构建一次并缓存。
 # 实测：若在每个请求里现算，首次调用要导入 commands → bot_handler → chart →
 # matplotlib，耗时约 800ms，远超 200ms 预算。启动时预热后，首请求即为毫秒级。
@@ -167,10 +189,15 @@ async def audit(limit: int = 50) -> JSONResponse:
 
 
 @app.get("/strength")
-async def strength(competition: str = "") -> JSONResponse:
-    """球队强度榜（由本地赛果重建，不联网）。"""
+async def strength(competition: str | None = None) -> JSONResponse:
+    """球队强度榜（由本地赛果重建，不联网）。
+
+    默认按当前配置联赛过滤；显式传 ?competition=ELC 可看其他竞赛，
+    传 ?competition=（空）才表示不过滤、统计全部竞赛。
+    """
+    comp = _default_competition() if competition is None else competition
     try:
-        data = analytics.strength_table(_DB_PATH, competition=competition)
+        data = analytics.strength_table(_DB_PATH, competition=comp)
     except Exception as exc:
         log.exception("/strength 计算失败")
         raise HTTPException(status_code=500, detail=f"计算失败：{exc}") from exc
