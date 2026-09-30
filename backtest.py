@@ -486,22 +486,29 @@ def level_monotonic(report: BacktestReport) -> dict:
 
 
 def run_backtest(matches: list[dict], *, min_history: int = DEFAULT_MIN_HISTORY,
-                 variant: str = "elo") -> dict:
+                 variant: str = "poisson") -> dict:
     """一键跑双路回测：纯泊松（基线） vs 指定变体（挑战者）。
 
     variant:
-        "elo"  —— 泊松 + Elo 融合
-        "dc"   —— 泊松 + Dixon-Coles 低比分修正
+        "poisson" —— 纯 Maher/Poisson，与线上 /predict 口径一致（默认）
+        "elo"     —— 泊松 + Elo 融合
+        "dc"      —— 泊松 + Dixon-Coles 低比分修正
+
+    默认取 "poisson"：线上 service.py 调用 predict_match() 时不传
+    elo_home_advantage，即线上跑的就是纯泊松。回测默认必须与之对齐，
+    否则报出来的数字描述的不是线上模型。
     """
     use_dc = (variant == "dc")
     use_elo = (variant == "elo")
     base = WalkForwardBacktester(min_history=min_history, use_elo=False,
                                  use_dc=False).run(matches)
-    chal = WalkForwardBacktester(min_history=min_history, use_elo=use_elo,
-                                 use_dc=use_dc).run(matches)
+    chal_tester = WalkForwardBacktester(min_history=min_history, use_elo=use_elo,
+                                        use_dc=use_dc)
+    chal = chal_tester.run(matches)
     return {
         "comparison": compare(base, chal),
         "baseline_levels": level_monotonic(base),
         "challenger_levels": level_monotonic(chal),
-        "rho": chal.rho if use_dc else None,
+        # ρ 拟合在 tester 上（report 不携带），dc 变体才有意义
+        "rho": chal_tester.rho if use_dc else None,
     }

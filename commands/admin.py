@@ -330,12 +330,30 @@ BACKTEST_MIN_EVAL = 20
 BACKTEST_MIN_TOTAL = DEFAULT_MIN_HISTORY + BACKTEST_MIN_EVAL
 
 
+# /backtest 可选的变体。默认 "poisson" —— 必须与线上 /predict 实际使用的
+# 模型保持一致（service.py 调用 predict_match 时不传 elo_home_advantage，
+# 即线上是纯 Maher/Poisson）。Elo / Dixon-Coles 只能显式指定，作为对照。
+BACKTEST_VARIANTS = {"poisson": "纯泊松", "elo": "泊松+Elo", "dc": "泊松+DC"}
+
+
+def _parse_backtest_variant(context) -> str:
+    """解析 /backtest 的变体参数；缺省或非法值一律回退到线上口径。"""
+    args = list(getattr(context, "args", None) or [])
+    raw = (args[0] or "").strip().lower() if args else ""
+    return raw if raw in BACKTEST_VARIANTS else "poisson"
+
+
 async def backtest_cmd(update, context) -> None:
     """/backtest — 用本地库真实赛果做走前回测（零 API 开销）。
 
     与 /backfill 的分工：/backfill 只补赛程赛果入库；本命令用这些赛果
     **当场重演**模型在赛前的判断，再与真实比分对照。预测只用该场之前的
     历史，不存在前视偏差，因此是可信样本。
+
+    默认评估纯泊松（与线上 /predict 同口径）；Elo / Dixon-Coles 需显式指定：
+        /backtest          → 纯泊松（线上口径）
+        /backtest elo      → 额外对比 泊松+Elo
+        /backtest dc       → 额外对比 泊松+DC
 
     局限（必须如实告知，不夸大）：
     · 免费套餐只有当前赛季，无法跨赛季回测；
@@ -377,9 +395,11 @@ async def backtest_cmd(update, context) -> None:
             disable_web_page_preview=True)
         return
 
+    variant = _parse_backtest_variant(context)
     try:
         result = await asyncio.to_thread(
-            run_backtest, matches, min_history=DEFAULT_MIN_HISTORY, variant="elo")
+            run_backtest, matches, min_history=DEFAULT_MIN_HISTORY,
+            variant=variant)
     except Exception as exc:
         log.exception("/backtest 回测失败")
         await progress.edit_text(f"❌ 回测失败：{describe_error(exc)}")
@@ -397,6 +417,13 @@ async def backtest_cmd(update, context) -> None:
         return (f"<code>{pad_cjk(tag, 10)}</code>"
                 f"<code>LL {ll_txt}</code> <code>命中 {acc_txt}</code>")
 
+    def comparison_rows(b: dict, c: dict, var: str) -> list[str]:
+        """默认（poisson）时基线与挑战者本就是同一模型，只列一行，
+        避免输出两行相同数字造成误读；显式变体时才列双路。"""
+        if var == "poisson":
+            return [_row("纯泊松", b), "（＝线上 /predict 口径）"]
+        return [_row("纯泊松", b), _row(BACKTEST_VARIANTS[var], c)]
+
     verdict = comp.get("verdict") or "无法判断"
     delta_txt = (f"{delta:+.4f}（正数＝挑战者更好）" if delta is not None else "—")
 
@@ -407,10 +434,7 @@ async def backtest_cmd(update, context) -> None:
             kv_line("🎯", "计入评估", f"{n} 场", W),
             kv_line("🔥", "预热", f"{DEFAULT_MIN_HISTORY} 场（不计入评估）", W),
         ]),
-        section("⚖️", "双路对比", *[
-            _row("纯泊松", base),
-            _row("泊松+Elo", chal),
-        ]),
+        section("⚖️", "双路对比", *comparison_rows(base, chal, variant)),
         section("📉", "差异", *[
             kv_line("🔻", "Δ Log Loss", delta_txt, W),
             kv_line("🏁", "判定", verdict, W),
@@ -428,7 +452,9 @@ async def backtest_cmd(update, context) -> None:
 
     blocks.append(section("ℹ️", "口径说明",
                           "仅当前赛季（免费套餐无历史赛季）；预测只使用该场之前的赛果，"
-                          "无前视偏差。样本随赛季推进自然增长。"))
+                          "无前视偏差。样本随赛季推进自然增长。"
+                          f"当前变体：{BACKTEST_VARIANTS[variant]}"
+                          "（默认纯泊松＝线上口径；/backtest elo 可对照 Elo）"))
 
     await progress.edit_text(
         normalize(section_join(blocks)), parse_mode="HTML",

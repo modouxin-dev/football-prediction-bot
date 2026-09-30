@@ -123,3 +123,69 @@ def test_backtest_other_league_not_counted(tmp_path):
     conn.commit()
     assert repo.count_finished_matches("PL") == 70
     assert repo.count_finished_matches("ELC") == 60
+
+
+# ---- 模型口径一致性：/backtest 默认必须评估线上实际使用的模型 --------------
+
+def test_default_variant_is_poisson_like_online():
+    """线上 predict_match 不传 elo_home_advantage → 纯泊松。回测默认必须一致。"""
+    from commands.admin import _parse_backtest_variant
+    ctx = type("C", (), {})()                      # 完全没有 args 属性
+    assert _parse_backtest_variant(ctx) == "poisson"
+
+
+def test_variant_arg_is_parsed():
+    from commands.admin import _parse_backtest_variant
+    for raw, want in [("elo", "elo"), ("ELO", "elo"), ("dc", "dc"), ("poisson", "poisson")]:
+        ctx = type("C", (), {"args": [raw]})()
+        assert _parse_backtest_variant(ctx) == want, raw
+
+
+def test_invalid_variant_falls_back_to_poisson():
+    """非法参数不得炸命令，一律回退到线上口径。"""
+    from commands.admin import _parse_backtest_variant
+    for raw in ["xxx", "", None]:
+        ctx = type("C", (), {"args": [raw]})()
+        assert _parse_backtest_variant(ctx) == "poisson", raw
+
+
+def _synth(n=120, seed=7):
+    import random
+    rnd = random.Random(seed)
+    teams = [f"T{i}" for i in range(8)]
+    return [{
+        "id": i, "utc_date": f"2026-01-{i % 28 + 1:02d}T15:00", "competition": "PL",
+        "home_team_id": teams[i % 8], "away_team_id": teams[(i * 3 + 1) % 8],
+        "home_score": rnd.randint(0, 3), "away_score": rnd.randint(0, 3),
+        "status": "FT"} for i in range(n)]
+
+
+def test_run_backtest_default_challenger_equals_baseline():
+    """默认 variant 下挑战者就是基线本身——判定取哪一路都不再有歧义。"""
+    from backtest import run_backtest
+    c = run_backtest(_synth(), min_history=30)["comparison"]
+    assert c["baseline"]["log_loss"] == c["challenger"]["log_loss"]
+    assert c["baseline"]["n"] == c["challenger"]["n"]
+
+
+def test_elo_remains_available_explicitly():
+    """Elo 保留为显式 challenger，不删除。"""
+    from backtest import run_backtest
+    r = run_backtest(_synth(), min_history=30, variant="elo")
+    assert r["comparison"]["challenger"]["n"] > 0
+
+
+def test_dc_variant_returns_rho():
+    """dc 变体曾因 BacktestReport 无 rho 属性而崩溃（回归锁）。"""
+    from backtest import run_backtest
+    r = run_backtest(_synth(), min_history=30, variant="dc")
+    assert r["rho"] is not None
+    assert r["comparison"]["challenger"]["n"] > 0
+
+
+def test_backtest_default_output_marks_online_parity(tmp_path):
+    """默认输出只列纯泊松一行并标明＝线上口径，不出现 Elo 对照行。"""
+    repo = _seed(str(tmp_path / "e.db"), 100, 70)
+    out = _run(repo)
+    assert "（＝线上 /predict 口径）" in out
+    assert "泊松+Elo" not in out

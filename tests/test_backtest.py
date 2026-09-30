@@ -221,10 +221,18 @@ def test_compare_identical_is_no_difference():
 def test_run_backtest_returns_both_paths():
     result = run_backtest(make_matches(80), min_history=20)
     assert "comparison" in result
+    # 默认必须与线上 /predict 同口径：基线与挑战者都是纯泊松
     assert result["comparison"]["baseline"]["label"] == "poisson"
-    assert result["comparison"]["challenger"]["label"] == "elo"
+    assert result["comparison"]["challenger"]["label"] == "poisson"
     assert result["comparison"]["baseline"]["n"] > 0
     assert result["comparison"]["challenger"]["n"] > 0
+
+
+def test_elo_variant_must_be_explicit():
+    """Elo 保留为对照变体，但不再作为默认判定口径。"""
+    result = run_backtest(make_matches(80), min_history=20, variant="elo")
+    assert result["comparison"]["baseline"]["label"] == "poisson"
+    assert result["comparison"]["challenger"]["label"] == "elo"
 
 
 def test_level_monotonic_structure():
