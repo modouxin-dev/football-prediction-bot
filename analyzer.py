@@ -273,6 +273,16 @@ def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES,
                        use_dsa_clamp: bool = False) -> LeagueModel:
     """由积分榜行（API-Football /standings）计算联赛均值与每队主客场攻防强度。
 
+    ⛔ DSA 状态：未启用 / 未验证有效 / 实测为负
+    -----------------------------------------
+    ``match_logs`` 相关的加权逻辑是 opt-in 的**死代码路径**：线上
+    ``service.py`` 与 ``analytics.py`` 的调用点均不传 ``match_logs``，
+    实际走原逻辑，两者行为完全一致。
+
+    20 场景合成回测（10 seed × drift 0/1）：平均 Δ Log Loss
+    **+0.002747（变差）**，改善场景 **1/20**。详见 ARCHITECTURE.md
+    「四·补」章节。**请勿启用**，等真实样本 ≥60 场已完赛再回来验证。
+
     参数
     ----
     rows
