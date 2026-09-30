@@ -211,6 +211,9 @@ def _blank_stats(team_id) -> dict:
     return {
         "team_id": team_id, "home_played": 0, "home_for": 0, "home_against": 0,
         "away_played": 0, "away_for": 0, "away_against": 0,
+        # DSA 逐场日志：(序号, 进球数)。序号越大表示越晚发生（越"近"）。
+        "home_for_log": [], "home_against_log": [],
+        "away_for_log": [], "away_against_log": [],
     }
 
 
@@ -225,10 +228,14 @@ class WalkForwardBacktester:
 
     def __init__(self, *, min_history: int = DEFAULT_MIN_HISTORY,
                  use_elo: bool = True, use_dc: bool = False,
-                 competition: str = "BT", prior_games: int | None = None) -> None:
+                 competition: str = "BT", prior_games: int | None = None,
+                 use_dsa: bool = False, use_dsa_clamp: bool = False) -> None:
         self.min_history = max(0, int(min_history))
         self.use_elo = bool(use_elo)
         self.use_dc = bool(use_dc)
+        # DSA：需要 history 里累积逐场日志（见 _observe）
+        self.use_dsa = bool(use_dsa)
+        self.use_dsa_clamp = bool(use_dsa_clamp)
         self.competition = competition
         self.prior_games = prior_games
         self.analyzer = MatchAnalyzer()
@@ -261,6 +268,14 @@ class WalkForwardBacktester:
         h["home_played"] += 1; h["home_for"] += hs; h["home_against"] += as_
         a["away_played"] += 1; a["away_for"] += as_; a["away_against"] += hs
 
+        # DSA 逐场日志：用处理序号充当时间轴（run() 要求 matches 按时间正序），
+        # 序号越大 = 越近。不依赖真实日期字段，故对任何数据源都成立。
+        seq = self._seen
+        h["home_for_log"].append((seq, hs))
+        h["home_against_log"].append((seq, as_))
+        a["away_for_log"].append((seq, as_))
+        a["away_against_log"].append((seq, hs))
+
         hid, aid = str(home_id), str(away_id)
         rh, ra = self._ratings[hid], self._ratings[aid]
         from elo import calculate_elo, goal_diff_multiplier, k_factor_for, outcome_from_score
@@ -284,6 +299,20 @@ class WalkForwardBacktester:
         """返回 ((主胜, 平, 客胜), λ主, λ客)。λ 供 Dixon-Coles 的 ρ 拟合使用。"""
         rows = [_standings_row_from_history(s) for s in self._team_stats.values()]
         kwargs = {} if self.prior_games is None else {"prior_games": self.prior_games}
+        if self.use_dsa:
+            match_logs = {}
+            for s in self._team_stats.values():
+                tid = s["team_id"]
+                if any(s[k] for k in ("home_for_log", "home_against_log",
+                                      "away_for_log", "away_against_log")):
+                    match_logs[tid] = {
+                        "home_for": s["home_for_log"],
+                        "home_against": s["home_against_log"],
+                        "away_for": s["away_for_log"],
+                        "away_against": s["away_against_log"],
+                    }
+            kwargs["match_logs"] = match_logs
+            kwargs["use_dsa_clamp"] = self.use_dsa_clamp
         model = build_league_model(rows, **kwargs) if rows else None
 
         if model is None or not model.teams:

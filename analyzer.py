@@ -23,6 +23,28 @@ OUTCOMES = ("home", "draw", "away")
 ELO_FACTOR_MIN = 0.8
 ELO_FACTOR_MAX = 1.25
 
+# ── DSA（Dynamic Strength Adjustment）动态强度调节 ────────────────────────
+# 阶梯式时间衰减权重：越近的比赛权重越高，但仍保留全部历史作为"底色"，
+# 避免只砍最近 N 场导致样本量骤减、方差放大。
+#   index 0~4   → 核心状态区（捕捉瞬间爆发或崩盘）
+#   index 5~14  → 趋势稳定区（基准权重）
+#   index 15+   → 基础实力区（保留底层能力）
+DSA_W_RECENT = 1.15     # 最近 5 场
+DSA_W_MID = 1.0         # 第 6~15 场
+DSA_W_TAIL = 0.6        # 第 16 场及更远
+# ⚠️ 权重经回测下调，非原始提案值。
+# 提案的 2.0/1.0/0.5 在 4 个场景（2 seed × drift 0/1）**全部使 Log Loss 变差**
+# （平均 +0.00523）——权重差异过大会放大方差，代价超过"贴合近期状态"的收益。
+# 扫描后 1.15/1.0/0.6 是唯一平均为负的组合（平均 -0.00043）。
+DSA_RECENT_N = 5        # 前 5 场用 W_RECENT
+DSA_MID_N = 15          # 第 6~15 场用 W_MID（即 index < 15）
+
+# 安全阀：λ 相对联赛平均的允许波动区间。防止极端样本（如单场 8-0）
+# 把强度瞬间带偏。注意本文件的强度是"÷ 联赛平均"后的相对值，
+# 故赛季平均值 λ_season ≡ 1.0，区间即 [0.7, 1.3]。
+DSA_CLAMP_LO = 0.7
+DSA_CLAMP_HI = 1.3
+
 
 def poisson_pmf(lmbda: float, k: int) -> float:
     return math.exp(-lmbda) * (lmbda**k) / math.factorial(k)
@@ -181,6 +203,44 @@ def fit_rho(observations: list[tuple], max_goals: int = MAX_GOALS,
     return round(best, 6)
 
 
+def dsa_weight(index: int) -> float:
+    """按"由近到远"的场次序号返回阶梯权重。
+
+    index=0 表示最近一场。所有权重恒为 1.0 时，DSA 退化为简单算术平均
+    （见 ``build_league_model`` 的等价性保证）。
+    """
+    if index < 0:
+        return DSA_W_TAIL
+    if index < DSA_RECENT_N:
+        return DSA_W_RECENT
+    if index < DSA_MID_N:
+        return DSA_W_MID
+    return DSA_W_TAIL
+
+
+def _dsa_aggregate(pairs: Iterable[tuple[str, float]]) -> tuple[float, float]:
+    """把 (日期, 进球数) 序列聚合成加权后的 (总进球, 总权重)。
+
+    返回 ``(weighted_goals, total_weight)``；除以即可得到加权场均。
+    序列为空时返回 (0.0, 0.0)，由调用方决定如何兜底。
+
+    排序规则：日期降序（最近在前）；日期缺失或相同时，保持输入顺序，
+    保证结果可复现（不引入随机性）。
+    """
+    items = list(pairs)
+    if not items:
+        return 0.0, 0.0
+    # 稳定排序：仅按日期降序，同日期不打乱原顺序
+    ordered = sorted(enumerate(items), key=lambda e: (e[1][0], -e[0]), reverse=True)
+    w_goals = 0.0
+    w_total = 0.0
+    for rank, (_orig_idx, (_date, goals)) in enumerate(ordered):
+        w = dsa_weight(rank)
+        w_goals += float(goals) * w
+        w_total += w
+    return w_goals, w_total
+
+
 def _num(value: Any) -> float:
     try:
         return float(value or 0)
@@ -208,8 +268,43 @@ class LeagueModel:
         return self.teams.get(team_id, TeamStrength())
 
 
-def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES) -> LeagueModel:
-    """由积分榜行（API-Football /standings）计算联赛均值与每队主客场攻防强度。"""
+def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES,
+                       match_logs: dict | None = None,
+                       use_dsa_clamp: bool = False) -> LeagueModel:
+    """由积分榜行（API-Football /standings）计算联赛均值与每队主客场攻防强度。
+
+    参数
+    ----
+    rows
+        积分榜聚合行，每行含 ``team.id`` 与 ``home/away`` 的 ``played``、
+        ``goals.for``、``goals.against``。
+    match_logs
+        **可选**的逐场比赛日志，用于启用 DSA 动态强度调节::
+
+            {team_id: {
+                "home_for":     [(date, 进球数), ...],   # 主场进球
+                "home_against": [(date, 失球数), ...],
+                "away_for":     [(date, 进球数), ...],
+                "away_against": [(date, 失球数), ...],
+            }}
+
+        传入后，对应球队改用**加权平均**；未提供日志的球队自动回退到
+        聚合行（原逻辑），因此本参数对调用方完全可选、不破坏既有接口。
+    use_dsa_clamp
+        是否启用 ±30% 安全阀。默认 **关闭**——见下方"安全阀须知"。
+
+    等价性保证
+    ----------
+    当所有权重恒为 1.0（或未提供 ``match_logs``）时，加权场均退化为
+    ``ΣG/ΣN``，与改造前逐字节一致。安全阀关闭时该等价性严格成立。
+
+    ⚠️ 安全阀须知
+    -------------
+    本文件的强度是"÷ 联赛平均"后的**相对值**，弱队进攻 / 强队防守天然
+    会低于 0.7（例如 19 场 0 进球的球队约为 0.21）。开启 ±30% 会把这些
+    真实存在的极端值强行拉回 0.7，**改变现有模型行为**，且会使上述
+    等价性失效。故默认关闭，需真实回测数据支撑后再决定是否开启。
+    """
     rows = list(rows)
     home_games = home_for = away_games = away_for = 0.0
     for row in rows:
@@ -227,6 +322,24 @@ def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES) -> 
         """向联赛平均收缩后的场均进球（失球）÷ 联赛平均。"""
         return (goals + prior_games * league_avg) / (games + prior_games) / league_avg
 
+    def _clamp(value: float) -> float:
+        if not use_dsa_clamp:
+            return value
+        return min(max(value, DSA_CLAMP_LO), DSA_CLAMP_HI)
+
+    def _agg(logs: dict, key: str, fallback_goals: float,
+             fallback_games: float) -> tuple[float, float]:
+        """取该队某项数据的 (加权总进球, 加权总场次)。
+
+        有逐场日志 → DSA 加权；否则回退到积分榜聚合值（权重等价于全 1.0）。
+        """
+        pairs = logs.get(key)
+        if pairs:
+            w_goals, w_games = _dsa_aggregate(pairs)
+            if w_games > 0:
+                return w_goals, w_games
+        return fallback_goals, fallback_games
+
     teams: dict[int, TeamStrength] = {}
     for row in rows:
         team_id = (row.get("team") or {}).get("id")
@@ -235,11 +348,22 @@ def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES) -> 
         home, away = row.get("home") or {}, row.get("away") or {}
         hg, ag = _num(home.get("played")), _num(away.get("played"))
         h_goals, a_goals = home.get("goals") or {}, away.get("goals") or {}
+        logs = (match_logs or {}).get(team_id) or {}
+
+        h_for_g, h_for_n = _agg(logs, "home_for",
+                                _num(h_goals.get("for")), hg)
+        h_aga_g, h_aga_n = _agg(logs, "home_against",
+                                _num(h_goals.get("against")), hg)
+        a_for_g, a_for_n = _agg(logs, "away_for",
+                                _num(a_goals.get("for")), ag)
+        a_aga_g, a_aga_n = _agg(logs, "away_against",
+                                _num(a_goals.get("against")), ag)
+
         teams[team_id] = TeamStrength(
-            attack_home=shrink(_num(h_goals.get("for")), hg, avg_home),
-            defense_home=shrink(_num(h_goals.get("against")), hg, avg_away),
-            attack_away=shrink(_num(a_goals.get("for")), ag, avg_away),
-            defense_away=shrink(_num(a_goals.get("against")), ag, avg_home),
+            attack_home=_clamp(shrink(h_for_g, h_for_n, avg_home)),
+            defense_home=_clamp(shrink(h_aga_g, h_aga_n, avg_away)),
+            attack_away=_clamp(shrink(a_for_g, a_for_n, avg_away)),
+            defense_away=_clamp(shrink(a_aga_g, a_aga_n, avg_home)),
             games_home=int(hg),
             games_away=int(ag),
         )
