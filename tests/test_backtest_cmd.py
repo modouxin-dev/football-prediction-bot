@@ -68,10 +68,11 @@ class _Service:
         self.sync = type("S", (), {"competition": "PL"})()
 
 
-def _run(repo):
+def _run(repo, args=None):
     sink = []
     ctx = type("C", (), {
         "application": type("A", (), {"bot_data": {"service": _Service(repo)}})(),
+        "args": list(args or []),
     })()
     asyncio.run(backtest_cmd(_Update(sink), ctx))
     return "\n".join(sink)
@@ -131,14 +132,14 @@ def test_default_variant_is_poisson_like_online():
     """线上 predict_match 不传 elo_home_advantage → 纯泊松。回测默认必须一致。"""
     from commands.admin import _parse_backtest_variant
     ctx = type("C", (), {})()                      # 完全没有 args 属性
-    assert _parse_backtest_variant(ctx) == "poisson"
+    assert _parse_backtest_variant(ctx)[0] == "poisson"
 
 
 def test_variant_arg_is_parsed():
     from commands.admin import _parse_backtest_variant
     for raw, want in [("elo", "elo"), ("ELO", "elo"), ("dc", "dc"), ("poisson", "poisson")]:
         ctx = type("C", (), {"args": [raw]})()
-        assert _parse_backtest_variant(ctx) == want, raw
+        assert _parse_backtest_variant(ctx)[0] == want, raw
 
 
 def test_invalid_variant_falls_back_to_poisson():
@@ -146,7 +147,7 @@ def test_invalid_variant_falls_back_to_poisson():
     from commands.admin import _parse_backtest_variant
     for raw in ["xxx", "", None]:
         ctx = type("C", (), {"args": [raw]})()
-        assert _parse_backtest_variant(ctx) == "poisson", raw
+        assert _parse_backtest_variant(ctx)[0] == "poisson", raw
 
 
 def _synth(n=120, seed=7):
@@ -187,5 +188,34 @@ def test_backtest_default_output_marks_online_parity(tmp_path):
     """默认输出只列纯泊松一行并标明＝线上口径，不出现 Elo 对照行。"""
     repo = _seed(str(tmp_path / "e.db"), 100, 70)
     out = _run(repo)
+    assert "（＝线上 /predict 口径）" in out
+    assert "泊松+Elo" not in out
+
+
+def test_variant_found_even_when_pasted_with_a_second_command(tmp_path):
+    """手机端常见「/backtest\\n/backtest elo」一起粘贴：变体仍要生效。
+
+    回归锁：过去只认 args[0]，此时 args=['/backtest','elo']，首位不是合法
+    变体就静默退回默认，用户以为指定了 elo 却拿到纯泊松。
+    """
+    repo = _seed(str(tmp_path / "f.db"), 100, 70)
+    out = _run(repo, ["/backtest", "elo"])
+    assert "当前变体：泊松+Elo" in out
+    assert "泊松+Elo" in out
+
+
+def test_unknown_variant_is_reported_not_silently_ignored(tmp_path):
+    """无法识别的参数必须显式告知，不能静默回退成默认值。"""
+    repo = _seed(str(tmp_path / "g.db"), 100, 70)
+    out = _run(repo, ["xyz"])
+    assert "参数未识别" in out
+    assert "xyz" in out
+    assert "当前变体：纯泊松" in out
+
+
+def test_explicit_poisson_keeps_single_row(tmp_path):
+    """显式 poisson 与默认一致：单行输出、不出现 Elo 对照行。"""
+    repo = _seed(str(tmp_path / "h.db"), 100, 70)
+    out = _run(repo, ["poisson"])
     assert "（＝线上 /predict 口径）" in out
     assert "泊松+Elo" not in out

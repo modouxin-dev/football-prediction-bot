@@ -336,11 +336,26 @@ BACKTEST_MIN_TOTAL = DEFAULT_MIN_HISTORY + BACKTEST_MIN_EVAL
 BACKTEST_VARIANTS = {"poisson": "纯泊松", "elo": "泊松+Elo", "dc": "泊松+DC"}
 
 
-def _parse_backtest_variant(context) -> str:
-    """解析 /backtest 的变体参数；缺省或非法值一律回退到线上口径。"""
-    args = list(getattr(context, "args", None) or [])
-    raw = (args[0] or "").strip().lower() if args else ""
-    return raw if raw in BACKTEST_VARIANTS else "poisson"
+def _parse_backtest_variant(context) -> tuple[str, list[str]]:
+    """解析 /backtest 的变体参数。返回 (变体, 被忽略的无法识别参数)。
+
+    只认 args[0] 是不够的：手机端常把多条命令一起粘贴发送（例如
+    「/backtest\\n/backtest elo」），此时 Telegram 会把整条消息当一条命令，
+    args 变成 ['/backtest', 'elo']，只看首位就会静默退回默认值，用户以为
+    自己指定了变体却拿到了默认结果。因此这里扫描全部参数，跳过以 `/`
+    开头的 token，取第一个合法变体。
+
+    无法识别的参数原样返回，由调用方显式提示——静默回退最容易误导。
+    """
+    args = [a for a in (getattr(context, "args", None) or []) if not str(a).startswith("/")]
+    rejected = []
+    for raw in args:
+        token = (raw or "").strip().lower()
+        if token in BACKTEST_VARIANTS:
+            return token, rejected
+        if token:
+            rejected.append(token)
+    return "poisson", rejected
 
 
 async def backtest_cmd(update, context) -> None:
@@ -395,7 +410,7 @@ async def backtest_cmd(update, context) -> None:
             disable_web_page_preview=True)
         return
 
-    variant = _parse_backtest_variant(context)
+    variant, rejected = _parse_backtest_variant(context)
     try:
         result = await asyncio.to_thread(
             run_backtest, matches, min_history=DEFAULT_MIN_HISTORY,
@@ -449,6 +464,11 @@ async def backtest_cmd(update, context) -> None:
     elif mono is False:
         blocks.append(section("⚠️", "信心分级",
                               "不单调：高信心命中率未高于低信心，分级暂不可信"))
+
+    if rejected:
+        blocks.append(section("⚠️", "参数未识别",
+                              f"已忽略：{'、'.join(rejected)}，按默认纯泊松执行。"
+                              "可用变体：poisson / elo / dc"))
 
     blocks.append(section("ℹ️", "口径说明",
                           "仅当前赛季（免费套餐无历史赛季）；预测只使用该场之前的赛果，"
