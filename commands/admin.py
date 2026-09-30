@@ -4,13 +4,16 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
 
 import paths
+from backtest import DEFAULT_MIN_HISTORY, run_backtest
 from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
+from migrate_elo import fetch_finished
 from tghtml import normalize
 from telegram.constants import ChatAction
 
@@ -321,6 +324,117 @@ async def backfill_cmd(update, context) -> None:
     await progress.edit_text(normalize(section_join(blocks)), parse_mode="HTML")
 
 
+# 回测可信门槛：预热场次 + 至少 20 场用于评估。
+# 低于此数时只报数字、不给结论——小样本上的「准确率」是噪声，不是能力。
+BACKTEST_MIN_EVAL = 20
+BACKTEST_MIN_TOTAL = DEFAULT_MIN_HISTORY + BACKTEST_MIN_EVAL
+
+
+async def backtest_cmd(update, context) -> None:
+    """/backtest — 用本地库真实赛果做走前回测（零 API 开销）。
+
+    与 /backfill 的分工：/backfill 只补赛程赛果入库；本命令用这些赛果
+    **当场重演**模型在赛前的判断，再与真实比分对照。预测只用该场之前的
+    历史，不存在前视偏差，因此是可信样本。
+
+    局限（必须如实告知，不夸大）：
+    · 免费套餐只有当前赛季，无法跨赛季回测；
+    · 样本量受赛季进度限制，赛季初必然偏少。
+    """
+    await _typing(update)
+    progress = await update.effective_message.reply_text(
+        "⏳ 正在用本地赛果回测（不消耗任何额度）…")
+    service = context.application.bot_data["service"]
+    competition = getattr(getattr(service, "sync", None), "competition", "") or ""
+
+    try:
+        matches = await asyncio.to_thread(fetch_finished, service.repo, competition)
+    except Exception as exc:
+        log.exception("/backtest 读取本地赛果失败")
+        await progress.edit_text(f"❌ 读取失败：{describe_error(exc)}")
+        return
+
+    W = 12
+    total = len(matches)
+
+    if total < BACKTEST_MIN_TOTAL:
+        need = BACKTEST_MIN_TOTAL - total
+        blocks = [
+            ["🧪 <b>历史回测</b>", BLANK],
+            section("⚠️", "样本不足", *[
+                kv_line("📦", "本地已完赛", f"{total} 场", W),
+                kv_line("🎯", "可信门槛", f"{BACKTEST_MIN_TOTAL} 场", W),
+                kv_line("📉", "还差", f"{need} 场", W),
+            ]),
+            section("🛠", "如何补齐",
+                    "执行 /backfill 拉取整季赛程（免费套餐包含当前赛季全部赛果）"),
+            section("ℹ️", "为何不硬算",
+                    f"不足 {BACKTEST_MIN_EVAL} 场评估样本时的「命中率」是噪声，"
+                    "算出来也是假结论，宁可空着。"),
+        ]
+        await progress.edit_text(
+            normalize(section_join(blocks)), parse_mode="HTML",
+            disable_web_page_preview=True)
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            run_backtest, matches, min_history=DEFAULT_MIN_HISTORY, variant="elo")
+    except Exception as exc:
+        log.exception("/backtest 回测失败")
+        await progress.edit_text(f"❌ 回测失败：{describe_error(exc)}")
+        return
+
+    comp = result["comparison"]
+    base, chal = comp["baseline"], comp["challenger"]
+    n = chal["n"] or 0
+    delta = comp.get("log_loss_delta")
+
+    def _row(tag: str, d: dict) -> str:
+        ll, acc = d.get("log_loss"), d.get("accuracy")
+        ll_txt = f"{ll:.4f}" if ll is not None else "—"
+        acc_txt = f"{acc:>3.0%}" if acc is not None else " —"
+        return (f"<code>{pad_cjk(tag, 10)}</code>"
+                f"<code>LL {ll_txt}</code> <code>命中 {acc_txt}</code>")
+
+    verdict = comp.get("verdict") or "无法判断"
+    delta_txt = (f"{delta:+.4f}（正数＝挑战者更好）" if delta is not None else "—")
+
+    blocks = [
+        ["🧪 <b>历史回测</b>", BLANK],
+        section("📦", "样本", *[
+            kv_line("🗄", "已完赛", f"{total} 场", W),
+            kv_line("🎯", "计入评估", f"{n} 场", W),
+            kv_line("🔥", "预热", f"{DEFAULT_MIN_HISTORY} 场（不计入评估）", W),
+        ]),
+        section("⚖️", "双路对比", *[
+            _row("纯泊松", base),
+            _row("泊松+Elo", chal),
+        ]),
+        section("📉", "差异", *[
+            kv_line("🔻", "Δ Log Loss", delta_txt, W),
+            kv_line("🏁", "判定", verdict, W),
+            kv_line("🧭", "校准误差", f"{chal.get('ece'):.4f}"
+                    if chal.get("ece") is not None else "—", W),
+        ]),
+    ]
+
+    mono = (result.get("challenger_levels") or {}).get("monotonic")
+    if mono is True:
+        blocks.append(section("🏅", "信心分级", "单调成立：高信心命中率 ≥ 中 ≥ 低"))
+    elif mono is False:
+        blocks.append(section("⚠️", "信心分级",
+                              "不单调：高信心命中率未高于低信心，分级暂不可信"))
+
+    blocks.append(section("ℹ️", "口径说明",
+                          "仅当前赛季（免费套餐无历史赛季）；预测只使用该场之前的赛果，"
+                          "无前视偏差。样本随赛季推进自然增长。"))
+
+    await progress.edit_text(
+        normalize(section_join(blocks)), parse_mode="HTML",
+        disable_web_page_preview=True)
+
+
 async def _typing(update) -> None:
     """统一先发「正在输入」。发送失败不影响主流程——这只是体验优化。"""
     try:
@@ -336,3 +450,5 @@ def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("storage", storage_cmd, admin_only=True, description="存储自检")
     dispatcher.register("backfill", backfill_cmd, admin_only=True,
                         description="拉取整季赛程，填充强度榜样本")
+    dispatcher.register("backtest", backtest_cmd, admin_only=True,
+                        description="用本地真实赛果回测（不消耗额度）")
