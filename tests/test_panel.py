@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from telegram import KeyboardButton
+from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 import main
 from bot_handler import BotUI
@@ -66,12 +66,14 @@ def text_update(text):
 
 # ---- 键盘形态 -----------------------------------------------------------------
 
-def test_collapsed_keyboard_has_only_open_button():
-    """收起态：整块缩成一行，把屏幕还给正文。"""
+def test_collapsed_keyboard_is_removed():
+    """收起态必须是 ReplyKeyboardRemove，而不是「只留一行按钮」。
+
+    回归：此前 collapsed 返回的是仅含「☰ 菜单」的 ReplyKeyboardMarkup，
+    客户端仍会为它保留一行高度，视觉上键盘并没有沉下去。
+    """
     markup = BotUI.reply_menu_keyboard(expanded=False)
-    flat = [b for row in markup.keyboard for b in row]
-    assert [b.text for b in flat] == [PANEL_OPEN_LABEL]
-    assert len(markup.keyboard) == 1
+    assert isinstance(markup, ReplyKeyboardRemove)
 
 
 def test_expanded_keyboard_ends_with_close_row():
@@ -147,11 +149,12 @@ def test_toggle_sends_matching_keyboard():
     update, msg = text_update(PANEL_CLOSE_LABEL)
     run(main.on_menu_text(update, ctx))
     markup = msg.replies[-1][1]["reply_markup"]
-    assert [b.text for row in markup.keyboard for b in row] == [PANEL_OPEN_LABEL]
+    assert isinstance(markup, ReplyKeyboardRemove)
 
     update2, msg2 = text_update(PANEL_OPEN_LABEL)
     run(main.on_menu_text(update2, ctx))
     markup2 = msg2.replies[-1][1]["reply_markup"]
+    assert isinstance(markup2, ReplyKeyboardMarkup)
     assert [b.text for b in markup2.keyboard[-1]] == [PANEL_CLOSE_LABEL]
 
 
