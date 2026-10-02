@@ -41,6 +41,7 @@ from formatkit import (
     esc,
     kv_line,
     league_label,
+    leagues_label,
     pad_cjk,
     section,
     section_join,
@@ -91,7 +92,7 @@ class MenuView:
                 "\n"
                 "⚙️ <b>运行环境</b>\n"
                 f"{THIN_SEP}\n"
-                f"│ 联赛　<code>{esc(league_label(settings.league_id))}</code>\n"
+                f"│ 联赛　<code>{esc(leagues_label(getattr(settings, 'league_ids', None) or (settings.league_id,)))}</code>\n"
                 f"│ 赛季　<code>{settings.season}</code>\n"
                 f"└ 时区　<code>{esc(settings.timezone.zone)}</code>\n"
                 "\n"

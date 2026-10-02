@@ -87,7 +87,8 @@ async def status_cmd(update, context) -> None:
     version = (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]
     # 前缀交给标签列（「联赛/赛季」）承担，这里只给值，避免出现
     # 「联赛/赛季 联赛/赛季：39 / 2026」这种重复
-    season_line = f"{settings.league_id} / {settings.season}"
+    league_ids = tuple(getattr(settings, "league_ids", None) or (settings.league_id,))
+    season_line = f"{' / '.join(str(i) for i in league_ids)} / {settings.season}"
     if settings.season != settings.expected_season:
         season_line += (
             f"（⚠️ 按日期应为 {settings.expected_season}，请更新 SEASON 变量；"

@@ -47,6 +47,26 @@ def league_label(league_id: int) -> str:
     name = LEAGUE_NAMES.get(int(league_id))
     return f"{name} · {league_id}" if name else f"联赛 {league_id}"
 
+
+def leagues_label(league_ids) -> str:
+    """多个联赛的展示名，去重保序后用「/」连接。
+
+    单联赛时与 league_label 输出一致，老配置（无 league_ids）行为不变。
+    """
+    raw = list(league_ids or ())
+    seen, ids = set(), []
+    for i in raw:
+        try:
+            value = int(i)
+        except (TypeError, ValueError):
+            continue
+        if value not in seen:
+            seen.add(value)
+            ids.append(value)
+    if not ids:
+        return "未配置"
+    return " / ".join(league_label(i) for i in ids)
+
 def fmt_time(dt: datetime, tz, pattern: str = "%m-%d %H:%M") -> str:
     """时区格式化。
 
