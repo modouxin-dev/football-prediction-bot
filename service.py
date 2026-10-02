@@ -281,6 +281,9 @@ class PredictionService:
             repo=self.repo,
             competition=getattr(self.sync, "competition", "") or str(settings.league_id),
         )
+        # 每个联赛一套 Elo 引擎：评分按 competition 分区存储，
+        # 西甲的赛果只能改西甲球队的评分，绝不能串到英超。
+        self._elo_engines: dict[int, EloEngine] = {}
         self.elo_enabled: bool = True  # 排障时可关掉，退回纯泊松
         # 本地优先开关：默认开启；关掉则退回每次回源（排障用）
         self.local_first: bool = True
@@ -318,6 +321,22 @@ class PredictionService:
     def _season_for(self, league_id: int) -> int:
         """该联赛解析出的赛季，未记录时回退到当前生效赛季。"""
         return self._season_by_league.get(int(league_id), self.season_in_use)
+
+    def _elo_for(self, league_id: int) -> object:
+        """取该联赛的 Elo 引擎（评分按联赛分区，避免跨联赛污染）。"""
+        from elo import EloEngine
+
+        lid = int(league_id)
+        engine = self._elo_engines.get(lid)
+        if engine is None:
+            comp = ""
+            try:
+                comp = self.sync.competition_for(lid)
+            except Exception:  # 同步层异常不得影响评分回写
+                comp = str(lid)
+            engine = EloEngine(repo=self.repo, competition=comp or str(lid))
+            self._elo_engines[lid] = engine
+        return engine
 
     async def _model_for(self, league_id: int, cache: dict[int, LeagueModel] | None = None) -> LeagueModel:
         """取该联赛的积分榜并建模。cache 用于同一批预测内复用，避免重复请求。"""
@@ -900,8 +919,9 @@ class PredictionService:
             fx_id = (fixture.get("fixture") or {}).get("id")
             if home_id is None or away_id is None or fx_id is None:
                 return
-            self.elo.apply_match(fx_id, home_id, away_id, home_score, away_score,
-                                 season=self.settings.season)
+            self._elo_for(self._league_id_of(fixture)).apply_match(
+                fx_id, home_id, away_id, home_score, away_score,
+                season=self.settings.season)
         except Exception as exc:
             # Elo 出错绝不能拖垮赛果回写
             log.warning("Elo 更新失败（不影响结算）：%s", exc)
