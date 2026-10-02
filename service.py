@@ -260,6 +260,9 @@ class PredictionService:
         self.api = api
         self.analyzer = analyzer or MatchAnalyzer()
         self.season_in_use: int = settings.season
+        # 每个联赛各自解析出的赛季：多联赛下各联赛可用赛季未必相同，
+        # 建模必须用「该场比赛所属联赛」的赛季，不能统一套主联赛的。
+        self._season_by_league: dict[int, int] = {}
         self.using_upcoming: bool = False  # 当前赛程是否为「今日无比赛 → 扩展到未来」的结果
         self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
@@ -300,6 +303,32 @@ class PredictionService:
         result.sort(key=lambda item: item[0])
         return result
 
+    def _league_id_of(self, fx: dict) -> int:
+        """该场比赛真正所属的联赛 ID。
+
+        多联赛下绝不能用主联赛 ID 代替：拿英超积分榜去给西甲比赛建模会算出错误的
+        攻防强度。赛程里带联赛信息时以它为准，缺失时才回退到配置的主联赛。
+        """
+        raw = (fx.get("league") or {}).get("id")
+        try:
+            return int(raw) if raw is not None else int(self.settings.league_id)
+        except (TypeError, ValueError):
+            return int(self.settings.league_id)
+
+    def _season_for(self, league_id: int) -> int:
+        """该联赛解析出的赛季，未记录时回退到当前生效赛季。"""
+        return self._season_by_league.get(int(league_id), self.season_in_use)
+
+    async def _model_for(self, league_id: int, cache: dict[int, LeagueModel] | None = None) -> LeagueModel:
+        """取该联赛的积分榜并建模。cache 用于同一批预测内复用，避免重复请求。"""
+        lid = int(league_id)
+        if cache is not None and lid in cache:
+            return cache[lid]
+        model = build_league_model(await self.api.get_standings(lid, self._season_for(lid)))
+        if cache is not None:
+            cache[lid] = model
+        return model
+
     async def build_predictions(
         self, *, lookahead_hours: int | None = None, limit: int | None = None, now: datetime | None = None
     ) -> list[Prediction]:
@@ -309,7 +338,7 @@ class PredictionService:
         end = now + timedelta(hours=lookahead_hours or s.lookahead_hours)
 
         # 按候选赛季探测：SEASON 过期或套餐不支持当前赛季时，自动向下降级
-        fixtures, season, note = await self._fetch_fixtures(now.date(), end.date())
+        fixtures, season, note = await self._fetch_fixtures_multi(now.date(), end.date())
         upcoming = self._upcoming(fixtures, now, end)
         upcoming = upcoming[: limit or s.max_matches]
         if not upcoming:
@@ -321,10 +350,14 @@ class PredictionService:
             )
             return []
 
-        model = build_league_model(await self.api.get_standings(s.league_id, self.season_in_use))
+        # 一场比赛只能用它所属联赛的积分榜建模；同一联赛的积分榜只请求一次。
+        models: dict[int, LeagueModel] = {}
         predictions = []
         for kickoff, fx in upcoming:
-            prediction = await self._predict_one(model, kickoff, fx)
+            lid = self._league_id_of(fx)
+            if lid not in models:
+                models[lid] = await self._model_for(lid, models)
+            prediction = await self._predict_one(models[lid], kickoff, fx)
             self._remember(prediction)
             predictions.append(prediction)
         return predictions
@@ -469,6 +502,46 @@ class PredictionService:
             raise first_error
         return [], s.season, None
 
+    async def _fetch_fixtures_multi(
+        self, date_from, date_to
+    ) -> tuple[list[dict], int, str | None]:
+        """多联赛赛程：逐个联赛拉取后按开赛时间合并。
+
+        每个联赛独立走自己的赛季降级逻辑，并把解析出的赛季记到 _season_by_league，
+        供后续按联赛建模使用。单联赛失败不拖垮其他联赛；全部失败才抛出真实原因。
+
+        单联赛配置（league_ids 只有一个）时，行为与直接调用 _fetch_fixtures 完全一致。
+        """
+        s = self.settings
+        league_ids = tuple(getattr(s, "league_ids", None) or (s.league_id,))
+        if len(league_ids) == 1:
+            fixtures, season, note = await self._fetch_fixtures(date_from, date_to, league_id=league_ids[0])
+            self._season_by_league[int(league_ids[0])] = season
+            return fixtures, season, note
+
+        results = await asyncio.gather(
+            *(self._fetch_fixtures(date_from, date_to, league_id=lid) for lid in league_ids),
+            return_exceptions=True,
+        )
+        merged: list[dict] = []
+        first_error: BaseException | None = None
+        notes: list[str] = []
+        for lid, res in zip(league_ids, results):
+            if isinstance(res, BaseException):
+                log.warning("联赛 %s 赛程拉取失败：%s", lid, res)
+                if first_error is None:
+                    first_error = res
+                continue
+            fixtures, season, note = res
+            self._season_by_league[int(lid)] = season
+            if note:
+                notes.append(note)
+            merged.extend(fixtures)
+        if not merged and first_error is not None:
+            raise first_error
+        merged.sort(key=lambda fx: parse_kickoff((fx.get("fixture") or {}).get("date")) or datetime.min.replace(tzinfo=timezone.utc))
+        return merged, self.season_in_use, (notes[0] if notes else None)
+
     def _season_range(self) -> tuple | None:
         """当前数据源记录的赛季日期范围（最早 / 最晚比赛日），用于排查窗口命中情况。"""
         fb = getattr(self.api, "fallback", None)
@@ -547,7 +620,7 @@ class PredictionService:
                 return result
 
         try:
-            fixtures, season, note = await self._fetch_fixtures(date_from, date_to)
+            fixtures, season, note = await self._fetch_fixtures_multi(date_from, date_to)
         except APIError as exc:
             # 接口故障 / 权限问题：保留真实原因与原始异常（供上层翻译成用户可读文案）
             result.update(status=ST_NO_DATA, note=str(exc), error=exc)
@@ -637,12 +710,12 @@ class PredictionService:
         self.using_upcoming = False
         self.fixture_day_label = day.isoformat()
 
-        fixtures, season, note = await self._fetch_fixtures(day, day)
+        fixtures, season, note = await self._fetch_fixtures_multi(day, day)
         if not fixtures:
             # 今日无比赛：自动扩展到未来 N 天，避免「今天没比赛」就给用户一片空白。
             # 注意区分：这里是「正常无数据」，仍不能把权限/故障错误伪装成空。
             end = day + timedelta(days=UPCOMING_DAYS)
-            fixtures, season, note = await self._fetch_fixtures(day, end)
+            fixtures, season, note = await self._fetch_fixtures_multi(day, end)
             if fixtures:
                 self.using_upcoming = True
                 self.fixture_day_label = f"{day.isoformat()} ~ {end.isoformat()}"
@@ -695,8 +768,8 @@ class PredictionService:
         teams = fx.get("teams") or {}
         if not (teams.get("home") or {}).get("id") or not (teams.get("away") or {}).get("id"):
             raise APIError("该场比赛缺少参赛队伍信息，无法预测")
-        standings = await self.api.get_standings(self.settings.league_id, self.season_in_use)
-        prediction = await self._predict_one(build_league_model(standings), kickoff, fx)
+        model = await self._model_for(self._league_id_of(fx))
+        prediction = await self._predict_one(model, kickoff, fx)
         self._remember(prediction)
         return prediction
 
@@ -721,7 +794,8 @@ class PredictionService:
         away_id = (teams.get("away") or {}).get("id")
         season = self.season_in_use
 
-        standings = await self.api.get_standings(s.league_id, season)  # 必需：失败直接抛真实原因
+        # 积分榜必需，且必须取该场比赛所属联赛的；失败直接抛真实原因
+        standings = await self.api.get_standings(self._league_id_of(fx), season)
         model = build_league_model(standings)
         rows_by_team = {(r.get("team") or {}).get("id"): r for r in standings}
 
