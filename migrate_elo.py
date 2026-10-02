@@ -49,6 +49,8 @@ def fetch_finished(repo, competition: str) -> list[dict]:
             "fixture_id": r["id"],
             "competition": r["competition_code"],
             "season": r["season"],
+            # 回测语料合并需要按时间排序，故一并返回（新增字段，向后兼容）
+            "utc_date": r["utc_date"] or "",
             "home_team_id": r["home_team_id"],
             "away_team_id": r["away_team_id"],
             "home_score": r["home_score"],

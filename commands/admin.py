@@ -11,6 +11,7 @@ from pathlib import Path
 
 import paths
 from backtest import DEFAULT_MIN_HISTORY, run_backtest
+from backtest_corpus import load_corpus
 from repository import quota_today
 from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
@@ -476,9 +477,14 @@ async def backtest_cmd(update, context) -> None:
         /backtest elo      → 额外对比 泊松+Elo
         /backtest dc       → 额外对比 泊松+DC
 
+    样本来源：库内已完赛 ＋ 镜像内置历史赛季（data/history/*.csv）。
+    两者按「同日同对阵」去重，队 id 以库内官方 id 为准统一，
+    保证走前回测能把跨赛季历史接续起来。
+
     局限（必须如实告知，不夸大）：
-    · 免费套餐只有当前赛季，无法跨赛季回测；
-    · 样本量受赛季进度限制，赛季初必然偏少。
+    · 内置历史目前只有英超三个赛季；
+    · 内置历史的队 id 依赖库内队名反查，反查不到时会退回 slug 兜底，
+      该队将视为新队（不影响正确性，只少一点历史）。
     """
     await _typing(update)
     progress = await update.effective_message.reply_text(
@@ -487,7 +493,8 @@ async def backtest_cmd(update, context) -> None:
     competition = getattr(getattr(service, "sync", None), "competition", "") or ""
 
     try:
-        matches = await asyncio.to_thread(fetch_finished, service.repo, competition)
+        matches, corpus_info = await asyncio.to_thread(
+            load_corpus, service.repo, competition)
     except Exception as exc:
         log.exception("/backtest 读取本地赛果失败")
         await progress.edit_text(f"❌ 读取失败：{describe_error(exc)}")
@@ -552,6 +559,8 @@ async def backtest_cmd(update, context) -> None:
         ["🧪 <b>历史回测</b>", BLANK],
         section("📦", "样本", *[
             kv_line("🗄", "已完赛", f"{total} 场", W),
+            kv_line("🧱", "来源", f"库内 {corpus_info['db']} · 内置历史 "
+                                  f"{corpus_info['history']}", W),
             kv_line("🎯", "计入评估", f"{n} 场", W),
             kv_line("🔥", "预热", f"{DEFAULT_MIN_HISTORY} 场（不计入评估）", W),
         ]),
@@ -577,8 +586,8 @@ async def backtest_cmd(update, context) -> None:
                               "可用变体：poisson / elo / dc"))
 
     blocks.append(section("ℹ️", "口径说明",
-                          "仅当前赛季（免费套餐无历史赛季）；预测只使用该场之前的赛果，"
-                          "无前视偏差。样本随赛季推进自然增长。"
+                          "样本＝库内赛果 ＋ 镜像内置历史赛季；"
+                          "预测只使用该场之前的赛果，无前视偏差。"
                           f"当前变体：{BACKTEST_VARIANTS[variant]}"
                           "（默认纯泊松＝线上口径；/backtest elo 可对照 Elo）"))
 

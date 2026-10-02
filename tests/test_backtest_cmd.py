@@ -78,13 +78,31 @@ def _run(repo, args=None):
     return "\n".join(sink)
 
 
-def test_backtest_refuses_small_sample(tmp_path):
-    """已完赛 10 场 < 门槛：只报数字，不给命中率/判定。"""
+def test_backtest_refuses_small_sample(tmp_path, monkeypatch):
+    """已完赛 10 场 < 门槛：只报数字，不给命中率/判定。
+
+    内置历史会补足样本，因此这里显式关掉它，才能测到「拦截」本身；
+    「有内置历史时小样本不再拦截」由下一条用例覆盖。
+    """
+    monkeypatch.setattr("backtest_corpus.available_local_seasons",
+                        lambda *a, **k: [])
     repo = _seed(str(tmp_path / "a.db"), 20, 10)
     out = _run(repo)
     assert "样本不足" in out
     assert "还差" in out
     assert "判定" not in out, "小样本上给判定等于给假结论"
+
+
+def test_backtest_builtin_history_unblocks_small_db(tmp_path):
+    """库内只有 10 场时，内置历史应把样本补到门槛以上。
+
+    这是本次改动的目的：以前赛季初必然「样本不足」，现在立刻可评估。
+    """
+    repo = _seed(str(tmp_path / "a2.db"), 20, 10)
+    out = _run(repo)
+    assert "样本不足" not in out, "内置历史已补足样本，不该再拦截"
+    assert "内置历史" in out, "样本来源应体现内置历史的贡献"
+    assert "计入评估" in out
 
 
 def test_backtest_min_total_matches_gate(tmp_path):
