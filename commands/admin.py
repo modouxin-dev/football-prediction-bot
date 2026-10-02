@@ -11,6 +11,7 @@ from pathlib import Path
 
 import paths
 from backtest import DEFAULT_MIN_HISTORY, run_backtest
+from repository import quota_today
 from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
 from migrate_elo import fetch_finished
@@ -41,6 +42,33 @@ async def test_cmd(update, context) -> None:
     else:
         extra = f"\n{result.note}" if result.note else ""
         await progress.edit_text(f"✅ 已向 CHAT_ID 发送 {result.sent} 条预测。{extra}")
+
+
+def _format_quota(api: Any, req: dict) -> str:
+    """把额度显示成「真实发起了多少次请求」。
+
+    主源（API-Football）能自己报额度；备用源 football-data.org 免费层没有
+    额度查询端点，因此统一改用本地实测计数 —— 两者都显示，不再出现 ? / ?。
+    """
+    parts: list[str] = []
+    current, limit = req.get("current"), req.get("limit_day")
+    if current is not None and limit is not None:
+        parts.append(f"主源 {current} / {limit}")
+    try:
+        counts = quota_today()
+    except Exception:  # 计数不可用时退回额度端点数据
+        counts = {}
+    local: list[str] = []
+    for src, label in (("api-football", "主源"), ("football-data", "备用源")):
+        n = counts.get(src, 0)
+        if n:
+            local.append(f"{label} {n}")
+    if local:
+        parts.append("本地实测 " + " · ".join(local))
+    if not parts:
+        # 主源报不出额度、本地也没有计数（例如刚重启且尚未发请求）
+        parts.append("本地实测 0")
+    return "｜".join(parts)
 
 
 async def status_cmd(update, context) -> None:
@@ -114,8 +142,7 @@ async def status_cmd(update, context) -> None:
             f"{esc(sub.get('plan', '未知'))}（{'有效' if sub.get('active') else '未激活或未知'}）",
         ))
         source_rows.append((
-            "📊", "今日请求",
-            f"{req.get('current', '?')} / {req.get('limit_day', '?')}",
+            "📊", "今日请求", _format_quota(api, req),
         ))
         source_rows.append(("✅", "连通性", "数据源连通正常"))
     except Exception as exc:

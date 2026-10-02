@@ -45,10 +45,14 @@ class DataSourceRouter:
         fallback: FootballDataAPI | None = None,
         *,
         mode: str = "auto",
+        quota_sink: Any = None,
     ) -> None:
         self.primary = primary
         self.fallback = fallback
         self.mode = (mode or "auto").lower()
+        # 可选回调：每次真实请求调用一次，用于本地统计免费层额度消耗。
+        # 默认 None，便于单测与纯内存使用场景不受影响。
+        self.quota_sink = quota_sink
         self._source = "api-football"  # 当前实际使用的数据源
         self._primary_down_until = 0.0
         self._last_errors: dict[str, str] = {}  # 各源最近一次失败原因（用于提示）
@@ -110,6 +114,12 @@ class DataSourceRouter:
         )
         if outcome != "ok":
             log.debug("请求详情｜源=%s 方法=%s 结果=%s", source, method, outcome)
+        # 真实发出的请求才算消耗：主源失败后切备用源，两次都计入额度。
+        if self.quota_sink is not None:
+            try:
+                self.quota_sink(source)
+            except Exception:  # noqa: BLE001 - 计数失败不能影响数据获取
+                pass
 
     def _context_kwargs(self, method: str, args: tuple) -> dict:
         """从调用参数里提取联赛与日期，用于日志上下文（取不到就记 '-'）。"""

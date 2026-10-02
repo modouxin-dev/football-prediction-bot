@@ -145,9 +145,90 @@ CREATE TABLE IF NOT EXISTS elo_log (
     processed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_elo_log_fixture ON elo_log(fixture_id);
+CREATE TABLE IF NOT EXISTS api_quota (
+    day      TEXT NOT NULL,
+    source   TEXT NOT NULL,
+    n        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, source)
+);
+"""
+
+QUOTA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS api_quota (
+    day      TEXT NOT NULL,
+    source   TEXT NOT NULL,
+    n        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, source)
+);
 """
 
 _local = threading.local()
+
+
+def _quota_day() -> str:
+    """按机器人时区（默认 Asia/Shanghai）取当日日期。
+
+    免费层额度按自然日重置，所以计数也按「机器人所在时区的自然日」分桶，
+    避免 UTC 与本地时区错位导致跨天统计串味。
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        import os
+        tz = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Shanghai"))
+    except Exception:  # 容器缺 tzdata 时退化为固定 +8，不影响计数可用性
+        from datetime import timedelta
+        tz = timezone(timedelta(hours=8))
+    return datetime.now(tz).strftime("%Y-%m-%d")
+
+
+def bump_quota(source: str, n: int = 1) -> None:
+    """记录一次「实际发出」的请求。
+
+    只在真实网络请求发生时调用（主源失败、切备用源都各算一次），
+    因此数字就是免费层额度的真实消耗量。计数失败绝不影响主流程。
+    """
+    try:
+        import paths
+        db_path = str(paths.DB_PATH)
+    except Exception:
+        return
+    try:
+        day = _quota_day()
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=3000")
+            conn.executescript(QUOTA_SCHEMA)
+            conn.execute(
+                "INSERT INTO api_quota(day, source, n) VALUES(?,?,?) "
+                "ON CONFLICT(day, source) DO UPDATE SET n = n + excluded.n",
+                (day, source, int(n)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - 计数是旁路功能，失败只记日志
+        log.debug("配额计数失败（不影响主流程）：%s", exc)
+
+
+def quota_today() -> dict[str, int]:
+    """返回今日各数据源的实际请求次数；读不到返回空字典。"""
+    try:
+        import paths
+        db_path = str(paths.DB_PATH)
+        day = _quota_day()
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=3000")
+            conn.executescript(QUOTA_SCHEMA)
+            rows = conn.execute(
+                "SELECT source, n FROM api_quota WHERE day = ?", (day,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return {src: int(n) for src, n in rows}
+    except Exception as exc:  # noqa: BLE001
+        log.debug("读取配额计数失败：%s", exc)
+        return {}
 
 
 def _now_iso() -> str:

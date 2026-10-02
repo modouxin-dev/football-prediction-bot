@@ -668,7 +668,13 @@ async def post_init(app: Application) -> None:
         log.info("备用数据源 football-data.org 已启用")
     else:
         log.info("备用数据源 football-data.org 未配置或未启用，仅使用主数据源")
-    api = DataSourceRouter(api, fallback, mode=settings.data_source_mode)
+    # 免费层额度（100 次/天）在备用源侧没有查询端点，改为本地记录实际请求次数。
+    try:
+        from repository import bump_quota as _bump_quota
+        api = DataSourceRouter(api, fallback, mode=settings.data_source_mode,
+                               quota_sink=_bump_quota)
+    except Exception:  # 计数不可用时机器人功能不受影响
+        api = DataSourceRouter(api, fallback, mode=settings.data_source_mode)
     app.bot_data["api"] = api
     service = PredictionService(settings, api, MatchAnalyzer())
     app.bot_data["service"] = service
