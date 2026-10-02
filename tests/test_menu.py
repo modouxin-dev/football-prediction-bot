@@ -63,6 +63,10 @@ def today_fixtures(count=3, hour=None):
         base = now + timedelta(hours=1)
         if base.date() != now.date():  # 跨天时贴到当天最后一刻
             base = now.replace(hour=23, minute=0, second=0, microsecond=0)
+        if base <= now:
+            # UTC 当天 23 点已过（每天 23:00–24:00 这一小时），
+            # 再贴到 23:00 会把比赛造在过去，导致 next 模式查不到任何比赛。
+            base = now + timedelta(minutes=1)
     else:
         base = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     items = []
