@@ -224,6 +224,10 @@ python backtest_cli.py --db /data/football.db
 python backtest_cli.py --simulate 1140 --seeds 1,2,3
 ```
 
+机器人内 `/backtest` 的样本为**库内赛果 ＋ 镜像内置历史赛季**
+（`data/history/*.csv`，英超 2023/2024/2025 三季共 1140 场），两者按
+「同日同对阵」去重，队 id 以库内官方 id 为准统一，保证走前回测能接续跨赛季历史。
+
 测试在 Python 3.10 与 3.12 上均验证通过（CI 双版本矩阵）。数据存储表：
 `matches`（赛程缓存）、`predictions`（预测 + 回写赛果）、`sync_log`（拉取记录）、
 `elo_ratings` / `elo_processed` / `elo_log`（Elo 相关）。

@@ -14,6 +14,54 @@
 
 ---
 
+## 2026-10-03 · 回测样本并入内置历史（340 → 1140 场）
+
+### [a50a6b14](https://github.com/modouxin-dev/football-prediction-bot/commit/a50a6b14d39037ec95d45194835cb5f1e5823118) 回测语料合并：库内赛果 + 镜像内置三季历史 ✅ 当前 HEAD
+
+| 文件 | 改动 |
+| --- | --- |
+| `backtest_corpus.py` | **新增** 语料合并模块 |
+| `tests/test_backtest_corpus.py` | **新增** 10 条 |
+| `tests/test_backtest_cmd.py` | +1 条（内置历史解锁小样本）、1 条改为隔离测试 |
+| `migrate_elo.py` | `fetch_finished` 增加 `utc_date`（合并排序需要，向后兼容） |
+| `commands/admin.py` | `/backtest` 改用合并语料；新增「来源」行；更正口径文案 |
+
+**为什么**：此前 `/backtest` 只吃库内当季赛果，赛季初长期卡在 340 场，
+甚至触发「样本不足」而不给结论。镜像里已内置三季真实赛果，却没被回测用上。
+
+**关键设计（队 ID 必须统一）**：
+`matches` 表唯一键含 `home_team_id`；若 CSV 用 slug、库里用官方数字 id，
+同一支球队会同时存在两个 id，走前回测会把它们当成两支不同的队，
+历史完全接不上——合并就等于白做。
+因此先用库内「队名 → id」反查表喂给 CSV 解析器（`known=`），
+查不到才退回 slug 兜底。
+
+**踩坑记录**：`repo._connect()` 返回的是**线程内共享连接**（按路径缓存），
+初版在 `finally` 里 `close()` 会关掉这条共享连接、破坏后续所有数据库操作，
+已修正为「只查询、不关闭」，与 `fetch_finished` 保持一致。
+
+**实测**（远端干净副本重跑，非本地）：
+```
+基线（改动前）  761 passed
+改动后          772 passed（+11，零破坏）
+远端副本复跑    772 passed
+```
+
+**语料实测数字**：`{'db': 0, 'history': 1140, 'total': 1140, 'seasons': [2023, 2024, 2025]}`
+
+**变异验证**（确认新测试真能拦错，不是摆设）：
+```
+M1 队 id 不对齐 → test_csv_team_id_reuses_db_id        FAILED
+M2 不去重       → test_same_match_not_counted_twice    FAILED
+M3 不按时间排序 → test_sorted_by_time                  FAILED
+```
+
+**行为变化**：库内只有 10 场时不再显示「样本不足」——内置历史已补足样本。
+原「小样本拦截」逻辑**保留**，其测试改为「隔离内置历史后」验证，
+另新增一条验证「有内置历史时小样本不再被拦截」。
+
+---
+
 ## 2026-10-03 · 历史数据接入 + 框架文档同步
 
 ### [7aa95f35](https://github.com/modouxin-dev/football-prediction-bot/commit/7aa95f35944575c1f35efe4f4824744c5287e923) 内置三季英超历史数据 + 本地加载器 ✅ 当前 HEAD
