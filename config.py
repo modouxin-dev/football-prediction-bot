@@ -82,6 +82,7 @@ class Settings:
     chat_id: str | None
     admin_ids: frozenset[int]
     league_id: int
+    league_ids: tuple[int, ...]  # 全部启用联赛；league_ids[0] 恒等于 league_id
     season: int
     push_time: time
     timezone: object  # pytz 时区对象
@@ -145,6 +146,36 @@ def _get_int(env: Mapping[str, str], name: str, default: int, minimum: int = 1) 
     return value
 
 
+def _parse_league_ids(env: Mapping[str, str], primary: int) -> tuple[int, ...]:
+    """解析 LEAGUE_IDS（逗号分隔）。
+
+    - 未设置 / 为空时退化为单联赛 (primary,)，行为与旧版完全一致
+    - 去重且保持原顺序
+    - 结果首个元素恒为 primary：若用户列表不含 primary，则自动插到最前
+    """
+    raw = _get(env, "LEAGUE_IDS")
+    if not raw:
+        return (primary,)
+    items: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            raise ConfigError(f"LEAGUE_IDS 必须是逗号分隔的整数，当前值：{raw!r}") from None
+        if value < 1:
+            raise ConfigError(f"LEAGUE_IDS 中的联赛编号不能小于 1，当前值：{value}")
+        if value not in items:
+            items.append(value)
+    if not items:
+        return (primary,)
+    if items[0] != primary:
+        items = [primary] + [v for v in items if v != primary]
+    return tuple(items)
+
+
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     env = os.environ if env is None else env
 
@@ -205,13 +236,16 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     if push_raw is None and (_get(env, "SCHEDULED_HOUR") or _get(env, "SCHEDULED_MINUTE")):
         push_raw = f"{_get(env, 'SCHEDULED_HOUR', '8')}:{_get(env, 'SCHEDULED_MINUTE', '0')}"
 
+    _league_primary = _get_int(env, "LEAGUE_ID", 39)  # 39 = 英超
+
     return Settings(
         telegram_token=_get(env, "TELEGRAM_TOKEN"),
         api_key=api_key,
         api_provider=provider,
         chat_id=chat_id,
         admin_ids=admin_ids,
-        league_id=_get_int(env, "LEAGUE_ID", 39),  # 39 = 英超
+        league_id=_league_primary,  # 39 = 英超
+        league_ids=_parse_league_ids(env, _league_primary),
         push_time=parse_push_time(push_raw),
         timezone=tz,
         log_level=level,

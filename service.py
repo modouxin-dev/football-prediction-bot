@@ -433,17 +433,22 @@ class PredictionService:
                 out.append(season)
         return out
 
-    async def _fetch_fixtures(self, date_from, date_to) -> tuple[list[dict], int, str | None]:
+    async def _fetch_fixtures(self, date_from, date_to,
+                              league_id: int | None = None) -> tuple[list[dict], int, str | None]:
         """按候选赛季依次请求赛程，遇到「赛季不可用」就自动降级。
+
+        league_id 省略时用 settings.league_id。多联赛同步必须逐联赛调用：
+        不能拿一个联赛的赛季可用性去决定另一个联赛的赛季。
 
         返回 (赛程, 实际使用的赛季, 降级提示)。Key 无效 / 限流这类错误直接抛出，
         不做无意义的重试与降级。
         """
         s = self.settings
+        lid = s.league_id if league_id is None else int(league_id)
         first_error: APIError | None = None
         for season in self._season_candidates():
             try:
-                fixtures = await self.api.get_fixtures(s.league_id, season, date_from, date_to)
+                fixtures = await self.api.get_fixtures(lid, season, date_from, date_to)
             except APIError as exc:
                 if not is_season_error(exc):
                     raise  # 非赛季问题（Key/限流/网络）不降级，直接暴露真实原因
