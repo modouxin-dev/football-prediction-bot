@@ -796,23 +796,6 @@ class PredictionService:
             # Elo 出错绝不能拖垮赛果回写
             log.warning("Elo 更新失败（不影响结算）：%s", exc)
 
-    def elo_factor_for(self, home_team_id, away_team_id) -> float | None:
-        """预测时用的 Elo 融合系数；评分为空或未启用时返回 None（退回纯泊松）。"""
-        if not getattr(self, "elo_enabled", False):
-            return None
-        try:
-            ratings = self.repo.elo_ratings(self.elo.competition)
-            if not ratings:
-                return None  # 冷启动尚无数据，不硬套
-            from elo import elo_multiplier
-
-            home = float(ratings.get(str(home_team_id), self.elo.base_rating))
-            away = float(ratings.get(str(away_team_id), self.elo.base_rating))
-            return elo_multiplier(home, away)
-        except Exception as exc:
-            log.warning("读取 Elo 系数失败，退回纯泊松：%s", exc)
-            return None
-
     def stats(self) -> dict:
         """命中率统计（含各信心等级）。"""
         return self.repo.stats()
