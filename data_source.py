@@ -29,7 +29,7 @@ PRIMARY_COOLDOWN = 10 * 60  # 主源失败后，冷却多久内直接走备用�
 
 # 可选数据：免费层天然可能没有（无赔率、无交锋、无近期战绩），
 # 取不到时返回空是正常降级，不能当成「两个源都失败」抛出错误。
-OPTIONAL_METHODS = {"get_odds", "get_h2h", "get_team_form"}
+OPTIONAL_METHODS = {"get_odds", "get_h2h", "get_team_form", "get_injuries"}
 
 
 class DataSourceError(RuntimeError):
@@ -200,6 +200,14 @@ class DataSourceRouter:
     # ---- 对外接口（与 FootballAPI 同名） ---------------------------------------
     async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict]:
         return await self._run("get_fixtures", league_id, season, date_from, date_to)
+
+    async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict]:
+        """整季赛程（历史赛季回填用）。备用源免费层只支持当前赛季。"""
+        return await self._run("get_fixtures_by_season", league_id, season)
+
+    async def get_injuries(self, fixture_id: int) -> list[dict]:
+        """伤停名单；两个源都没有时返回空列表（不中断预测）。"""
+        return await self._run("get_injuries", fixture_id)
 
     async def get_standings(self, league_id: int, season: int) -> list[dict]:
         return await self._run("get_standings", league_id, season)

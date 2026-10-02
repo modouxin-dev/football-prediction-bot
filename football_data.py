@@ -417,6 +417,24 @@ class FootballDataAPI:
         """免费层无赔率：返回空列表（上层会提示「暂无赔率」）。"""
         return []
 
+    async def get_injuries(self, fixture_id: int | str) -> list[dict]:
+        """免费层无伤停端点：返回空列表（上层显示「暂无伤停信息」）。"""
+        return []
+
+    async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict]:
+        """整季赛程：免费层只有当前赛季，历史赛季返回空（不伪造）。
+
+        当前赛季走整季拉取（不带日期范围），行为与主源一致。
+        """
+        current = await self.get_available_seasons()
+        if current and season not in current:
+            return []
+        code = _code_for(league_id)
+        if not code:
+            return []
+        payload = await self._get(f"competitions/{code}/matches", {"season": season}, ttl=TTL_FIXTURES)
+        return [self._to_fixture(m, league_id, season) for m in payload.get("matches") or []]
+
     async def get_available_seasons(self) -> list[int]:
         """当前账号可访问的赛季（从 competitions 列表的 currentSeason 推导）。"""
         payload = await self._get("competitions", {}, ttl=TTL_SEASONS)

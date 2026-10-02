@@ -300,6 +300,22 @@ async def storage_cmd(update, context) -> None:
     )
 
 
+def _season_result_text(season: int, received: int, saved: int,
+                        finished: int, message: str = "") -> str:
+    """单赛季回填结果文案（/backfill <season> 用）。"""
+    if not received:
+        return (
+            f"⚠️ {season} 赛季没有拉到数据\n\n"
+            f"{message or '该赛季可能不在当前套餐范围内。'}"
+        )
+    return (
+        f"✅ {season} 赛季已入库\n\n"
+        f"📥 收到 {received} 场\n"
+        f"💾 保存 {saved} 场\n"
+        f"🏁 已完赛 {finished} 场（本地库累计）"
+    )
+
+
 async def backfill_cmd(update, context) -> None:
     """/backfill — 拉整季赛程入库，用于填充强度榜所需的历史样本。
 
@@ -310,6 +326,68 @@ async def backfill_cmd(update, context) -> None:
     """
     await _typing(update)
     service = context.application.bot_data["service"]
+
+    # /backfill            → 当前赛季（原行为，走日期窗口）
+    # /backfill 2024       → 指定历史赛季（付费套餐解锁）
+    # /backfill all        → 账号可用的全部赛季（含历史，请求量随赛季数增加）
+    args = list(getattr(context, "args", None) or [])
+    target = args[0].strip().lower() if args else ""
+
+    if target and target != "all":
+        try:
+            season = int(target)
+        except ValueError:
+            await update.effective_message.reply_text(
+                "❌ 赛季参数无效。用法：\n`/backfill` 当前赛季\n`/backfill 2024` 指定赛季\n`/backfill all` 全部可用赛季"
+            )
+            return
+        progress = await update.effective_message.reply_text(
+            f"⏳ 正在回填 {season} 赛季整季赛程，请稍候…"
+        )
+        try:
+            result = await service.sync.sync_season(season)
+        except Exception as exc:
+            log.exception("/backfill %s 失败", season)
+            await progress.edit_text(f"❌ {season} 赛季回填失败：{describe_error(exc)}")
+            return
+        received = result.get("received", 0)
+        saved = result.get("saved", 0)
+        finished = service.repo.count_finished_matches(service.sync.competition)
+        await progress.edit_text(
+            _season_result_text(season, received, saved, finished, result.get("message", ""))
+        )
+        return
+
+    if target == "all":
+        progress = await update.effective_message.reply_text("⏳ 正在查询账号可用赛季…")
+        try:
+            seasons = await service.api.get_available_seasons()
+        except Exception as exc:
+            log.exception("/backfill all 查询赛季失败")
+            await progress.edit_text(f"❌ 查询可用赛季失败：{describe_error(exc)}")
+            return
+        if not seasons:
+            await progress.edit_text("⚠️ 账号未返回任何可用赛季（可能套餐不支持历史赛季）。")
+            return
+        done: list[tuple[int, int, int]] = []
+        for season in seasons:
+            try:
+                r = await service.sync.sync_season(season)
+                done.append((season, r.get("received", 0), r.get("saved", 0)))
+            except Exception as exc:  # noqa: BLE001 - 单个赛季失败不影响其余
+                log.warning("赛季 %s 回填失败：%s", season, exc)
+                done.append((season, 0, 0))
+        finished = service.repo.count_finished_matches(service.sync.competition)
+        total_saved = sum(x[2] for x in done)
+        lines = "\n".join(
+            f"{'✅' if s else '⚠️'} {sn} 赛季：收到 {rc} 保存 {sv}" for sn, rc, sv in done
+        )
+        await progress.edit_text(
+            f"✅ 全赛季回填完成\n\n{lines}\n\n"
+            f"💾 累计保存 {total_saved} 场 · 已完赛 {finished} 场"
+        )
+        return
+
     progress = await update.effective_message.reply_text("⏳ 正在拉取整季赛程（约 380 场），请稍候…")
     try:
         result = await service.sync.sync_full_season()

@@ -70,6 +70,32 @@ def _side(m: dict, team_id: int) -> tuple[int | None, int | None, bool]:
     return (hg if is_home else ag), (ag if is_home else hg), is_home
 
 
+async def _no_injuries() -> list[dict]:
+    """数据源未提供伤停接口时的空实现（保持 gather 结构不变）。"""
+    return []
+
+
+def injuries_stats(raw: list[dict], home_id: int, away_id: int) -> dict:
+    """伤停名单按主客队分组。
+
+    只做整理，不做判断：名单为空时上层显示「暂无伤停信息」，
+    不伪造、也不据此调整模型（当前模型未使用伤停信号）。
+    """
+    out: dict = {"home": [], "away": []}
+    for item in raw or []:
+        player = item.get("player") or {}
+        team = item.get("team") or {}
+        name = player.get("name") or "?"
+        reason = player.get("reason") or player.get("type") or ""
+        entry = f"{name}（{reason}）" if reason else name
+        tid = str(team.get("id"))
+        if tid == str(home_id):
+            out["home"].append(entry)
+        elif tid == str(away_id):
+            out["away"].append(entry)
+    return out
+
+
 def form_stats(matches: list[dict], team_id: int) -> dict:
     """近期战绩统计：胜平负、进失球、主客场表现。数据不足时 played=0，由上层显示“暂无”。"""
     rows, w = [], {"win": 0, "draw": 0, "lose": 0}
@@ -695,18 +721,22 @@ class PredictionService:
         rows_by_team = {(r.get("team") or {}).get("id"): r for r in standings}
 
         # 可选数据并发取，单点失败不阻断整体，但保留真实原因
+        # 伤停是可选数据：数据源不支持该方法时静默跳过，不能让整个分析失败
+        injuries_call = getattr(self.api, "get_injuries", None)
         results = await asyncio.gather(
             self.api.get_team_form(home_id, season, FORM_MATCHES),
             self.api.get_team_form(away_id, season, FORM_MATCHES),
             self.api.get_h2h(home_id, away_id, H2H_MATCHES),
+            injuries_call(fixture_id) if injuries_call else _no_injuries(),
             return_exceptions=True,
         )
         errors: dict[str, str | None] = {}
-        for key, value in zip(("home_form", "away_form", "h2h"), results):
+        for key, value in zip(("home_form", "away_form", "h2h", "injuries"), results):
             errors[key] = str(value) if isinstance(value, BaseException) else None
         home_raw = [] if isinstance(results[0], BaseException) else results[0]
         away_raw = [] if isinstance(results[1], BaseException) else results[1]
         h2h_raw = [] if isinstance(results[2], BaseException) else results[2]
+        injuries_raw = [] if isinstance(results[3], BaseException) else results[3]
 
         return {
             "fixture_id": fixture_id,
@@ -721,6 +751,7 @@ class PredictionService:
             "home_row": rows_by_team.get(home_id),
             "away_row": rows_by_team.get(away_id),
             "h2h": h2h_stats(h2h_raw, home_id),
+            "injuries": injuries_stats(injuries_raw, home_id, away_id),
             "model": {
                 "home_strength": model.strength(home_id),
                 "away_strength": model.strength(away_id),

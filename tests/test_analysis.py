@@ -133,7 +133,10 @@ def test_analyze_fixture_returns_full_report():
     assert report["away_form"]["played"] == 1
     assert report["h2h"]["played"] == 1
     assert report["home_row"] is not None and report["away_row"] is not None
-    assert report["errors"] == {"home_form": None, "away_form": None, "h2h": None}
+    # 伤停是新增的可选字段，取不到时同样记为 None（不中断分析）
+    assert report["errors"] == {
+        "home_form": None, "away_form": None, "h2h": None, "injuries": None,
+    }
 
 
 def test_analyze_fixture_missing_fixture_raises_key_error():

@@ -119,6 +119,57 @@ class MatchSync:
         """启动同步：先拉未来赛程，保证机器人起来就有数据可展示。"""
         return await self.sync_upcoming()
 
+    async def sync_season(self, season: int) -> dict:
+        """按赛季整季回填（付费套餐解锁的历史赛季用）。
+
+        与 sync_window 的区别：不带日期范围，只按 league+season 请求，
+        否则主源会因套餐限制拒绝历史赛季。
+        """
+        comp = self.competition
+        result = {
+            "kind": f"season-{season}", "competition": comp, "season": season,
+            "date_from": "-", "date_to": "-", "http_status": "-",
+            "received": 0, "saved": 0, "message": "", "ok": False,
+        }
+        try:
+            fixtures = await self.service.api.get_fixtures_by_season(
+                self.service.settings.league_id, season
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["http_status"] = type(exc).__name__
+            result["message"] = str(exc)[:200]
+            self.repo.log_sync(
+                self.service.source_label, comp, "-", "-",
+                result["http_status"], 0, 0, result["message"],
+            )
+            log.warning("赛季 %s 回填失败：%s", season, exc)
+            self.last_result = result
+            return result
+
+        result["http_status"] = "200"
+        result["received"] = len(fixtures or [])
+        if not fixtures:
+            result["message"] = "该赛季暂无数据（可能套餐不支持）"
+            result["ok"] = True
+            self.repo.log_sync(
+                self.service.source_label, comp, "-", "-",
+                "200", 0, 0, result["message"],
+            )
+            self.last_result = result
+            return result
+
+        saved = self.repo.save_matches(
+            comp, fixtures,
+            source=self.service.source_label,
+            http_status="200",
+            message=f"season-{season}",
+        )
+        result["saved"] = saved
+        result["ok"] = saved > 0
+        log.info("赛季 %s 回填：收到 %d 保存 %d", season, len(fixtures), saved)
+        self.last_result = result
+        return result
+
 
 def has_fresh_data(repo, competition: str, date_from: date, date_to: date) -> bool:
     """本地库里是否已有该窗口的比赛，避免每次查询都回源。"""

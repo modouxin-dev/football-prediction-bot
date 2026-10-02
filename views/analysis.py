@@ -47,6 +47,33 @@ from formatkit import (
     web_entry_text,
 )
 
+def _injuries_body(report: dict, errors: dict) -> list[str]:
+    """伤停信息文案：有就列名单，没有就说明原因（不伪造、不隐藏失败）。"""
+    injuries = report.get("injuries") or {}
+    home = injuries.get("home") or []
+    away = injuries.get("away") or []
+    if not home and not away:
+        if errors.get("injuries"):
+            return [f"⚠️ 伤停数据获取失败：{esc(errors['injuries'])}"]
+        return [NO_DATA, "　当前数据源未提供本场伤停名单"]
+    body: list[str] = []
+    if home:
+        body.append(f"🏠 {esc(report['home'])}（{len(home)} 人）")
+        body += [f"▸ {esc(x)}" for x in home[:8]]
+        if len(home) > 8:
+            body.append(f"　…另有 {len(home) - 8} 人")
+    else:
+        body.append(f"🏠 {esc(report['home'])}：{NO_DATA}")
+    if away:
+        body.append(f"✈️ {esc(report['away'])}（{len(away)} 人）")
+        body += [f"▸ {esc(x)}" for x in away[:8]]
+        if len(away) > 8:
+            body.append(f"　…另有 {len(away) - 8} 人")
+    else:
+        body.append(f"✈️ {esc(report['away'])}：{NO_DATA}")
+    return body
+
+
 class AnalysisView:
         @staticmethod
         def format_deep_report(report: dict, tz, model_version: str = MODEL_VERSION) -> str:
@@ -108,6 +135,7 @@ class AnalysisView:
                     f"✈️ {esc(report['away'])}：{_row_line(report['away_row'])}",
                 ),
                 section("🤝", "历史交锋", *h2h_body),
+                section("🚑", "伤停信息", *_injuries_body(report, errors)),
                 section(
                     "🧮", "模型因素",
                     f"🏠 主队主场：攻击 <code>{hs.attack_home:.2f}</code> · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",

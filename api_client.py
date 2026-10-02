@@ -36,6 +36,8 @@ TTL_H2H = 12 * 3600
 TTL_FORM = 12 * 3600  # 球队近期战绩（深度分析用，变化慢）
 TTL_STATUS = 5 * 60  # /status 诊断用的账户额度查询
 TTL_SEASONS = 24 * 3600  # 账号可用赛季列表（几乎不变，缓存一天，省额度）
+TTL_SEASON_FIXTURES = 6 * 3600  # 整季赛程（历史赛季不会变，缓存 6 小时）
+TTL_INJURIES = 3 * 3600  # 伤停名单（一天内变化不大，缓存 3 小时）
 
 HTTP_HINTS = {
     401: "API Key 无效或缺失",
@@ -186,6 +188,27 @@ class FootballAPI:
         """指定日期范围（含）内的赛程。"""
         params = {"league": league_id, "season": season, "from": date_from.isoformat(), "to": date_to.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
+
+    async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict]:
+        """整季赛程（只按赛季拉取，不带日期范围）。
+
+        付费套餐解锁的历史赛季必须用这种方式请求：带 from/to 会被套餐限制拒绝。
+        一次请求约 380 场，缓存较久以节省额度。
+        """
+        params = {"league": league_id, "season": season}
+        return await self._get("fixtures", params, ttl=TTL_SEASON_FIXTURES)
+
+    async def get_injuries(self, fixture_id: int) -> list[dict]:
+        """指定比赛的伤停名单（/injuries），按主客队分组返回。
+
+        取不到（套餐不支持 / 该场未收录）时返回空列表，不抛异常，
+        由上层按「暂无伤停信息」展示，不能中断预测主流程。
+        """
+        try:
+            return await self._get("injuries", {"fixture": fixture_id}, ttl=TTL_INJURIES)
+        except APIError as exc:
+            log.info("伤停不可用（fixture=%s）：%s", fixture_id, exc)
+            return []
 
     async def get_standings(self, league_id: int, season: int) -> list[dict]:
         """积分榜（含主客场进球/失球），一次请求即可算出全联赛球队强度。"""
