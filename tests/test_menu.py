@@ -565,3 +565,57 @@ def test_storage_visible_in_bot_commands_and_menu():
     for name in ("storage", "stats", "date", "analysis"):
         assert name in commands, f"/{name} 未写入 BOT_COMMANDS，用户看不到该命令"
     assert "storage" in dict(MENU_ITEMS), "菜单缺少「💾 存储状态」按钮"
+
+
+# ---- 主菜单排版收敛 ---------------------------------------------------------
+# 缺陷背景：MENU_ITEMS 现有 8 项，此前 Inline 菜单与底部面板各自硬编码
+# 「每行 2 个」，结果是 4 行功能 + 1 行收起，占掉屏幕近一半。且两处各写
+# 各的数字，改一处忘另一处就会出现排版不一致。
+#
+# 重要：下面的上限写死成 3（v4 排版规范的独立基准），**不引用** keyboards.
+# MENU_PER_ROW。第一版我用常量自身做上限，结果把常量改成 2 后测试跟着变宽
+# 松、全部通过 —— 用被测对象当基准等于没有基准。行数断言同理用写死的 3 计算。
+PER_ROW_SPEC = 3
+
+
+def test_menu_per_row_constant_matches_spec():
+    """实现常量必须等于规范值；有人改成 2 或 4 都在这里被拦下。"""
+    from keyboards import MENU_PER_ROW
+
+    assert MENU_PER_ROW == PER_ROW_SPEC
+
+
+def test_menu_rows_respect_per_row_limit():
+    """Inline 主菜单每行不得超过 3 个按钮，且行数与规范一致。"""
+    from bot_handler import MENU_ITEMS
+
+    rows = BotUI.menu_keyboard().inline_keyboard
+    assert rows, "主菜单不能为空"
+    assert max(len(r) for r in rows) <= PER_ROW_SPEC
+    # 8 项按每行 3 个应排成 3 行；每行 2 个会变 4 行，这里能直接抓到
+    expected = (len(MENU_ITEMS) + PER_ROW_SPEC - 1) // PER_ROW_SPEC
+    assert len(rows) == expected
+
+
+def test_reply_panel_rows_respect_per_row_limit():
+    """底部面板的功能行同样受限；末行「收起面板」独占一行不受限。"""
+    from bot_handler import MENU_ITEMS
+
+    rows = BotUI.reply_menu_keyboard(expanded=True).keyboard
+    body, last = rows[:-1], rows[-1]
+    assert [b.text for b in last] == [PANEL_CLOSE_LABEL]
+    assert max(len(r) for r in body) <= PER_ROW_SPEC
+    expected = (len(MENU_ITEMS) + PER_ROW_SPEC - 1) // PER_ROW_SPEC
+    assert len(body) == expected
+
+
+def test_menu_row_limit_is_shared_constant():
+    """两个键盘必须共用同一个每行上限，不能各自硬编码。
+
+    变异防护：若有人把 Inline 改回 2、面板改成 3，前两条断言仍各自通过，
+    只有这条能抓出「两处不一致」。
+    """
+    import keyboards
+
+    src = open(keyboards.__file__, encoding="utf-8").read()
+    assert src.count("MENU_PER_ROW") >= 3, "每行按钮数未抽成共享常量，仍在各处硬编码"

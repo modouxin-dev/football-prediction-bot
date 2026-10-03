@@ -17,6 +17,14 @@ from templates import (
     TABS,
 )
 
+# 主菜单每行按钮数。
+# 实测：MENU_ITEMS 现有 8 项，按每行 2 个排是 4 行，底部面板连同「收起」
+# 共 5 行，占掉近半屏；按每行 3 个排是 3 行（3+3+2），符合「每行 ≤3 个」
+# 的排版规范。抽成常量是为了让 Inline 菜单与底部面板共用同一个值 ——
+# 两处各写各的数字，迟早会出现「菜单 3 列、面板 2 列」的不一致。
+MENU_PER_ROW = 3
+
+
 def nav_row(with_fixtures: bool = True) -> list[InlineKeyboardButton]:
     """二级视图的统一出口行。
 
@@ -124,7 +132,9 @@ class Keyboards:
         def menu_keyboard() -> InlineKeyboardMarkup:
             """Inline 主菜单：点击后在原消息上切换，不刷屏。"""
             buttons = [InlineKeyboardButton(label, callback_data=f"menu:{key}") for key, label in MENU_ITEMS]
-            return InlineKeyboardMarkup([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
+            return InlineKeyboardMarkup(
+                [buttons[i : i + MENU_PER_ROW] for i in range(0, len(buttons), MENU_PER_ROW)]
+            )
     
         @staticmethod
         def reply_menu_keyboard(expanded: bool = True):
@@ -143,8 +153,11 @@ class Keyboards:
             if not expanded:
                 return ReplyKeyboardRemove()
             labels = [label for _, label in MENU_ITEMS]
-            # 每行 2 个，跟随 MENU_ITEMS 自动适配数量
-            rows = [[KeyboardButton(x) for x in labels[i : i + 2]] for i in range(0, len(labels), 2)]
+            # 每行 MENU_PER_ROW 个，跟随 MENU_ITEMS 自动适配数量
+            rows = [
+                [KeyboardButton(x) for x in labels[i : i + MENU_PER_ROW]]
+                for i in range(0, len(labels), MENU_PER_ROW)
+            ]
             # 收起按钮单独一行：混在功能里容易被误当成某个功能
             rows.append([KeyboardButton(PANEL_CLOSE_LABEL)])
             return ReplyKeyboardMarkup(
