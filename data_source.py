@@ -31,6 +31,13 @@ PRIMARY_COOLDOWN = 10 * 60  # 主源失败后，冷却多久内直接走备用�
 # 取不到时返回空是正常降级，不能当成「两个源都失败」抛出错误。
 OPTIONAL_METHODS = {"get_odds", "get_h2h", "get_team_form", "get_injuries"}
 
+# 按比赛 ID 查询的方法 / Methods queried by fixture id.
+# 备用源 ID 带 "fd-" 前缀，拿去问主源会被直接拒绝
+# （"The Fixture field must contain an integer."），
+# 于是健康的主源被误判为故障并拖进冷却，冷却期间又只能用备用源，
+# 产出更多 fd- ID —— 形成自我维持的降级闭环。必须按 ID 归属路由。
+FIXTURE_ID_METHODS = {"get_odds", "get_injuries"}
+
 
 class DataSourceError(RuntimeError):
     """主源与备用源均不可用。消息中不含任何 Token。"""
@@ -140,7 +147,13 @@ class DataSourceRouter:
         optional = method in OPTIONAL_METHODS
         tried_primary = False
         ctx = self._context_kwargs(method, args)
-        if self.mode in ("auto", "api-football") and not self._primary_cooling():
+        # ID 归属路由：ID 来自备用源时只能问备用源，别拿去污染主源的健康判定。
+        uses_fallback_id = (
+            method in FIXTURE_ID_METHODS and bool(args) and is_fallback_id(args[0])
+        )
+        if uses_fallback_id:
+            log.debug("%s：ID 来自备用源（%s），跳过主源", method, args[0])
+        if not uses_fallback_id and self.mode in ("auto", "api-football") and not self._primary_cooling():
             tried_primary = True
             started = time.monotonic()
             try:
@@ -167,6 +180,15 @@ class DataSourceRouter:
                 log.warning("主数据源 %s 返回空数据，尝试备用源", method)
 
         if self._fallback_blocked():
+            if uses_fallback_id:
+                # 拿着备用源的 ID，却没有备用源可用。
+                # 可选数据（赔率/伤停）静默降级为空，不能中断整条预测。
+                if optional:
+                    log.info("%s：ID 来自备用源但备用源不可用，返回空", method)
+                    return []
+                raise DataSourceError(
+                    f"比赛 ID 来自备用数据源（{args[0]}），但备用数据源未配置。"
+                )
             if tried_primary:
                 raise DataSourceError(
                     f"主数据源失败：{self.last_error('api-football') or '未知原因'}；"

@@ -136,6 +136,25 @@ async def diag_cmd(update, context) -> None:
     await update.message.reply_text(normalize(body), parse_mode="HTML")
 
 
+async def _account_status_preferring_primary(api: Any) -> dict:
+    """读取账号/额度信息，优先直连主源。
+
+    套餐与额度是**主源账号**的属性，与当前生效的是哪个源无关。
+    主源冷却时常规路由会把这个请求发给备用源，于是付费账号被显示成 Free，
+    让人误以为订阅失效 —— 因此优先问主源，问不到才回落。
+    """
+    primary = getattr(api, "primary", None)
+    if primary is not None:
+        try:
+            account = await primary.get_account_status()
+        except Exception:  # noqa: BLE001 - 主源读不到就回落到常规路由
+            log.debug("主源账号信息读取失败，回落到当前生效数据源")
+        else:
+            if account:
+                return account
+    return await api.get_account_status()
+
+
 async def status_cmd(update, context) -> None:
     """/status — 版本、赛季、下次推送、数据源诊断、持久化状态。"""
     app = context.application
@@ -201,7 +220,7 @@ async def status_cmd(update, context) -> None:
         except Exception as exc:  # 诊断失败不影响状态页
             source_rows.append(("🔎", "备用源实测", f"⚠️ {esc(describe_error(exc))}"))
     try:
-        account = await api.get_account_status()
+        account = await _account_status_preferring_primary(api)
         sub, req = account.get("subscription") or {}, account.get("requests") or {}
         source_rows.append((
             "📋", "套餐",
