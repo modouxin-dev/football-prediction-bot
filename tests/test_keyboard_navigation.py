@@ -77,3 +77,55 @@ def test_exit_buttons_are_not_dead():
         for data in exits(markup):
             _, _, key = data.partition(":")
             assert key in KNOWN_MENU_KEYS, f"{data} 的 key 未被引擎处理"
+
+
+@pytest.mark.parametrize(
+    "name,markup",
+    [
+        ("main", Keyboards.get_main_keyboard(101)),
+        ("prediction", Keyboards.prediction_keyboard(101)),
+        ("analysis", Keyboards.analysis_keyboard(101)),
+        ("chart", Keyboards.chart_keyboard(101, "form")),
+        ("standings", Keyboards.standings_keyboard()),
+    ],
+)
+def test_every_view_exposes_all_reachable_exits(name, markup):
+    """每个视图必须给出「它能返回的所有上层」，不能只给主菜单。
+
+    旧断言只要求 exits() 非空，于是 chart/standings 挂一个「主菜单」
+    就算通过 —— 用户从赛程列表进来却拿不到「返回赛程」，只能绕道主菜单。
+    """
+    data = callbacks(markup)
+    assert "menu:home" in data, f"{name} 缺少主菜单出口"
+    if name != "prediction":  # 预测页用「📅 今日赛程」承担返回，无需重复
+        assert "menu:fixtures" in data, f"{name} 缺少返回赛程出口"
+
+
+def test_home_exit_label_is_consistent():
+    """同一个出口在所有键盘里必须是同一个词，否则用户以为是两个功能。"""
+    labels = set()
+    for markup in (
+        Keyboards.get_main_keyboard(101),
+        Keyboards.prediction_keyboard(101),
+        Keyboards.analysis_keyboard(101),
+        Keyboards.chart_keyboard(101, "form"),
+        Keyboards.standings_keyboard(),
+    ):
+        for row in markup.inline_keyboard:
+            for b in row:
+                if b.callback_data == "menu:home":
+                    labels.add(b.text)
+    assert labels == {"🏠 主菜单"}, f"主菜单出口文案不统一：{labels}"
+
+
+def test_every_row_has_at_most_three_buttons():
+    """v4 排版规范：单行按钮数 <= 3，超过会挤成两行或折行。"""
+    for name, markup in (
+        ("main", Keyboards.get_main_keyboard(101)),
+        ("prediction", Keyboards.prediction_keyboard(101)),
+        ("analysis", Keyboards.analysis_keyboard(101)),
+        ("chart", Keyboards.chart_keyboard(101, "form")),
+        ("standings", Keyboards.standings_keyboard()),
+    ):
+        for i, row in enumerate(markup.inline_keyboard):
+            assert len(row) <= 3, f"{name} 第 {i + 1} 行有 {len(row)} 个按钮"

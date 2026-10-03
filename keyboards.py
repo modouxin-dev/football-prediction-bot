@@ -67,7 +67,7 @@ class Keyboards:
                         InlineKeyboardButton("🎯 历史命中率", callback_data="menu:stats"),
                         InlineKeyboardButton("🔄 刷新数据", callback_data=f"refresh:{fixture_id}"),
                     ],
-                    [InlineKeyboardButton("🏠 返回主菜单", callback_data="menu:home")],
+                    nav_row(with_fixtures=False),
                 ]
             )
     
@@ -109,22 +109,15 @@ class Keyboards:
                 ]
             ]
             rows.append(
-                [
-                    InlineKeyboardButton("🔍 回到分析", callback_data=f"fa:{fixture_id}"),
-                    InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
-                ]
+                [InlineKeyboardButton("🔍 回到分析", callback_data=f"fa:{fixture_id}")]
+                + nav_row()
             )
             return InlineKeyboardMarkup(rows)
-    
+
         @staticmethod
         def standings_keyboard() -> InlineKeyboardMarkup:
             return InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("🔄 刷新", callback_data="menu:refresh"),
-                        InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
-                    ]
-                ]
+                [[InlineKeyboardButton("🔄 刷新", callback_data="menu:refresh")] + nav_row()]
             )
     
         @staticmethod
