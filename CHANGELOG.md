@@ -14,6 +14,56 @@
 
 ---
 
+## 2026-10-03 · 修复降级闭环：备用源 ID 不再污染主源
+
+### [ddfa1762](https://github.com/modouxin-dev/football-prediction-bot/commit/ddfa1762edb61dce0e02e3a2552fe6f7ac7233e4) 备用源比赛 ID 按归属路由；/status 套餐归属主源账号 ✅ 当前 HEAD
+
+| 文件 | 改动 |
+| --- | --- |
+| `data_source.py` | +23 -1 新增 `FIXTURE_ID_METHODS` 与 ID 归属路由守卫 |
+| `commands/admin.py` | +20 -1 新增 `_account_status_preferring_primary()` |
+| `tests/test_fallback_id_routing.py` | **新增** 7 条 |
+| `tests/test_status_plan_ownership.py` | **新增** 4 条 |
+
+**线上事故（由 `/diag` 暴露）**：
+```
+📡 主源记录  fixture: The Fixture field must contain an integer.
+🧊 冷却状态  冷却中（剩余 316 秒）
+```
+
+**根因**：`normalize.py` 规定备用源 ID 统一带 `fd-` 前缀（字符串）。
+主源冷却期间用备用源拉赛程 → 拿到 `fd-5001` → 查赔率时把它传给主源 →
+主源拒绝并报类型错误 → 主源被判定为故障 → 进入 10 分钟冷却 →
+更依赖备用源 → 产出更多 `fd-` ID → **自我维持的降级闭环**。
+
+讽刺的是 `data_source.py:24` 早就 `from normalize import is_fallback_id`，
+但**全仓没有任何使用点** —— 守卫被 import 了却没接上。
+
+**修复**：按 ID 归属路由。带 `fd-` 前缀的 ID 只走备用源，绝不问主源，
+也不参与主源的健康判定。受保护方法：`get_odds`、`get_injuries`。
+备用源未配置时，可选数据静默返回空，不中断预测。
+
+**第二处修复**：`/status` 的套餐行原先用常规路由读取，
+主源冷却时读到的是备用源的 Free 档，把付费账号显示成 `Free（有效）`，
+让人误以为订阅失效。套餐是主源账号的属性，与当前生效哪个源无关，
+因此改为优先直连主源读取，读不到才回落。
+
+**实测**（远端 `10aa8c98` 干净副本，非本地）：
+```
+基线            754 passed, 1 skipped
+改动后          765 passed, 1 skipped   ← +11，零破坏
+```
+
+**变异验证**（证明测试真能拦错）：
+| 注入的错误 | 结果 |
+| --- | --- |
+| 守卫整体关闭 | 4 条立刻 FAILED |
+| `get_injuries` 漏保护 | 2 条立刻 FAILED |
+| 不再优先主源读账号 | 1 条立刻 FAILED |
+
+**环境备注**：沙盒依赖曾缺失（pytest/telegram 均无），已按
+`requirements.txt` 重装后取基线，数字为重装后实测。
+
 ## 2026-10-03 · 回测样本并入内置历史（340 → 1140 场）
 
 ### [a50a6b14](https://github.com/modouxin-dev/football-prediction-bot/commit/a50a6b14d39037ec95d45194835cb5f1e5823118) 回测语料合并：库内赛果 + 镜像内置三季历史 ✅ 当前 HEAD
