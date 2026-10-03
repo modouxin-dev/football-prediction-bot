@@ -120,9 +120,14 @@ def test_odds_and_h2h_views_handle_missing_data():
 def test_keyboard_marks_active_tab_and_carries_fixture_id():
     kb = ui.get_main_keyboard(101, "deep")
     buttons = [b for row in kb.inline_keyboard for b in row]
-    assert sorted(b.callback_data for b in buttons) == ["deep:101", "h2h:101", "home:101", "odds:101", "refresh:101"]
+    # 只比对与本场相关的按钮：键盘末尾另有出口行（返回赛程/主菜单），
+    # 那是导航按钮，不属于 tab 集合。
+    tabs = [b for b in buttons if b.callback_data.endswith(":101")]
+    assert sorted(b.callback_data for b in tabs) == ["deep:101", "h2h:101", "home:101", "odds:101", "refresh:101"]
     assert [b.text for b in buttons if b.text.startswith("●")] == ["● 🔍 深度分析"]
     assert all(len(b.callback_data) <= 64 for b in buttons)
+    # 二级视图必须有出口，否则切进 tab 后无法离开
+    assert "menu:home" in [b.callback_data for b in buttons]
 
 
 def test_strategy_thresholds():

@@ -17,6 +17,23 @@ from templates import (
     TABS,
 )
 
+def nav_row(with_fixtures: bool = True) -> list[InlineKeyboardButton]:
+    """二级视图的统一出口行。
+
+    实测发现的缺陷：比赛四个 tab 的切换键盘（get_main_keyboard）此前只有
+    tab 与「刷新赔率」，没有任何出口 —— 用户点进「赔率对比」「历史交锋」
+    之后只能重新发命令才能离开。凡是替换掉上一层内容的视图都必须给出口，
+    这里统一定义，避免各自漏掉。
+
+    with_fixtures=False 用于上一层不是赛程列表的场景（如积分榜）。
+    """
+    row: list[InlineKeyboardButton] = []
+    if with_fixtures:
+        row.append(InlineKeyboardButton("↩️ 返回赛程", callback_data="menu:fixtures"))
+    row.append(InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"))
+    return row
+
+
 class Keyboards:
         @staticmethod
         def get_main_keyboard(fixture_id: int, active: str = "home") -> InlineKeyboardMarkup:
@@ -25,7 +42,12 @@ class Keyboards:
                 for key, label in TABS
             ]
             return InlineKeyboardMarkup(
-                [buttons[:2], buttons[2:], [InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}")]]
+                [
+                    buttons[:2],
+                    buttons[2:],
+                    [InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}")],
+                    nav_row(),
+                ]
             )
     
         @staticmethod
