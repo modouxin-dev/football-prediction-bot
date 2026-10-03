@@ -343,7 +343,17 @@ class PredictionService:
         lid = int(league_id)
         if cache is not None and lid in cache:
             return cache[lid]
-        model = build_league_model(await self.api.get_standings(lid, self._season_for(lid)))
+        standings = await self.api.get_standings(lid, self._season_for(lid))
+        prior = None
+        try:
+            from season_prior import known_team_ids, load_prior_strength
+
+            prior = load_prior_strength(
+                lid, self._season_for(lid), known=known_team_ids(self.repo))
+        except Exception as exc:  # 先验是增强项，拿不到就退回联赛平均
+            log.warning("跨赛季先验不可用（%s），退回联赛平均", exc)
+            prior = None
+        model = build_league_model(standings, prior_strength=prior)
         if cache is not None:
             cache[lid] = model
         return model

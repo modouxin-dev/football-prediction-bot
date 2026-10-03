@@ -15,7 +15,10 @@ from typing import Any, Iterable
 MAX_GOALS = 10  # 比分矩阵覆盖 0~10 球，再整体归一化
 DEFAULT_AVG_HOME_GOALS = 1.5
 DEFAULT_AVG_AWAY_GOALS = 1.2
-PRIOR_GAMES = 5  # 收缩强度：相当于给每支球队补 5 场"联赛平均水平"的先验比赛
+PRIOR_GAMES = 3  # 收缩强度：相当于给每支球队补 3 场"先验水平"的比赛
+# 取值依据：3 个英超赛季 930 场走前扫描（见 season_prior 模块文档）。
+# prior=5 命中 50.0% / 赛季初低估强队 12.1pp；prior=3 命中 50.3% / 低估 9.5pp。
+# 再往下降（2/1）命中率不再上升、Log Loss 明显变差，故取 3。
 OUTCOMES = ("home", "draw", "away")
 
 # Elo 融合系数的安全边界。即便上游算错，λ 最多偏移 25%，不会把模型带崩。
@@ -270,7 +273,8 @@ class LeagueModel:
 
 def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES,
                        match_logs: dict | None = None,
-                       use_dsa_clamp: bool = False) -> LeagueModel:
+                       use_dsa_clamp: bool = False,
+                       prior_strength: dict | None = None) -> LeagueModel:
     """由积分榜行（API-Football /standings）计算联赛均值与每队主客场攻防强度。
 
     ⛔ DSA 状态：未启用 / 未验证有效 / 实测为负
@@ -328,9 +332,26 @@ def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES,
     avg_away = away_for / away_games if away_games else DEFAULT_AVG_AWAY_GOALS
     avg_home, avg_away = max(avg_home, 0.1), max(avg_away, 0.1)
 
-    def shrink(goals: float, games: float, league_avg: float) -> float:
-        """向联赛平均收缩后的场均进球（失球）÷ 联赛平均。"""
-        return (goals + prior_games * league_avg) / (games + prior_games) / league_avg
+    def shrink(goals: float, games: float, league_avg: float,
+               prior_target: float = 1.0) -> float:
+        """向先验目标收缩后的场均进球（失球）÷ 联赛平均。
+
+        ``prior_target=1.0``（默认）即收缩到**联赛平均**，与改造前逐字节一致。
+        传入该队自己的历史强度时，收缩到它的历史水平——赛季初样本极少时，
+        这一步决定模型能否区分强弱（详见 ``season_prior`` 模块）。
+        """
+        return ((goals + prior_games * prior_target * league_avg)
+                / (games + prior_games) / league_avg)
+
+    def _ptarget(src: dict, key: str) -> float:
+        """取先验目标值；缺失 / 非有限 / 非正时退回 1.0（联赛平均）。"""
+        try:
+            v = float(src.get(key, 1.0))
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(v) or v <= 0:
+            return 1.0
+        return min(max(v, 0.2), 3.0)
 
     def _clamp(value: float) -> float:
         if not use_dsa_clamp:
@@ -369,11 +390,16 @@ def build_league_model(rows: Iterable[dict], prior_games: int = PRIOR_GAMES,
         a_aga_g, a_aga_n = _agg(logs, "away_against",
                                 _num(a_goals.get("against")), ag)
 
+        prior = (prior_strength or {}).get(team_id) or {}
         teams[team_id] = TeamStrength(
-            attack_home=_clamp(shrink(h_for_g, h_for_n, avg_home)),
-            defense_home=_clamp(shrink(h_aga_g, h_aga_n, avg_away)),
-            attack_away=_clamp(shrink(a_for_g, a_for_n, avg_away)),
-            defense_away=_clamp(shrink(a_aga_g, a_aga_n, avg_home)),
+            attack_home=_clamp(shrink(h_for_g, h_for_n, avg_home,
+                                      _ptarget(prior, "attack_home"))),
+            defense_home=_clamp(shrink(h_aga_g, h_aga_n, avg_away,
+                                       _ptarget(prior, "defense_home"))),
+            attack_away=_clamp(shrink(a_for_g, a_for_n, avg_away,
+                                      _ptarget(prior, "attack_away"))),
+            defense_away=_clamp(shrink(a_aga_g, a_aga_n, avg_home,
+                                       _ptarget(prior, "defense_away"))),
             games_home=int(hg),
             games_away=int(ag),
         )
