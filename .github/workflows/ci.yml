@@ -15,6 +15,10 @@ concurrency:
 
 permissions:
   contents: read
+  # 显式声明 permissions 会把未列出的 scope 全部置为 none，checks 变 none 后
+  # 步骤里的 ::error:: 就写不进 check-run 注解（外部只能看到「exit code 1」，
+  # 拿不到具体用例）。这里放开 checks 以便把失败输出回传出来。
+  checks: write
 
 jobs:
   test:
