@@ -137,78 +137,133 @@ async def diag_cmd(update, context) -> None:
     await update.message.reply_text(normalize(body), parse_mode="HTML")
 
 
+SOT_PROBE_DEFAULT = 5
+SOT_PROBE_MAX = 10
+
+
+def _sot_probe_count(args) -> int:
+    """/sotprobe [场数] 的场数解析：默认 5，上限 10，非法值回落默认。"""
+    for a in (args or []):
+        try:
+            return max(1, min(SOT_PROBE_MAX, int(a)))
+        except (TypeError, ValueError):
+            continue
+    return SOT_PROBE_DEFAULT
+
+
+def sot_probe_verdict(results: list[dict]) -> tuple[str, bool]:
+    """根据多场探测结果给出结论。返回 (结论, 射正数是否已可解析)。
+
+    单场探测无法区分「端点不可用」「该场没统计」「字段名不匹配」——
+    三种情况都可能表现为空响应。所以一次探测多场，按分布判断。
+    """
+    if not results:
+        return ("没有可探测的比赛", False)
+    n = len(results)
+    n_ok = sum(1 for r in results if r.get("status") == "ok")
+    n_nofield = sum(1 for r in results if r.get("status") == "nofield")
+    n_empty = sum(1 for r in results if r.get("status") == "empty")
+    n_error = sum(1 for r in results if r.get("status") == "error")
+
+    if n_ok:
+        return (f"✅ 端点可用，射正数可解析（{n_ok}/{n} 场）", True)
+    if n_nofield:
+        return (f"⚠️ 端点有响应但字段名不匹配（{n_nofield}/{n} 场）", False)
+    if n_empty:
+        return (f"⚠️ 端点返回空（{n_empty}/{n} 场），该端点可能不可用", False)
+    return (f"❌ 端点不可用（{n_error}/{n} 场请求失败）", False)
+
+
 async def sot_probe_cmd(update, context) -> None:
-    """/sotprobe — 探测单场技术统计端点是否可用，并确认射正数字段。
+    """/sotprobe [场数] — 探测技术统计端点是否可用，并确认射正数字段。
 
     射正数（一场 4~6 次）样本量远大于进球（1~2 个），赛季初收敛更快，
     离线回测已验证能同时改善 Log Loss 与命中率。但它需要额外请求
     /fixtures/statistics，而该端点在套餐下是否可用、字段叫什么，
     只有真实请求才能确认 —— 沙盒无法出网验证，故先做探测再决定是否启用。
+
+    只在端点被证实可用时才落 stats_fetched 标记：否则一次空响应就会把
+    所有比赛永久标记为「已探测」，等字段名修好后也永远不会再请求。
     """
     app = context.application
-    settings = app.bot_data["settings"]
     router = app.bot_data["api"]
     service = app.bot_data["service"]
     primary = getattr(router, "primary", router)
 
     W = 12
-    rows: list[tuple[str, str, str]] = []
-
-    targets = service.repo.latest_finished(getattr(getattr(service, "sync", None), "competition", "") or "", limit=1)
+    n = _sot_probe_count(getattr(context, "args", None))
+    comp = getattr(getattr(service, "sync", None), "competition", "") or ""
+    targets = service.repo.latest_finished(comp, limit=n)
     if not targets:
-        rows.append(("⚠️", "探测对象", "本地库还没有已完场的比赛，先跑一次同步或 /backfill"))
+        rows = [("⚠️", "探测对象", "本地库还没有已完场的比赛，先跑一次同步或 /backfill")]
         body = section_join([section("🔬 场面数据探测",
                                      [kv_line(i, k, v, width=W) for i, k, v in rows])])
         await update.message.reply_text(normalize(body), parse_mode="HTML")
         return
 
-    m = targets[0]
-    mid = m["id"]
-    rows.append(("🎯", "比赛",
-                 f"{esc(m['home_team_name'] or '?')} vs {esc(m['away_team_name'] or '?')}"))
-    rows.append(("🕐", "时间/ID", f"{esc(str(m['utc_date'])[:16])} · #{esc(mid)}"))
-    rows.append(("⚽", "比分", f"{m['home_score']} - {m['away_score']}"))
+    results: list[dict] = []
+    detail: list[str] = []
+    all_types: list[str] = []
 
-    # 真实请求：拿不到就原样显示原因（套餐/未收录/额度），不猜测
-    try:
-        resp = await primary.get_fixture_statistics(mid)
-    except Exception as exc:  # noqa: BLE001 - 探测命令要把原因显示出来
-        rows.append(("📡", "统计端点", f"❌ {esc(describe_error(exc))}"))
-        rows.append(("🧭", "结论", "该端点不可用，射正数口径暂时无法在生产启用"))
-        body = section_join([section("🔬 场面数据探测",
-                                     [kv_line(i, k, v, width=W) for i, k, v in rows])])
-        await update.message.reply_text(normalize(body), parse_mode="HTML")
-        return
+    for m in targets:
+        mid = m["id"]
+        label = (f"{esc(str(m['home_team_name'] or '?')[:14])}"
+                 f" v {esc(str(m['away_team_name'] or '?')[:14])}")
+        try:
+            resp = await primary.get_fixture_statistics(mid)
+        except Exception as exc:  # noqa: BLE001 - 探测要把原因原样显示
+            results.append({"status": "error", "id": mid})
+            detail.append(f"❌ {label} · {esc(describe_error(exc))[:36]}")
+            continue
+        if not resp:
+            results.append({"status": "empty", "id": mid})
+            detail.append(f"⚠️ {label} · 返回空")
+            continue
+        types = stat_types_of(resp)
+        for t in types:
+            if t not in all_types:
+                all_types.append(t)
+        sot = parse_shots_on_target(resp, home_team_id=m.get("home_team_id"),
+                                    away_team_id=m.get("away_team_id"))
+        if sot is None:
+            results.append({"status": "nofield", "id": mid})
+            detail.append(f"⚠️ {label} · 有响应（{len(types)} 项）但无射正字段")
+        else:
+            results.append({"status": "ok", "id": mid, "sot": sot})
+            detail.append(f"✅ {label} · 射正 {sot['home']}-{sot['away']}")
 
-    if not resp:
-        rows.append(("📡", "统计端点", "⚠️ 返回空（该场可能未收录统计）"))
-        service.repo.save_match_stats(mid, None, None)
-        rows.append(("💾", "标记", "已记为探测过，后续不再重复请求"))
-        body = section_join([section("🔬 场面数据探测",
-                                     [kv_line(i, k, v, width=W) for i, k, v in rows])])
-        await update.message.reply_text(normalize(body), parse_mode="HTML")
-        return
+    verdict, usable = sot_probe_verdict(results)
 
-    rows.append(("📡", "统计端点", f"✅ 可用（{len(resp)} 队）"))
-    types = stat_types_of(resp)
-    if types:
-        shown = "、".join(esc(t) for t in types[:12])
-        if len(types) > 12:
-            shown += f" …等 {len(types)} 项"
+    saved = marked = 0
+    if usable:
+        for r in results:
+            if r["status"] == "ok":
+                if service.repo.save_match_stats(r["id"], r["sot"]["home"], r["sot"]["away"]):
+                    saved += 1
+            else:  # 端点已证实可用，nofield/empty 说明该场确实没有统计
+                if service.repo.save_match_stats(r["id"], None, None):
+                    marked += 1
+
+    rows: list[tuple[str, str, str]] = [
+        ("🎯", "探测场次", f"{len(results)} 场"),
+        ("🧭", "结论", verdict),
+    ]
+    if all_types:
+        shown = "、".join(esc(t) for t in all_types[:12])
+        if len(all_types) > 12:
+            shown += f" …等 {len(all_types)} 项"
         rows.append(("🧩", "可用字段", shown))
-
-    sot = parse_shots_on_target(resp, home_team_id=m["home_team_id"],
-                                away_team_id=m["away_team_id"])
-    if sot is None:
-        rows.append(("🎯", "射正数", "⚠️ 未解析到（字段名不匹配，见上方可用字段）"))
-        service.repo.save_match_stats(mid, None, None)
+    if usable:
+        rows.append(("💾", "写入库", f"✅ {saved} 场存值 · {marked} 场标记无统计"))
     else:
-        rows.append(("🎯", "射正数", f"✅ 主 {sot['home']} · 客 {sot['away']}"))
-        ok = service.repo.save_match_stats(mid, sot["home"], sot["away"])
-        rows.append(("💾", "写入库", "✅ 已保存" if ok else "❌ 保存失败"))
+        rows.append(("💾", "写入库", "未写标记（端点未证实可用，避免永久排除）"))
 
-    body = section_join([section("🔬 场面数据探测",
-                                 [kv_line(i, k, v, width=W) for i, k, v in rows])])
+    lines = [kv_line(i, k, v, width=W) for i, k, v in rows]
+    if detail:
+        lines.append("")
+        lines.append("📋 逐场结果")
+        lines.extend(detail)
+    body = section_join([section("🔬 场面数据探测", lines)])
     await update.message.reply_text(normalize(body), parse_mode="HTML")
 
 
