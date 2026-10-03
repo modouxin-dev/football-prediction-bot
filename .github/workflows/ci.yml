@@ -108,6 +108,48 @@ PYEOF
           tail -60 /tmp/pytest.txt
           exit $code
 
+      - name: Dump pytest output for external reading
+        # 日志 zip / artifact 走 results-receiver 域名（网络策略 403 取不到）。
+        # 这里把完整输出写进 ci-debug 分支的文件——contents API 走
+        # api.github.com，外部可直接读取，用于定位失败用例。
+        if: failure()
+        env:
+          CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PY_VER: ${{ matrix.python-version }}
+        run: |
+          python - <<'PYEOF'
+          import base64, json, os, urllib.request
+          API = "https://api.github.com/repos/modouxin-dev/football-prediction-bot"
+          TOK = os.environ.get("CI_TOKEN", "")
+          H = {"Authorization": "Bearer " + TOK,
+               "Accept": "application/vnd.github+json",
+               "Content-Type": "application/json", "User-Agent": "ci"}
+          def api(path, method="GET", data=None):
+              req = urllib.request.Request(
+                  API + path,
+                  data=json.dumps(data).encode() if data else None,
+                  method=method, headers=H)
+              try:
+                  return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+              except Exception as exc:
+                  print("api %s %s -> %s" % (method, path, exc))
+                  return {}
+          txt = open("/tmp/pytest.txt", encoding="utf-8", errors="replace").read()
+          name = "pytest-py%s.txt" % os.environ.get("PY_VER", "x")
+          branch = "ci-debug"
+          ref = api("/git/ref/heads/main")
+          sha = (ref.get("object") or {}).get("sha")
+          print("main sha:", sha)
+          if sha:
+              print("create branch:", api("/git/refs", "POST",
+                    {"ref": "refs/heads/" + branch, "sha": sha}).get("ref"))
+          r = api("/contents/" + name, "PUT", {
+              "message": "ci: dump failing pytest output (%s)" % name,
+              "content": base64.b64encode(txt.encode()).decode(),
+              "branch": branch})
+          print("write:", (r.get("content") or {}).get("path") or r.get("message"))
+          PYEOF
+
       - name: Upload pytest output on failure
         # 日志 zip 需要从 results-receiver 域名下载（部分网络环境 403），
         # artifact 走 api.github.com 域名，可正常下载，用于定位失败用例。
