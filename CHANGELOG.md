@@ -14,6 +14,63 @@
 
 ---
 
+## [e16293f] 2026-10-03 · 单场技术统计取数链路（射正数）+ /sotprobe 探测
+
+### 为什么做
+
+射正数口径在离线回测里三项指标同时改善，但**生产要用它必须先回答两个问题**：
+`/fixtures/statistics` 在当前套餐下是否可用、射正数字段叫什么。
+这两点只有真实请求能证明——沙盒出网被网关拦截（ZeroProxy `policy_default_denied`），
+无法自证。因此本步只搭取数与落库链路，**不改线上建模口径**，
+等探测结果确认后再开开关。
+
+### 改动文件
+
+- `api_client.py` — `parse_shots_on_target()` / `stat_types_of()` 纯函数 +
+  `get_fixture_statistics()`；"Shots on Goal" 与 "Shots on Target" 两种字段名都认
+- `data_source.py` — 归入 `OPTIONAL_METHODS` 与 `FIXTURE_ID_METHODS`；
+  另补「备用源没有某方法时，可选数据静默返回空」的守卫
+  （football-data.org 无单场统计，此前会误报「两个源都不可用」）
+- `repository.py` — `home_sot` / `away_sot` / `stats_fetched` 三列 +
+  `latest_finished()` / `finished_without_stats()` / `save_match_stats()`
+- `commands/admin.py` — `/sotprobe`（管理员）
+- `tests/test_sot_stats.py` — 21 条新增
+
+### 实测证据
+
+```
+基线（远端 6f6ea86 干净副本）  826 passed, 1 skipped
+改动后                        847 passed, 1 skipped   +21，零破坏
+```
+
+变异验证（回退代码看测试能否拦住）：
+
+| 注入的错误 | 结果 |
+|---|---|
+| 只认一种字段名 | 2 failed ✅ |
+| 统计失败也冷却主源 | 2 failed ✅ |
+| 备用源无方法时抛错 | 2 failed ✅ |
+| 去掉旧库补列迁移 | 1 failed ✅ |
+| **删掉百分比分支** | **21 passed ❌ 没抓到** |
+
+最后一组必须记下来：百分比判断是**冗余代码**——`int("57%")` 本身就会抛
+`ValueError`，被同一处 `except` 兜住，两种写法结果相同。
+已按项目清理死代码的原则删除该分支；测试仍在，但测的是行为而非那行代码。
+
+### 关键设计
+
+- **探测过就置 `stats_fetched=1`**，即使没解析到射正数。
+  否则「本来就没有统计」的比赛会被每天重复拉取，白耗额度。
+- **任一侧取不到就整盘返回 None**。半份数据会让一侧按射正算、
+  另一侧按进球算，量纲不一致且**静默出错**。
+- **按球队 ID 匹配主客**，不依赖响应顺序。
+
+### 线上行为
+
+无变化。生产建模仍用进球口径，`use_sot` 未在生产路径启用。
+
+---
+
 ## [c4b2092] 2026-10-03 · 射正数（Shots on Target）作为可选强度指标
 
 ### 为什么做
