@@ -144,11 +144,29 @@ def test_primary_http_error_switches_to_fallback(status_code):
 # 5. 主源返回空数据时切换备用源
 # ==============================================================================
 def test_primary_empty_switches_to_fallback():
+    """可选数据（赔率）主源为空时，仍要问备用源——这是常态不是故障。"""
+    class _EmptyOddsPrimary(StubPrimary):
+        async def get_odds(self, *a, **k):
+            return []
+    router = DataSourceRouter(_EmptyOddsPrimary(), make_fd(ok_matches), mode="auto")
+    result = run(router.get_odds(101))
+    assert result == []
+
+
+def test_primary_empty_fixtures_does_not_switch_to_fallback():
+    """主源确认该时段无比赛时，不再切备用源取「回退最近比赛日」的结果。
+
+    备用源在窗口内无比赛时会回退展示最近比赛日：日期被悄悄换到未来某天，
+    上层时间标签跟着错乱；且它不提供积分榜与赔率，预测只能按联赛平均估算
+    （DATA QUALITY: POOR）。主源是权威源，它说没有就是没有，
+    应如实返回空，由上层用主源自己的窗口扩展重查，拿到带积分榜与赔率的数据。
+    """
     primary = StubPrimary(result=[])
     router = DataSourceRouter(primary, make_fd(ok_matches), mode="auto")
     result = run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
-    assert router.using_fallback is True
-    assert len(result) == 2
+    assert result == []
+    assert router.using_fallback is False
+    assert primary.calls == 1  # 只问了主源一次，没有把备用源数据当成答案
 
 
 # ==============================================================================
@@ -803,12 +821,20 @@ def test_primary_empty_data_reported_as_empty_not_as_untouched():
     于是提示退化成「未尝试或已恢复」，看起来像主源压根没被调用，
     排查时会被误导去查主源配置，而真实情况是主源请求过但没数据。
     """
-    router = _router_both_fail(StubPrimary(result=[]))
+    router = _router_both_fail(StubPrimary(error=APIError("boom")))
     with pytest.raises(DataSourceError) as exc:
         run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     text = str(exc.value)
-    assert "返回空数据" in text
+    assert "boom" in text
     assert "未尝试或已恢复" not in text
+
+
+def test_primary_empty_fixtures_keeps_empty_trace():
+    """主源空赛程虽不再切备用源，仍要留下「返回空数据」的痕迹供 /diag 排查。"""
+    router = DataSourceRouter(StubPrimary(result=[]), _FallbackFail(), mode="auto")
+    result = run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert result == []
+    assert "返回空数据" in (router.last_error("api-football") or "")
 
 
 def test_cooling_primary_reports_remaining_seconds():
@@ -825,8 +851,7 @@ def test_cooling_primary_reports_remaining_seconds():
 def test_primary_empty_then_ok_clears_error():
     """主源空数据留下的痕迹，在下一次成功取到数据后必须清除，不能长期误导。"""
     router = DataSourceRouter(StubPrimary(result=[]), _FallbackFail(), mode="auto")
-    with pytest.raises(DataSourceError):
-        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     assert router.last_error("api-football") is not None
     # 换成有数据的主源后再请求，错误应被清除
     router.primary = StubPrimary()

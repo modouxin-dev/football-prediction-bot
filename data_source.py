@@ -190,6 +190,20 @@ class DataSourceRouter:
                 self._last_errors["api-football"] = f"返回空数据（{method}）"
                 log.warning("主数据源 %s 返回空数据，尝试备用源", method)
 
+                # 赛程查询返回空 ≠ 主源故障。主源（Pro）是权威源，它说某时段
+                # 没有比赛就是没有。此前会顺手切到备用源，而备用源带
+                # 「窗口内无比赛 → 回退展示最近比赛日」的补丁：日期被悄悄换到
+                # 未来某天（上层时间标签跟着错乱），且备用源不提供积分榜与赔率，
+                # 预测只能按联赛平均估算（DATA QUALITY: POOR）。
+                # 改为如实返回空，让上层用主源自己的窗口扩展重查，
+                # 拿到的是带积分榜与赔率的高质量数据。
+                if method == "get_fixtures":
+                    self._source = "api-football"
+                    log.info(
+                        "主源确认 %s 该时段无比赛，不再切备用源取回退结果，"
+                        "交由上层用主源扩窗重查", method)
+                    return []
+
         if self._fallback_blocked():
             if uses_fallback_id:
                 # 拿着备用源的 ID，却没有备用源可用。
