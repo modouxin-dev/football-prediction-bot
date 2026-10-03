@@ -13,6 +13,55 @@
 > CHANGELOG 描述**从哪个版本变成现在这样**。
 ---
 
+## [4b5aa38] 2026-10-03 · 二级视图出口收敛（图表页 / 积分榜 / 主菜单文案）
+
+### 为什么做
+
+`nav_row()` 只在 `get_main_keyboard` 用了，其余键盘各自硬编码出口，于是出现三处不一致：
+
+| 键盘 | 改前出口 | 问题 |
+|---|---|---|
+| `chart_keyboard` | 回到分析 + 主菜单 | 从赛程列表进来拿不到「返回赛程」 |
+| `standings_keyboard` | 刷新 + 主菜单 | 同上 |
+| `prediction_keyboard` | 🏠 返回主菜单 | 其余视图都写「🏠 主菜单」，同一出口两个词 |
+
+### 根因：弱断言放行了缺陷
+
+旧测试 `test_every_inline_view_has_an_exit` 只断言 `exits()` **非空**，
+所以 chart/standings 挂一个「主菜单」就算通过 —— 缺陷不是没测，是测得不够狠。
+
+### 改了什么
+
+- `chart_keyboard` / `standings_keyboard` 改用 `nav_row()`
+- `prediction_keyboard` 改用 `nav_row(with_fixtures=False)`（它已有「📅 今日赛程」承担返回）
+- 新增 3 条测试：完整出口（非空 → 必须含 home + fixtures）、标签一致、单行 ≤3 按钮
+
+### 实测证据
+
+```
+基线（远端 a4a695b 干净副本）  916 passed
+改动后                        923 passed   +7，零破坏
+```
+
+变异验证 4/4 全部被抓：
+
+| 注入的错误 | 结果 |
+|---|---|
+| M1 chart 去掉 nav_row | 1 failed |
+| M2 standings 去掉 nav_row | 1 failed |
+| M3 主菜单标签改回「返回主菜单」 | 1 failed |
+| M4 单行塞 4 个按钮 | 1 failed |
+
+改动文件仅 `keyboards.py` + `tests/test_keyboard_navigation.py`，无夹带。
+回查：远端 HEAD `4b5aa38` ← 父 `a4a695b`，blob SHA 逐项匹配 OK。
+
+### M3 的教训
+
+第一次变异脚本把缩进写成 8 空格（实际 4 空格），PATTERN NOT FOUND 返回「没抓到」。
+**差点误判成"测试拦不住"** —— 变异没生效和变异被通过是两回事，要区分。
+
+---
+
 ## [7138de4] 2026-10-03 · /stats 校准仪表（分信心等级 Brier/LogLoss）
 
 ### 为什么做
