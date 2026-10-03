@@ -46,7 +46,23 @@ jobs:
       - name: Run tests
         # pytest.ini 已配置 pythonpath = . 与 testpaths = tests
         # 测试不联网，使用 tests/sample_data.py 的仿真响应
-        run: python -m pytest -q
+        #
+        # 失败时把 FAILED/ERROR 行写进 job summary：Actions 的日志 zip 需要
+        # 单独下载（且部分网络环境取不到），摘要则能直接在页面上看到，
+        # 不必为了「哪个用例挂了」去翻几十秒的日志。
+        run: |
+          set -o pipefail
+          python -m pytest -q --tb=line -rf > /tmp/pytest.txt 2>&1
+          code=$?
+          if [ "$code" -ne 0 ]; then
+            echo "### ❌ pytest 失败（退出码 $code）" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            grep -E "^(FAILED|ERROR)" /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY" \
+              || tail -40 /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          tail -60 /tmp/pytest.txt
+          exit $code
 
       - name: Static check (undefined name)
         # 独立步骤而非塞进 pytest：这类问题（NameError）此前靠测试完全拦不住
