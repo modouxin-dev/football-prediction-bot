@@ -1,6 +1,7 @@
 """备用数据源 football-data.org 与主源切换的测试（全部 Mock，不需要真实 Token）。"""
 import asyncio
 import json
+import time
 from datetime import date, timedelta
 
 import httpx
@@ -779,3 +780,55 @@ def test_no_switch_recorded_when_primary_ok():
     router = _router(StubPrimary())
     run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     assert router.last_switch is None
+
+
+class _FallbackFail:
+    """备用源桩：任何请求都失败，用于复现「两个源都不可用」的报错场景。"""
+
+    def __init__(self, exc=None):
+        self.exc = exc or FootballDataError("网络错误：ReadTimeout")
+
+    async def get_fixtures(self, *a, **k):
+        raise self.exc
+
+
+def _router_both_fail(primary):
+    return DataSourceRouter(primary, _FallbackFail(), mode="auto")
+
+
+def test_primary_empty_data_reported_as_empty_not_as_untouched():
+    """主源返回空数据、备用源再失败时，提示必须写明「返回空数据」。
+
+    修复前主源空数据只在日志里 warning、不写 _last_errors，
+    于是提示退化成「未尝试或已恢复」，看起来像主源压根没被调用，
+    排查时会被误导去查主源配置，而真实情况是主源请求过但没数据。
+    """
+    router = _router_both_fail(StubPrimary(result=[]))
+    with pytest.raises(DataSourceError) as exc:
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    text = str(exc.value)
+    assert "返回空数据" in text
+    assert "未尝试或已恢复" not in text
+
+
+def test_cooling_primary_reports_remaining_seconds():
+    """主源处于冷却期、备用源也失败时，提示要说明是冷却导致未发起请求。"""
+    router = _router_both_fail(StubPrimary())
+    router._primary_down_until = time.monotonic() + 300
+    with pytest.raises(DataSourceError) as exc:
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    text = str(exc.value)
+    assert "冷却" in text
+    assert "未尝试或已恢复" not in text
+
+
+def test_primary_empty_then_ok_clears_error():
+    """主源空数据留下的痕迹，在下一次成功取到数据后必须清除，不能长期误导。"""
+    router = DataSourceRouter(StubPrimary(result=[]), _FallbackFail(), mode="auto")
+    with pytest.raises(DataSourceError):
+        run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert router.last_error("api-football") is not None
+    # 换成有数据的主源后再请求，错误应被清除
+    router.primary = StubPrimary()
+    run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
+    assert router.last_error("api-football") is None

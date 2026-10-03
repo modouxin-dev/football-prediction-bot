@@ -160,6 +160,10 @@ class DataSourceRouter:
                     return result
                 self._log_request("api-football", method, "empty",
                                   count=0, elapsed=time.monotonic() - started, **ctx)
+                # 空数据同样要留下痕迹。此前只在日志里 warning、不写 _last_errors，
+                # 于是备用源再失败时提示会退化成「未尝试或已恢复」，
+                # 掩盖了「主源其实请求过、只是没返回数据」这一真实状态，排查时被误导。
+                self._last_errors["api-football"] = f"返回空数据（{method}）"
                 log.warning("主数据源 %s 返回空数据，尝试备用源", method)
 
         if self._fallback_blocked():
@@ -178,9 +182,16 @@ class DataSourceRouter:
                               status=type(exc).__name__, **ctx)
             self._last_errors["football-data"] = str(exc)[:200]
             primary_reason = self.last_error("api-football")
+            if not primary_reason:
+                # 明确区分两种「没有具体错误」的情形，避免一律显示成"未尝试"，
+                # 让人误以为主源压根没被调用过。
+                primary_reason = (
+                    f"冷却中未发起请求（剩余 {int(self._primary_down_until - time.monotonic())} 秒）"
+                    if self._primary_cooling() else "已尝试但无具体错误"
+                )
             raise DataSourceError(
                 "主数据源与备用数据源均不可用。\n"
-                f"主源：{primary_reason or '未尝试或已恢复'}\n"
+                f"主源：{primary_reason}\n"
                 f"备用源：{str(exc)[:200]}"
             ) from None
 

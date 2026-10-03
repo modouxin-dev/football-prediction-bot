@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import paths
@@ -70,6 +72,68 @@ def _format_quota(api: Any, req: dict) -> str:
         # 主源报不出额度、本地也没有计数（例如刚重启且尚未发请求）
         parts.append("本地实测 0")
     return "｜".join(parts)
+
+
+async def diag_cmd(update, context) -> None:
+    """/diag — 直连主源探活，暴露真实失败原因（套餐 / 赛季 / 配额 / 冷却）。
+
+    常规请求会被冷却逻辑挡住，失败时只提示「未尝试或已恢复」，
+    排查时看不到主源到底为什么不可用。本命令绕过调度层直连主源，
+    把原始错误原样呈现，用于一次性定位问题。
+    """
+    app = context.application
+    settings = app.bot_data["settings"]
+    router = app.bot_data["api"]
+    # 路由器负责主备切换；诊断必须直连主源才能拿到真实原因
+    primary = getattr(router, "primary", router)
+
+    W = 12
+    rows: list[tuple[str, str, str]] = []
+
+    # 冷却状态：冷却期内主源根本不会被调用，所以要先说明
+    if callable(getattr(router, "_primary_cooling", None)) and router._primary_cooling():
+        left = int(getattr(router, "_primary_down_until", 0) - time.monotonic())
+        rows.append(("🧊", "冷却状态", f"冷却中（剩余 {max(left, 0)} 秒，此期间主源不被调用）"))
+    else:
+        rows.append(("🧊", "冷却状态", "未冷却"))
+
+    # 主源最近一次失败原因（调度层记录的）
+    recorded = None
+    if callable(getattr(router, "last_error", None)):
+        recorded = router.last_error("api-football")
+    rows.append(("📡", "主源记录", esc(recorded or "无失败记录")))
+
+    now = datetime.now(settings.timezone)
+    d_from = now.date()
+    d_to = (now + timedelta(hours=settings.lookahead_hours)).date()
+
+    # 真实请求 1：账号可用赛季（能直接暴露套餐限制）
+    seasons_fn = getattr(primary, "get_available_seasons", None)
+    if callable(seasons_fn):
+        try:
+            seasons = await primary.get_available_seasons()
+            if seasons:
+                mark = "✅" if settings.season in seasons else "⚠️"
+                rows.append(("📋", "可用赛季", f"{mark} {'、'.join(str(x) for x in seasons)}"))
+            else:
+                rows.append(("📋", "可用赛季", "⚠️ 返回空（套餐可能不含赛季权限）"))
+        except Exception as exc:  # noqa: BLE001 - 诊断命令要把原因显示出来，不吞异常
+            rows.append(("📋", "可用赛季", f"❌ {esc(describe_error(exc))}"))
+
+    # 真实请求 2：按当前窗口拉赛程，参数与每日推送一致
+    try:
+        fixtures = await primary.get_fixtures(settings.league_id, settings.season, d_from, d_to)
+        rows.append(("🧪", "赛程请求", f"✅ {len(fixtures)} 场"))
+    except Exception as exc:  # noqa: BLE001
+        rows.append(("🧪", "赛程请求", f"❌ {esc(describe_error(exc))}"))
+
+    rows.append(("⚙️", "请求参数",
+                 f"联赛 {settings.league_id} · 赛季 {settings.season} · {d_from} ~ {d_to}"))
+
+    body = section_join([
+        section("🔬 主源诊断", [kv_line(i, k, v, width=W) for i, k, v in rows]),
+    ])
+    await update.message.reply_text(normalize(body), parse_mode="HTML")
 
 
 async def status_cmd(update, context) -> None:
@@ -607,6 +671,7 @@ async def _typing(update) -> None:
 def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("test", test_cmd, admin_only=True, description="立即推送一次预测")
     dispatcher.register("status", status_cmd, admin_only=True, description="运行状态诊断")
+    dispatcher.register("diag", diag_cmd, admin_only=True, description="直连主源探活，显示真实失败原因")
     dispatcher.register("stats", stats_cmd, admin_only=True, description="命中率统计")
     dispatcher.register("storage", storage_cmd, admin_only=True, description="存储自检")
     dispatcher.register("backfill", backfill_cmd, admin_only=True,
