@@ -89,17 +89,28 @@ class DataSourceRouter:
     def _fallback_blocked(self) -> bool:
         return not self.fallback_available
 
-    def _mark_primary_down(self, reason: str, method: str = "") -> None:
-        self._primary_down_until = time.monotonic() + PRIMARY_COOLDOWN
+    def _mark_primary_down(self, reason: str, method: str = "", *, cooldown: bool = True) -> None:
+        # 可选数据（赔率/交锋/近期战绩/伤停）失败不进冷却：
+        # 未开盘的比赛本来就没有赔率，接口会直接拒绝（实测 164ms 快速失败），
+        # 这是常态而非故障。若因此把主源冷却 10 分钟，冷却期内连赛程、
+        # 积分榜这些关键请求都被迫走备用源 —— 表现为 /status 突然显示
+        # 「备用源生效中」+「套餐 Free」，而主源其实是健康的。
+        # 关键方法（get_fixtures/get_standings）失败照常冷却，它们才是
+        # 主源健康的判据：主源真挂了，赛程会失败并触发冷却，逻辑自洽。
+        if cooldown:
+            self._primary_down_until = time.monotonic() + PRIMARY_COOLDOWN
         self._last_errors["api-football"] = str(reason)[:200]
-        # 记录降级事件：为什么切、什么时候切的
-        self.last_switch = {
-            "from": "api-football",
-            "to": "football-data",
-            "method": method,
-            "reason": str(reason)[:200],
-            "at": time.time(),
-        }
+        # 记录降级事件：为什么切、什么时候切的。
+        # 只有真正切走（进冷却）才算降级；否则 last_switch 会指向一次
+        # 并未发生的切换，排查时被它误导。
+        if cooldown:
+            self.last_switch = {
+                "from": "api-football",
+                "to": "football-data",
+                "method": method,
+                "reason": str(reason)[:200],
+                "at": time.time(),
+            }
 
     def _primary_cooling(self) -> bool:
         return time.monotonic() < self._primary_down_until
@@ -162,7 +173,7 @@ class DataSourceRouter:
                 self._log_request("api-football", method, "failed", elapsed=time.monotonic() - started,
                                   status=type(exc).__name__, **ctx)
                 log.warning("主数据源 %s 失败（%s），准备切换备用源", method, type(exc).__name__)
-                self._mark_primary_down(exc, method)
+                self._mark_primary_down(exc, method, cooldown=not optional)
             else:
                 if result:  # 有数据才认为主源可用
                     self._source = "api-football"
