@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS matches (
     away_team_name   TEXT,
     home_score       INTEGER,
     away_score       INTEGER,
+    home_sot         INTEGER,
+    away_sot         INTEGER,
+    stats_fetched    INTEGER DEFAULT 0,
     source           TEXT NOT NULL,
     raw_json         TEXT,
     updated_at       TEXT NOT NULL,
@@ -287,6 +290,27 @@ class PredictionRepository:
             conn.commit()
         except Exception as exc:  # 建表失败也不能拖垮启动
             log.warning("初始化数据库失败：%s", exc)
+        self._ensure_match_stat_columns()
+
+    # 已存在的旧库不会被 CREATE TABLE IF NOT EXISTS 补列，
+    # 挂载卷上的库是跨部署保留的，必须显式 ALTER 才能加上新字段。
+    MATCH_STAT_COLUMNS = {
+        "home_sot": "INTEGER",
+        "away_sot": "INTEGER",
+        "stats_fetched": "INTEGER DEFAULT 0",
+    }
+
+    def _ensure_match_stat_columns(self) -> None:
+        """为旧库补上场面数据列；缺哪列补哪列，已有则不动。"""
+        try:
+            conn = self._connect()
+            existing = {r["name"] for r in conn.execute("PRAGMA table_info(matches)")}
+            for col, ddl in self.MATCH_STAT_COLUMNS.items():
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE matches ADD COLUMN {col} {ddl}")
+            conn.commit()
+        except Exception as exc:  # 补列失败不能拖垮启动
+            log.warning("补建比赛统计列失败：%s", exc)
 
     @property
     def persistent(self) -> bool:
@@ -679,6 +703,75 @@ class PredictionRepository:
 
         self.log_sync(source, competition, "", "", http_status, len(matches), saved, message)
         return saved
+
+    def latest_finished(self, competition: str = "", limit: int = 1) -> list[dict]:
+        """最近已完场的比赛（有比分），按开赛时间倒序。"""
+        try:
+            conn = self._connect()
+            if competition:
+                rows = conn.execute(
+                    "SELECT id, home_team_id, away_team_id, home_team_name, away_team_name, "
+                    "utc_date, home_score, away_score, home_sot, away_sot FROM matches "
+                    "WHERE competition_code=? AND home_score IS NOT NULL "
+                    "ORDER BY utc_date DESC, id DESC LIMIT ?",
+                    (competition, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, home_team_id, away_team_id, home_team_name, away_team_name, "
+                    "utc_date, home_score, away_score, home_sot, away_sot FROM matches "
+                    "WHERE home_score IS NOT NULL "
+                    "ORDER BY utc_date DESC, id DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+        except Exception as exc:
+            log.warning("查询已完场比赛失败：%s", exc)
+            return []
+        return [dict(r) for r in rows]
+
+    def finished_without_stats(self, competition: str = "", limit: int = 50) -> list[dict]:
+        """已完场但还没抓过技术统计的比赛。
+
+        stats_fetched 标记「已经探测过」：探测成功与否都置 1，
+        避免对「该场本来就没有统计」的比赛反复浪费额度。
+        """
+        try:
+            conn = self._connect()
+            sql = (
+                "SELECT id, home_team_id, away_team_id, utc_date FROM matches "
+                "WHERE home_score IS NOT NULL "
+                "AND (stats_fetched IS NULL OR stats_fetched=0) "
+            )
+            params: list = []
+            if competition:
+                sql += "AND competition_code=? "
+                params.append(competition)
+            sql += "ORDER BY utc_date DESC LIMIT ?"
+            params.append(int(limit))
+            rows = conn.execute(sql, params).fetchall()
+        except Exception as exc:
+            log.warning("查询待抓统计的比赛失败：%s", exc)
+            return []
+        return [dict(r) for r in rows]
+
+    def save_match_stats(self, fixture_id, home_sot: int | None,
+                         away_sot: int | None) -> bool:
+        """写入一场比赛的射正数；探测过就置 stats_fetched=1。
+
+        射正数缺失（None）也算「探测过」，只写标记不写数值，
+        否则同一批没有统计的比赛会被每天重复拉取，白耗额度。
+        """
+        try:
+            conn = self._connect()
+            conn.execute(
+                "UPDATE matches SET home_sot=?, away_sot=?, stats_fetched=1 WHERE id=?",
+                (home_sot, away_sot, str(fixture_id)),
+            )
+            conn.commit()
+        except Exception as exc:
+            log.warning("保存比赛统计失败（fixture=%s）：%s", fixture_id, exc)
+            return False
+        return True
 
     def count_finished_matches(self, competition: str | None = None) -> int:
         """已完赛（有比分）的场次。

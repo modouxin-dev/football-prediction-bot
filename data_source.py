@@ -29,14 +29,15 @@ PRIMARY_COOLDOWN = 10 * 60  # 主源失败后，冷却多久内直接走备用�
 
 # 可选数据：免费层天然可能没有（无赔率、无交锋、无近期战绩），
 # 取不到时返回空是正常降级，不能当成「两个源都失败」抛出错误。
-OPTIONAL_METHODS = {"get_odds", "get_h2h", "get_team_form", "get_injuries"}
+OPTIONAL_METHODS = {"get_odds", "get_h2h", "get_team_form", "get_injuries",
+                    "get_fixture_statistics"}
 
 # 按比赛 ID 查询的方法 / Methods queried by fixture id.
 # 备用源 ID 带 "fd-" 前缀，拿去问主源会被直接拒绝
 # （"The Fixture field must contain an integer."），
 # 于是健康的主源被误判为故障并拖进冷却，冷却期间又只能用备用源，
 # 产出更多 fd- ID —— 形成自我维持的降级闭环。必须按 ID 归属路由。
-FIXTURE_ID_METHODS = {"get_odds", "get_injuries"}
+FIXTURE_ID_METHODS = {"get_odds", "get_injuries", "get_fixture_statistics"}
 
 
 class DataSourceError(RuntimeError):
@@ -221,9 +222,21 @@ class DataSourceRouter:
                 )
             raise DataSourceError("未配置可用的数据源。")
 
+        fallback_fn = getattr(self.fallback, method, None)
+        if fallback_fn is None:
+            # 备用源没有这个方法（例：football-data.org 无单场技术统计）。
+            # 可选数据静默降级为空，不能因为「备用源没实现」就报两个源都不可用。
+            if optional:
+                log.info("%s：备用源未提供该能力，返回空（可选数据，不影响预测）", method)
+                return []
+            raise DataSourceError(
+                f"主数据源失败：{self.last_error('api-football') or '未知原因'}；"
+                f"且备用数据源不支持 {method}。"
+            )
+
         started = time.monotonic()
         try:
-            result = await getattr(self.fallback, method)(*args, **kwargs)
+            result = await fallback_fn(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001
             self._log_request("football-data", method, "failed", elapsed=time.monotonic() - started,
                               status=type(exc).__name__, **ctx)
@@ -278,6 +291,10 @@ class DataSourceRouter:
 
     async def get_odds(self, fixture_id, fresh: bool = False) -> list[dict]:
         return await self._run("get_odds", fixture_id, fresh)
+
+    async def get_fixture_statistics(self, fixture_id) -> list[dict]:
+        """单场技术统计（射正数等）。取不到时返回空列表，不触发主源冷却。"""
+        return await self._run("get_fixture_statistics", fixture_id)
 
     async def get_available_seasons(self) -> list[int]:
         return await self._run("get_available_seasons")

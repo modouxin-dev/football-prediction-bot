@@ -14,6 +14,7 @@ from pathlib import Path
 import paths
 from backtest import DEFAULT_MIN_HISTORY, run_backtest
 from backtest_corpus import load_corpus
+from api_client import parse_shots_on_target, stat_types_of
 from repository import quota_today
 from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
@@ -133,6 +134,81 @@ async def diag_cmd(update, context) -> None:
     body = section_join([
         section("🔬 主源诊断", [kv_line(i, k, v, width=W) for i, k, v in rows]),
     ])
+    await update.message.reply_text(normalize(body), parse_mode="HTML")
+
+
+async def sot_probe_cmd(update, context) -> None:
+    """/sotprobe — 探测单场技术统计端点是否可用，并确认射正数字段。
+
+    射正数（一场 4~6 次）样本量远大于进球（1~2 个），赛季初收敛更快，
+    离线回测已验证能同时改善 Log Loss 与命中率。但它需要额外请求
+    /fixtures/statistics，而该端点在套餐下是否可用、字段叫什么，
+    只有真实请求才能确认 —— 沙盒无法出网验证，故先做探测再决定是否启用。
+    """
+    app = context.application
+    settings = app.bot_data["settings"]
+    router = app.bot_data["api"]
+    service = app.bot_data["service"]
+    primary = getattr(router, "primary", router)
+
+    W = 12
+    rows: list[tuple[str, str, str]] = []
+
+    targets = service.repo.latest_finished(getattr(getattr(service, "sync", None), "competition", "") or "", limit=1)
+    if not targets:
+        rows.append(("⚠️", "探测对象", "本地库还没有已完场的比赛，先跑一次同步或 /backfill"))
+        body = section_join([section("🔬 场面数据探测",
+                                     [kv_line(i, k, v, width=W) for i, k, v in rows])])
+        await update.message.reply_text(normalize(body), parse_mode="HTML")
+        return
+
+    m = targets[0]
+    mid = m["id"]
+    rows.append(("🎯", "比赛",
+                 f"{esc(m['home_team_name'] or '?')} vs {esc(m['away_team_name'] or '?')}"))
+    rows.append(("🕐", "时间/ID", f"{esc(str(m['utc_date'])[:16])} · #{esc(mid)}"))
+    rows.append(("⚽", "比分", f"{m['home_score']} - {m['away_score']}"))
+
+    # 真实请求：拿不到就原样显示原因（套餐/未收录/额度），不猜测
+    try:
+        resp = await primary.get_fixture_statistics(mid)
+    except Exception as exc:  # noqa: BLE001 - 探测命令要把原因显示出来
+        rows.append(("📡", "统计端点", f"❌ {esc(describe_error(exc))}"))
+        rows.append(("🧭", "结论", "该端点不可用，射正数口径暂时无法在生产启用"))
+        body = section_join([section("🔬 场面数据探测",
+                                     [kv_line(i, k, v, width=W) for i, k, v in rows])])
+        await update.message.reply_text(normalize(body), parse_mode="HTML")
+        return
+
+    if not resp:
+        rows.append(("📡", "统计端点", "⚠️ 返回空（该场可能未收录统计）"))
+        service.repo.save_match_stats(mid, None, None)
+        rows.append(("💾", "标记", "已记为探测过，后续不再重复请求"))
+        body = section_join([section("🔬 场面数据探测",
+                                     [kv_line(i, k, v, width=W) for i, k, v in rows])])
+        await update.message.reply_text(normalize(body), parse_mode="HTML")
+        return
+
+    rows.append(("📡", "统计端点", f"✅ 可用（{len(resp)} 队）"))
+    types = stat_types_of(resp)
+    if types:
+        shown = "、".join(esc(t) for t in types[:12])
+        if len(types) > 12:
+            shown += f" …等 {len(types)} 项"
+        rows.append(("🧩", "可用字段", shown))
+
+    sot = parse_shots_on_target(resp, home_team_id=m["home_team_id"],
+                                away_team_id=m["away_team_id"])
+    if sot is None:
+        rows.append(("🎯", "射正数", "⚠️ 未解析到（字段名不匹配，见上方可用字段）"))
+        service.repo.save_match_stats(mid, None, None)
+    else:
+        rows.append(("🎯", "射正数", f"✅ 主 {sot['home']} · 客 {sot['away']}"))
+        ok = service.repo.save_match_stats(mid, sot["home"], sot["away"])
+        rows.append(("💾", "写入库", "✅ 已保存" if ok else "❌ 保存失败"))
+
+    body = section_join([section("🔬 场面数据探测",
+                                 [kv_line(i, k, v, width=W) for i, k, v in rows])])
     await update.message.reply_text(normalize(body), parse_mode="HTML")
 
 
@@ -695,5 +771,7 @@ def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("storage", storage_cmd, admin_only=True, description="存储自检")
     dispatcher.register("backfill", backfill_cmd, admin_only=True,
                         description="拉取整季赛程，填充强度榜样本")
+    dispatcher.register("sotprobe", sot_probe_cmd, admin_only=True,
+                        description="探测单场技术统计（射正数）是否可用")
     dispatcher.register("backtest", backtest_cmd, admin_only=True,
                         description="用本地真实赛果回测（不消耗额度）")

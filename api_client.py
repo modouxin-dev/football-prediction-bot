@@ -38,6 +38,7 @@ TTL_STATUS = 5 * 60  # /status 诊断用的账户额度查询
 TTL_SEASONS = 24 * 3600  # 账号可用赛季列表（几乎不变，缓存一天，省额度）
 TTL_SEASON_FIXTURES = 6 * 3600  # 整季赛程（历史赛季不会变，缓存 6 小时）
 TTL_INJURIES = 3 * 3600  # 伤停名单（一天内变化不大，缓存 3 小时）
+TTL_STATS = 24 * 3600  # 单场技术统计：已完场的比赛不会变，缓存一天省额度
 
 HTTP_HINTS = {
     401: "API Key 无效或缺失",
@@ -49,6 +50,90 @@ HTTP_HINTS = {
 
 class APIError(RuntimeError):
     """数据源返回错误（额度用尽、订阅无效、参数错误等）。"""
+
+
+# 射正数在 API-Football 里的字段名随版本不同：官方 v3 用 "Shots on Goal"，
+# 部分文档/镜像写作 "Shots on Target"。两者都认，避免只认一个导致静默失效。
+SHOT_ON_TARGET_TYPES = ("Shots on Goal", "Shots on Target")
+
+
+def _stat_value(statistics: list[dict], types: tuple[str, ...]) -> int | None:
+    """在单队的 statistics 数组里取出计数值。
+
+    只接受可转成整数的计数：百分比字符串（"57%"）是比例而非次数，
+    拿它当计数会让强度量纲直接错掉，必须判为取不到。
+    """
+    for item in statistics or []:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("type") or "").strip() not in types:
+            continue
+        v = item.get("value")
+        if isinstance(v, bool) or v is None:
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float):
+            return int(v)
+        if isinstance(v, str):
+            # 百分比（"57%"）等比例值会被 int() 拒绝，落入下面的 None，
+            # 不会误当次数 —— 无需额外判断，写了反而与此处重复。
+            try:
+                return int(v.strip())
+            except ValueError:
+                return None
+    return None
+
+
+def stat_types_of(response: list[dict]) -> list[str]:
+    """响应里出现的统计项名称（用于探测：确认套餐下到底有哪些字段）。"""
+    out: list[str] = []
+    for item in response or []:
+        if not isinstance(item, dict):
+            continue
+        for st in item.get("statistics") or []:
+            name = (st.get("type") or "").strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def parse_shots_on_target(response: list[dict], *,
+                          home_team_id=None, away_team_id=None) -> dict[str, int] | None:
+    """从 /fixtures/statistics 响应解析主客队射正数。
+
+    返回 {"home": int, "away": int}；任一侧取不到就返回 None —— 
+    半份数据比没有更危险：一侧按射正算、另一侧按进球算，量纲不一致，
+    强度估计会静默出错。
+
+    home_team_id / away_team_id 给全时按球队 ID 匹配（响应顺序不可靠）；
+    给不全时退回「响应第一项为主队」的顺序约定。
+    """
+    entries: list[tuple[str | None, int | None]] = []
+    for item in response or []:
+        if not isinstance(item, dict):
+            continue
+        team = item.get("team") or {}
+        tid = team.get("id")
+        entries.append((str(tid) if tid is not None else None,
+                        _stat_value(item.get("statistics") or [], SHOT_ON_TARGET_TYPES)))
+    if len(entries) < 2:
+        return None
+
+    home = away = None
+    if home_team_id is not None and away_team_id is not None:
+        hid, aid = str(home_team_id), str(away_team_id)
+        for tid, sot in entries:
+            if tid == hid:
+                home = sot
+            elif tid == aid:
+                away = sot
+    else:
+        home, away = entries[0][1], entries[1][1]
+
+    if home is None or away is None:
+        return None
+    return {"home": int(home), "away": int(away)}
 
 
 def flatten_standings(response: list[dict]) -> list[dict]:
@@ -228,6 +313,16 @@ class FootballAPI:
         matches = await self._get("fixtures", params, ttl=TTL_FORM)
         done = {"FT", "AET", "PEN"}  # 只统计已完场，未开赛的不算进状态
         return [m for m in matches or [] if ((m.get("fixture") or {}).get("status") or {}).get("short") in done]
+
+    async def get_fixture_statistics(self, fixture_id: int) -> list[dict]:
+        """单场技术统计（/fixtures/statistics），含射正数等场面数据。
+
+        套餐不含该端点、或该场未收录统计时，接口会直接报错/返回空。
+        这里原样抛出 APIError，由上层决定降级 —— 
+        对每日预测而言这不是故障，不该触发主源冷却。
+        """
+        return await self._get("fixtures/statistics",
+                               {"fixture": fixture_id}, ttl=TTL_STATS)
 
     async def get_available_seasons(self) -> list[int]:
         """当前账号可访问的赛季列表（/leagues/seasons），升序去重。
