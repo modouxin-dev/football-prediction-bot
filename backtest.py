@@ -24,7 +24,8 @@ import math
 from dataclasses import dataclass, field
 
 from analyzer import (
-    DEFAULT_RHO, MatchAnalyzer, build_league_model,
+    DEFAULT_AVG_AWAY_GOALS, DEFAULT_AVG_HOME_GOALS, DEFAULT_RHO,
+    MatchAnalyzer, build_league_model,
     calculate_prediction_level, fit_rho,
 )
 from elo import DEFAULT_RATING, elo_multiplier
@@ -192,8 +193,27 @@ class BacktestReport:
         }
 
 
-def _standings_row_from_history(stats: dict) -> dict:
-    """把累积的主客场比赛统计，转成 build_league_model 需要的积分榜行格式。"""
+def _standings_row_from_history(stats: dict, use_sot: bool = False) -> dict:
+    """把累积的主客场比赛统计，转成 build_league_model 需要的积分榜行格式。
+
+    use_sot=True 且该队有射正数累积时，用**射正数**代替进球数作为强度指标。
+    射正数样本量大（一场 4~6 次 vs 进球 1~2 个）、噪声小，赛季初收敛更快。
+    没有射正数累积的球队自动退回进球口径。
+    """
+    if use_sot and stats.get("home_sot_played"):
+        return {
+            "team": {"id": stats["team_id"]},
+            "home": {
+                "played": stats["home_sot_played"],
+                "goals": {"for": stats["home_sot_for"],
+                          "against": stats["home_sot_against"]},
+            },
+            "away": {
+                "played": stats["away_sot_played"],
+                "goals": {"for": stats["away_sot_for"],
+                          "against": stats["away_sot_against"]},
+            },
+        }
     return {
         "team": {"id": stats["team_id"]},
         "home": {
@@ -211,6 +231,10 @@ def _blank_stats(team_id) -> dict:
     return {
         "team_id": team_id, "home_played": 0, "home_for": 0, "home_against": 0,
         "away_played": 0, "away_for": 0, "away_against": 0,
+        # 射正数累积（可选）。场次与进球口径分开计数：
+        # CSV 里偶尔缺射正字段，此时该队退回进球口径，不能让两个口径混算。
+        "home_sot_played": 0, "home_sot_for": 0.0, "home_sot_against": 0.0,
+        "away_sot_played": 0, "away_sot_for": 0.0, "away_sot_against": 0.0,
         # DSA 逐场日志：(序号, 进球数)。序号越大表示越晚发生（越"近"）。
         "home_for_log": [], "home_against_log": [],
         "away_for_log": [], "away_against_log": [],
@@ -229,8 +253,13 @@ class WalkForwardBacktester:
     def __init__(self, *, min_history: int = DEFAULT_MIN_HISTORY,
                  use_elo: bool = True, use_dc: bool = False,
                  competition: str = "BT", prior_games: int | None = None,
-                 use_dsa: bool = False, use_dsa_clamp: bool = False) -> None:
+                 use_dsa: bool = False, use_dsa_clamp: bool = False,
+                 use_sot: bool = False) -> None:
         self.min_history = max(0, int(min_history))
+        # 射正数口径：一场射正 4~6 次 vs 进球 1~2 个，样本量大、噪声小。
+        # 默认 False —— 未拿到射正数的数据源必须保持原有进球口径，
+        # 否则两侧量纲不一致会静默算错。
+        self.use_sot = bool(use_sot)
         self.use_elo = bool(use_elo)
         self.use_dc = bool(use_dc)
         # DSA：需要 history 里累积逐场日志（见 _observe）
@@ -262,11 +291,22 @@ class WalkForwardBacktester:
             self._games[tid] = 0
         return self._team_stats[tid]
 
-    def _observe(self, home_id, away_id, hs: int, as_: int) -> None:
-        """把一场赛果并入历史：更新攻防统计 + Elo 评分。"""
+    def _observe(self, home_id, away_id, hs: int, as_: int,
+                 home_sot: int | None = None, away_sot: int | None = None) -> None:
+        """把一场赛果并入历史：更新攻防统计 + Elo 评分。
+
+        home_sot / away_sot 为可选射正数。两者必须同时有效才计入，
+        只给一边会让同一队的攻防用不同口径累积，量纲就乱了。
+        """
         h, a = self._ensure(home_id), self._ensure(away_id)
         h["home_played"] += 1; h["home_for"] += hs; h["home_against"] += as_
         a["away_played"] += 1; a["away_for"] += as_; a["away_against"] += hs
+
+        if home_sot is not None and away_sot is not None:
+            h["home_sot_played"] += 1
+            h["home_sot_for"] += home_sot; h["home_sot_against"] += away_sot
+            a["away_sot_played"] += 1
+            a["away_sot_for"] += away_sot; a["away_sot_against"] += home_sot
 
         # DSA 逐场日志：用处理序号充当时间轴（run() 要求 matches 按时间正序），
         # 序号越大 = 越近。不依赖真实日期字段，故对任何数据源都成立。
@@ -297,7 +337,8 @@ class WalkForwardBacktester:
 
     def _predict_detail(self, home_id, away_id):
         """返回 ((主胜, 平, 客胜), λ主, λ客)。λ 供 Dixon-Coles 的 ρ 拟合使用。"""
-        rows = [_standings_row_from_history(s) for s in self._team_stats.values()]
+        rows = [_standings_row_from_history(s, self.use_sot)
+                for s in self._team_stats.values()]
         kwargs = {} if self.prior_games is None else {"prior_games": self.prior_games}
         if self.use_dsa:
             match_logs = {}
@@ -328,16 +369,38 @@ class WalkForwardBacktester:
             ra = self._ratings.get(str(away_id), DEFAULT_RATING)
             elo_factor = elo_multiplier(rh, ra)
 
+        # λ 基准必须是**进球**均值。
+        # 射正数口径下 model.avg_*_goals 是射正均值（约 4~5），
+        # 直接拿去算 λ 会得到「预期进球 4 个」这种荒谬值。
+        # 强度是相对值（÷ 各自均值），所以换成进球均值即可量纲正确。
+        avg_h, avg_a = model.avg_home_goals, model.avg_away_goals
+        if self.use_sot:
+            avg_h, avg_a = self._goal_avg()
+
         res = self.analyzer.calculate_prediction(
             {"attack": h.attack_home, "defense": h.defense_home},
             {"attack": a.attack_away, "defense": a.defense_away},
-            league_avg_home=model.avg_home_goals,
-            league_avg_away=model.avg_away_goals,
+            league_avg_home=avg_h,
+            league_avg_away=avg_a,
             elo_factor=elo_factor,
             rho=self.rho,
         )
         return ((res["win_prob"], res["draw_prob"], res["loss_prob"]),
                 res["lambda_home"], res["lambda_away"])
+
+    def _goal_avg(self) -> tuple[float, float]:
+        """联赛场均进球（主/客），只看进球口径的累积。
+
+        射正数模式下 λ 基准仍然用它——模型输出的是进球数，不是射正数。
+        没有累积时退回联赛经验值（与 analyzer 默认值一致）。
+        """
+        gp = gf = ga_ = 0.0
+        for s in self._team_stats.values():
+            gp += s["home_played"]; gf += s["home_for"]; ga_ += s["home_against"]
+        if gp <= 0:
+            return DEFAULT_AVG_HOME_GOALS, DEFAULT_AVG_AWAY_GOALS
+        # 主场进球 / 主场失球 == 客队在该场的进球
+        return max(gf / gp, 0.1), max(ga_ / gp, 0.1)
 
     def _default_probs(self) -> tuple[float, float, float]:
         """无历史时的基准猜测。
@@ -418,7 +481,8 @@ class WalkForwardBacktester:
                     })
 
                 # 无论是否参与评估，赛果都要并入历史（否则历史会被污染）
-                self._observe(hid, aid, hs, as_)
+                self._observe(hid, aid, hs, as_,
+                              m.get("home_sot"), m.get("away_sot"))
                 # ρ 拟合样本：评估期也要持续累积，供后续重拟合使用
                 if self.use_dc and self._seen >= self.min_history:
                     _, lh2, la2 = self._predict_detail(hid, aid)

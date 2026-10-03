@@ -320,11 +320,31 @@ def to_fixture(row: dict[str, Any], *, season: int, competition: str = "PL",
         "competition": competition,
         "source": "football-data.co.uk",
     }
+    # 场面数据：射正数（Shots on Target）。
+    # 一场比赛射正 4~6 次，而进球只有 1~2 个，样本量大得多、噪声更小，
+    # 赛季初收敛更快。football-data.co.uk 的 CSV 自带，
+    # API-Football 需要额外 statistics 请求，故此处是可选字段。
+    sot = _extract_shots_on_target(row)
+    if sot is not None:
+        fx["shotsOnTarget"] = sot
+
     odds = extract_odds(row)
     if odds:
         fx["odds"] = odds
         fx["marketProbabilities"] = market_probs(odds)
     return fx
+
+
+def _extract_shots_on_target(row: dict[str, Any]) -> dict[str, int] | None:
+    """取主客队射正数（HST / AST）。
+
+    两者缺一即返回 None —— 半份数据比没有更危险：
+    会让一侧强度按射正算、另一侧按进球算，两侧量纲不一致。
+    """
+    h, a = _to_score(row.get("HST")), _to_score(row.get("AST"))
+    if h is None or a is None:
+        return None
+    return {"home": int(h), "away": int(a)}
 
 
 def parse_csv(text: str, *, season: int, competition: str = "PL",

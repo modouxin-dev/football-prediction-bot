@@ -97,6 +97,8 @@ def fixture_to_match(fx: dict) -> dict | None:
     if len(start_date) >= 4 and start_date[:4].isdigit():
         season = int(start_date[:4])
 
+    sot = fx.get("shotsOnTarget") or None
+
     return {
         "fixture_id": fx.get("id"),
         "competition": fx.get("competition") or "",
@@ -108,6 +110,10 @@ def fixture_to_match(fx: dict) -> dict | None:
         "away_team_name": away.get("name"),
         "home_score": int(hs),
         "away_score": int(as_),
+        # 场面数据（可选）：football-data.co.uk CSV 自带，API-Football 需额外请求。
+        # 缺失时建模层自动退回用进球算强度，行为与改造前一致。
+        "home_sot": sot.get("home") if sot else None,
+        "away_sot": sot.get("away") if sot else None,
         "source": "history",
     }
 
