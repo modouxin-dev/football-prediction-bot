@@ -1,5 +1,9 @@
 -r requirements.txt
 pytest>=8.0
+# async 守卫用例（如 tests/test_audit_p0.py 验证 TTL_FIXTURES / 变量 s 不再
+# NameError）依赖此插件。缺了会报 "async def functions are not natively
+# supported" 并让 CI 直接变红——本机装过所以看不出来，全新 CI 环境必现。
+pytest-asyncio>=0.23
 # Web 看板为可选功能，但 api.py 的测试需要在 CI 里跑，故开发环境装上
 fastapi>=0.110
 uvicorn>=0.27
