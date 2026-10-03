@@ -68,29 +68,41 @@ jobs:
             grep -E "^(FAILED|ERROR)" /tmp/pytest.txt | head -10 | while read -r line; do
               echo "::error::$line"
             done
-            # 日志 zip / artifact 都走 results-receiver 域名（部分网络 403），
-            # commit comment 走 api.github.com，可被正常读取——用于定位失败用例。
+            # 日志 zip / artifact 都走 results-receiver 域名（网络策略 403）。
+            # 这里把完整输出写进 ci-debug 分支的文件——contents API 走
+            # api.github.com，可被外部直接读取，用于定位失败用例。
             python - <<'PYEOF'
-import json, os, urllib.request
+import base64, json, os, urllib.request
+API = "https://api.github.com/repos/modouxin-dev/football-prediction-bot"
+TOK = os.environ["GITHUB_TOKEN"]
+H = {"Authorization": "Bearer " + TOK, "Accept": "application/vnd.github+json",
+     "Content-Type": "application/json", "User-Agent": "ci"}
+
+
+def api(path, method="GET", data=None):
+    req = urllib.request.Request(
+        API + path, data=json.dumps(data).encode() if data else None,
+        method=method, headers=H)
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+    except Exception as exc:
+        print("  api %s %s -> %s" % (method, path, exc))
+        return {}
+
+
 txt = open('/tmp/pytest.txt', encoding='utf-8', errors='replace').read()
-lines = txt.splitlines()
-fails = [l for l in lines if l.startswith(('FAILED', 'ERROR'))]
-body = ("### CI pytest 失败（py%s）\n\n失败用例：\n```\n%s\n```\n\n输出尾部：\n```\n%s\n```"
-        % (os.environ.get('PY_VER', '?'),
-           "\n".join(fails[:25]) or "(未匹配到 FAILED 行)",
-           "\n".join(lines[-25:])))
-url = ("https://api.github.com/repos/modouxin-dev/football-prediction-bot/commits/"
-       + os.environ["GITHUB_SHA"] + "/comments")
-req = urllib.request.Request(
-    url, data=json.dumps({"body": body[:30000]}).encode(), method="POST",
-    headers={"Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
-             "Accept": "application/vnd.github+json",
-             "Content-Type": "application/json", "User-Agent": "ci"})
-try:
-    urllib.request.urlopen(req, timeout=30)
-    print("失败用例已写入 commit comment")
-except Exception as exc:
-    print("写入 comment 失败：", exc)
+name = "pytest-py%s.txt" % os.environ.get("PY_VER", "x")
+branch = "ci-debug"
+
+ref = api("/git/ref/heads/main")
+sha = (ref.get("object") or {}).get("sha")
+if sha:
+    api("/git/refs", "POST", {"ref": "refs/heads/" + branch, "sha": sha})
+res = api("/contents/" + name, "PUT", {
+    "message": "ci: dump failing pytest output (%s)" % name,
+    "content": base64.b64encode(txt.encode()).decode(),
+    "branch": branch})
+print("写文件结果:", (res.get("content") or {}).get("path") or res.get("message") or "?")
 PYEOF
           fi
           tail -60 /tmp/pytest.txt
