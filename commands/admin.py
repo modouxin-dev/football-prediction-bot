@@ -15,7 +15,7 @@ import paths
 from backtest import DEFAULT_MIN_HISTORY, run_backtest
 from backtest_corpus import load_corpus
 from api_client import parse_shots_on_target, stat_types_of
-from repository import quota_today
+from repository import BRIER_RANDOM, quota_today
 from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
 from migrate_elo import fetch_finished
@@ -380,6 +380,74 @@ async def status_cmd(update, context) -> None:
     )
 
 
+# 校准结论的最小样本量。低于此值只给数字不给结论——32 场就宣称 90% 准确率
+# 那种事不能发生在我们这里（置信区间约 ±14pp，完全不足以支撑任何判断）。
+CALIBRATION_MIN_SAMPLE = 100
+
+
+def _calibration_section(st: dict, level_names: dict[str, str]) -> list[list[str]]:
+    """校准仪表：分信心等级的 Brier + 总体指标 + 单调性判定。
+
+    只有命中率看不出模型是否「知道自己不知道」：一个永远给 33% 的模型和一个
+    敢给 80% 且真能中的模型，命中率可能一样。Brier 惩罚「自信但猜错」，两者
+    会拉开差距；再加上「高信心组命中率 ≥ 中 ≥ 低」的单调性，才能判断分级是
+    否真的有区分度。
+    """
+    by_level = st.get("by_level") or {}
+    if not by_level:
+        return []
+
+    rows = ["<code>" + pad_cjk("等级", 8) + pad_cjk("场次", 7)
+            + pad_cjk("命中", 7) + "Brier</code>"]
+    for key in ("high", "medium", "low", "unknown"):
+        slot = by_level.get(key)
+        if not slot or not slot.get("total"):
+            continue
+        rate = slot["hit"] / slot["total"]
+        brier = slot.get("brier")
+        rows.append(
+            "<code>" + pad_cjk(level_names.get(key, key), 8)
+            + pad_cjk(str(slot["total"]), 7)
+            + pad_cjk(f"{rate:.0%}", 7)
+            + (f"{brier:.3f}" if brier is not None else "—") + "</code>"
+        )
+
+    blocks: list[list[str]] = [section("🎯", "校准仪表", *rows)]
+
+    overall = []
+    if st.get("brier") is not None:
+        # 给随机基线作对照：没有参照物的 0.201 看不出是好是坏
+        overall.append(f"Brier {st['brier']:.3f}（三分类随机 {BRIER_RANDOM:.3f}）")
+    if st.get("logloss") is not None:
+        overall.append(f"LogLoss {st['logloss']:.3f}")
+    if overall:
+        blocks.append(section("📐", "总体校准", *overall))
+
+    total = st.get("total") or 0
+    if total < CALIBRATION_MIN_SAMPLE:
+        blocks.append(section(
+            "⏳", "样本守门",
+            f"已结算 {total} 场 &lt; {CALIBRATION_MIN_SAMPLE} 场，"
+            "仅作趋势参考，<b>不作结论</b>。"))
+        return blocks
+
+    # 单调性：高信心命中率 ≥ 中 ≥ 低。不成立说明信心分级没有区分度，
+    # 此时模型给出的「高信心」是假的，任何基于分级的下注策略都站不住。
+    ordered = []
+    for key in ("high", "medium", "low"):
+        slot = by_level.get(key)
+        if slot and slot.get("total"):
+            ordered.append(slot["hit"] / slot["total"])
+    if len(ordered) >= 2:
+        monotonic = all(a >= b - 1e-9 for a, b in zip(ordered, ordered[1:]))
+        if monotonic:
+            verdict = "✅ 单调成立：高信心命中率 ≥ 中 ≥ 低"
+        else:
+            verdict = "⚠️ 单调不成立：信心分级未体现区分度，高信心不可信"
+        blocks.append(section("🧭", "分级判定", verdict))
+    return blocks
+
+
 async def stats_cmd(update, context) -> None:
     """/stats — 命中率统计（基于落盘的预测记录）。"""
     service = context.application.bot_data["service"]
@@ -407,8 +475,9 @@ async def stats_cmd(update, context) -> None:
         tail = f"🔥 连续命中 {streak} 场" if streak > 0 else (
             f"🧊 连续未中 {-streak} 场" if streak < 0 else "")
         level_rows = []
+        level_names = {"high": "🟢 高", "medium": "🟡 中", "low": "🔴 低", "unknown": "⚪ 未知"}
         if st["by_level"]:
-            names = {"high": "🟢 高", "medium": "🟡 中", "low": "🔴 低", "unknown": "⚪ 未知"}
+            names = level_names
             for key in ("high", "medium", "low", "unknown"):
                 slot = st["by_level"].get(key)
                 if not slot:
@@ -423,6 +492,7 @@ async def stats_cmd(update, context) -> None:
         extra = ([tail] if tail else []) + level_rows
         if extra:
             blocks.append(section("🏅", "按信心等级", *extra))
+        blocks.extend(_calibration_section(st, level_names))
     await update.effective_message.reply_text(
         normalize(section_join(blocks)), parse_mode="HTML", disable_web_page_preview=True
     )

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -570,17 +571,22 @@ class PredictionRepository:
         try:
             conn = self._connect()
             rows = list(conn.execute(
-                "SELECT level_key, result, actual_home, actual_away, kickoff "
+                "SELECT level_key, result, actual_home, actual_away, kickoff, "
+                "home_prob, draw_prob, away_prob "
                 "FROM predictions WHERE actual_home IS NOT NULL AND actual_away IS NOT NULL "
                 "ORDER BY kickoff"
             ))
         except Exception as exc:
             log.warning("统计命中率失败：%s", exc)
             return {"total": 0, "hit": 0, "rate": None, "streak": 0, "by_level": {},
-                    "pending": 0, "persistent": self.persistent}
+                    "pending": 0, "persistent": self.persistent,
+                    "brier": None, "logloss": None, "scored": 0}
 
         total = hit = 0
         streak = 0
+        scored = 0
+        brier_sum = 0.0
+        logloss_sum = 0.0
         by_level: dict[str, dict] = {}
         for r in rows:
             actual = _outcome(r["actual_home"], r["actual_away"])
@@ -594,9 +600,32 @@ class PredictionRepository:
             else:
                 streak = -1 if streak >= 0 else streak - 1
             lv = r["level_key"] or "unknown"
-            slot = by_level.setdefault(lv, {"total": 0, "hit": 0})
+            slot = by_level.setdefault(
+                lv, {"total": 0, "hit": 0, "scored": 0, "brier_sum": 0.0, "logloss_sum": 0.0})
             slot["total"] += 1
             slot["hit"] += 1 if ok else 0
+            # 概率缺失（早期记录或降级路径）时跳过：只统计命中率，不计入校准指标
+            cal = brier_logloss(
+                {"主胜": r["home_prob"], "平局": r["draw_prob"], "客胜": r["away_prob"]},
+                actual,
+            )
+            if cal is not None:
+                b, ll = cal
+                scored += 1
+                brier_sum += b
+                logloss_sum += ll
+                slot["scored"] += 1
+                slot["brier_sum"] += b
+                slot["logloss_sum"] += ll
+
+        # 累加器换成均值，并剔除中间量——调用方不该看到 brier_sum 这种半成品
+        for slot in by_level.values():
+            s = slot.pop("scored")
+            bs = slot.pop("brier_sum")
+            ls = slot.pop("logloss_sum")
+            slot["scored"] = s
+            slot["brier"] = (bs / s) if s else None
+            slot["logloss"] = (ls / s) if s else None
 
         try:
             pending = conn.execute(
@@ -613,6 +642,9 @@ class PredictionRepository:
             "by_level": by_level,
             "pending": pending,
             "persistent": self.persistent,
+            "scored": scored,
+            "brier": (brier_sum / scored) if scored else None,
+            "logloss": (logloss_sum / scored) if scored else None,
         }
 
     def tables(self) -> list[str]:
@@ -937,6 +969,45 @@ def _extract_match(m: dict) -> dict:
         "home_score": home_score,
         "away_score": away_score,
     }
+
+
+# LogLoss 的概率下限。取 1e-6 而非 1e-15：后者在模型给出极端概率时会算出
+# 14+ 的巨大值，一条就足以把均值拉飞，而这是展示指标不是数值优化，宁可截断。
+LOGLOSS_FLOOR = 1e-6
+
+# 三分类随机猜测（1/3, 1/3, 1/3）的 Brier 理论值，用作对照基准。
+BRIER_RANDOM = 2.0 / 3.0
+
+
+def brier_logloss(probs: dict[str, float], actual: str) -> tuple[float, float] | None:
+    """三分类校准指标：(Brier, LogLoss)。
+
+    纯函数，便于单测直接断言数值——此前测试只验证「指标能被计算和分组」，
+    没验证「算出来是对的」，破坏公式时测试仍全绿，这是个真实盲区。
+
+    probs 用 result 字段同一套键：主胜 / 平局 / 客胜。
+    概率缺失、非有限值或三者之和不为正时返回 None，由调用方跳过该样本。
+    """
+    keys = ("主胜", "平局", "客胜")
+    if actual not in keys:
+        return None
+    try:
+        vec = [float(probs.get(k, 0.0)) for k in keys]
+    except (TypeError, ValueError):
+        return None
+    if any(v != v or v in (float("inf"), float("-inf")) for v in vec):  # NaN/inf
+        return None
+    if any(v < 0.0 for v in vec):
+        return None
+    total = sum(vec)
+    if total <= 0.0:
+        return None
+    # 概率可能未归一化（历史数据/降级路径），归一后再算，否则 Brier 会被量纲污染
+    vec = [v / total for v in vec]
+    outcome_index = keys.index(actual)
+    brier = sum((v - (1.0 if i == outcome_index else 0.0)) ** 2 for i, v in enumerate(vec))
+    logloss = -math.log(max(vec[outcome_index], LOGLOSS_FLOOR))
+    return brier, logloss
 
 
 def _outcome(home: int | None, away: int | None) -> str | None:
