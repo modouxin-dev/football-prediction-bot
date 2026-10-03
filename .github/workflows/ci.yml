@@ -60,6 +60,11 @@ jobs:
             grep -E "^(FAILED|ERROR)" /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY" \
               || tail -40 /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
+            # ::error:: 注解会进 check-run 的 annotations，API 可读，
+            # 不必下载日志 zip（部分网络环境取不到）。
+            grep -E "^(FAILED|ERROR)" /tmp/pytest.txt | head -10 | while read -r line; do
+              echo "::error::$line"
+            done
           fi
           tail -60 /tmp/pytest.txt
           exit $code
