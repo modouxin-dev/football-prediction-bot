@@ -532,6 +532,56 @@ def overround(odds: dict) -> float:
     return sum(1 / odds[k] for k in OUTCOMES) - 1
 
 
+def implied_probabilities(odds: dict | None) -> dict[str, float]:
+    """去水后的市场隐含概率（multiplicative normalization）。
+
+    博彩赔率含抽水，Σ(1/赔率) 恒 > 1（英超实测均值 1.055）。直接拿 1/赔率
+    当概率会把市场概率系统性算高，与模型概率比较时市场「看起来更自信」，
+    于是模型与市场的差距被虚报得更大。
+
+    归一化（除以三项之和）后三项和恰为 1，才是可与模型概率直接相减的口径。
+
+    与 analyze_value / edge 的关系（两个口径不能混用）：
+        · edge = 模型概率 − 1/赔率   → 含抽水，等价于 EV = p×赔率 − 1，
+          回答「这一注划不划算」，是 Value Bet 的正确判据，保持不变。
+        · 本函数                     → 去水，回答「模型相对市场有没有信息优势」。
+    前者是下注口径，后者是对比口径，两者差值恒为抽水量。
+
+    无效输入（None / 非数字 / ≤1.0）整盘作废返回 {}：部分计算会得到一个
+    看起来合理但方向错误的数，宁可让调用方显示「暂无」，也不能给错的对比。
+    """
+    if not odds:
+        return {}
+    raw: dict[str, float] = {}
+    for key in OUTCOMES:
+        try:
+            price = float(odds.get(key))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return {}
+        if not price or price <= 1.0 or price != price:  # NaN 自检
+            return {}
+        raw[key] = 1.0 / price
+    total = sum(raw.values())
+    if total <= 0:
+        return {}
+    return {key: value / total for key, value in raw.items()}
+
+
+def market_gap(model_probs: dict, odds: dict | None) -> dict[str, float]:
+    """模型概率 − 去水市场概率（百分点差值，正＝模型更看好）。
+
+    去水失败时返回 {}，由调用方按「暂无可比数据」处理。
+    """
+    market = implied_probabilities(odds)
+    if not market:
+        return {}
+    return {
+        key: model_probs.get(key, 0.0) - market[key]
+        for key in OUTCOMES
+        if key in market
+    }
+
+
 # ---- 模型信心等级 -------------------------------------------------------------
 # 说明：这里评的是「模型对自己结论的把握程度」，不是实际命中率。
 # 概率高 ≠ 一定赢，因此命名为「模型信心等级」而非「准确率等级」。

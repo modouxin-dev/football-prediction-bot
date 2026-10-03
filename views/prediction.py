@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from analyzer import OUTCOMES, calculate_prediction_level, overround
+from analyzer import (
+    OUTCOMES,
+    calculate_prediction_level,
+    implied_probabilities,
+    market_gap,
+    overround,
+)
 from service import MODEL_VERSION, parse_kickoff
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from views.common import CommonView
@@ -403,22 +409,46 @@ class PredictionView:
                 pad_cjk("中位数", name_w)
                 + f"{o['home']:>{num_w}.2f}{o['draw']:>{num_w}.2f}{o['away']:>{num_w}.2f}"
             )
+            # 去水对照表：市场概率必须归一化后才能与模型概率相减。
+            # 旧版直接拿 1/赔率（含抽水，三项和 > 1）当市场概率，等于把市场
+            # 算得比实际更自信，模型与市场的差距因此被系统性放大。
+            market = implied_probabilities(o)
+            gap = market_gap(probs, o)
             compare_rows = []
-            for key in OUTCOMES:
-                entry = p.outcomes.get(key)
-                if entry:
-                    # 三项都放等宽块并右对齐补位：「+5.2%」与「-12.0%」宽度不同，
-                    # 不补位的话后面的符号会被推得一前一后。
-                    compare_rows.append(
-                        f"<code>{OUTCOME_LABEL[key]:<2}</code>"
-                        f"  模型 <code>{probs[key]:>5.1%}</code>"
-                        f"  市场 <code>{1 / o[key]:>5.1%}</code>"
-                        f"  偏差 <code>{entry['edge']:>+6.1%}</code>"
-                    )
+            if gap:
+                label_w, num_w = 12, 8
+                header = pad_cjk("", label_w) + "".join(
+                    align_cjk(OUTCOME_LABEL[k], num_w, "right") for k in OUTCOMES
+                )
+                model_row = pad_cjk("模型", label_w) + "".join(
+                    align_cjk(f"{probs[k]:.1%}", num_w, "right") for k in OUTCOMES
+                )
+                market_row = pad_cjk("市场(去水)", label_w) + "".join(
+                    align_cjk(f"{market[k]:.1%}", num_w, "right") for k in OUTCOMES
+                )
+                # 差值用百分点（pp）而不是 %：写成 +5.0% 会被读成「概率 5%」，
+                # 而它实际是「比市场高 5 个百分点」。
+                gap_row = pad_cjk("差值", label_w) + "".join(
+                    align_cjk(f"{gap[k] * 100:+.1f}pp", num_w, "right") for k in OUTCOMES
+                )
+                compare_rows.append(
+                    f"<pre>{esc(chr(10).join([header, model_row, market_row, gap_row]))}</pre>"
+                )
+                biggest = max(gap, key=lambda k: abs(gap[k]))
+                compare_rows.append(
+                    f"最大分歧 <b>{OUTCOME_LABEL[biggest]}</b> "
+                    f"<code>{gap[biggest] * 100:+.1f}pp</code>"
+                )
+                compare_rows.append(
+                    "ℹ️ 上表为<b>对比口径</b>（已去抽水）；Value Bet 判据仍用"
+                    "<b>含抽水赔率</b>算期望收益，两者不可互换。"
+                )
+            else:
+                compare_rows.append("暂无可比数据（赔率缺失或含无效报价）。")
             blocks = [
                 [title, CommonView.matchup(p, tz), BLANK],
                 section("🏦", "各家公司赔率", f"<pre>{esc(chr(10).join(table))}</pre>"),
-                section("📐", "模型 vs 市场 · 含抽水的隐含概率", *compare_rows),
+                section("📐", "模型 vs 市场 · 去水后", *compare_rows),
                 section(
                     "🧾", "抽水与样本",
                     f"庄家抽水约 <code>{overround(o):.1%}</code>（共 {o['n']} 家公司）",
