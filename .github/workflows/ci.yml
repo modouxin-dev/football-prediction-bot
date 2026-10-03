@@ -69,6 +69,16 @@ jobs:
           tail -60 /tmp/pytest.txt
           exit $code
 
+      - name: Upload pytest output on failure
+        # 日志 zip 需要从 results-receiver 域名下载（部分网络环境 403），
+        # artifact 走 api.github.com 域名，可正常下载，用于定位失败用例。
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-py${{ matrix.python-version }}
+          path: /tmp/pytest.txt
+          if-no-files-found: ignore
+
       - name: Static check (undefined name)
         # 独立步骤而非塞进 pytest：这类问题（NameError）此前靠测试完全拦不住
         # —— 两个 P0 的 undefined name 在 883 条用例下活到了 main，因为对应
