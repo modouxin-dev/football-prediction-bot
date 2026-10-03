@@ -41,6 +41,7 @@ from formatkit import (
     league_label,
     status_emoji,
     team_name,
+    team_short_name,
     web_entry_text,
 )
 
@@ -97,8 +98,12 @@ class FixturesView:
                         lines.append(f"🏆 <b>{esc(league)}</b>")
                         lines.append(THIN_SEP)
                     teams = fx.get("teams") or {}
-                    home = team_name((teams.get("home") or {}).get("name"))
-                    away = team_name((teams.get("away") or {}).get("name"))
+                    # 列表是扫视场景，只放中文短名：双语全名实测中位数 25 列、
+                    # 最长 41 列（门兴格拉德巴赫 (Borussia Mönchengladbach)），
+                    # 在手机上必然折行，折行后序号与队名就对不上了。
+                    # 全名仍在单场预测卡里完整呈现，此处不重复占位。
+                    home = team_short_name((teams.get("home") or {}).get("name"))
+                    away = team_short_name((teams.get("away") or {}).get("name"))
                     kickoff = parse_kickoff(info.get("date"))
                     if kickoff:
                         local = kickoff.astimezone(tz)
@@ -109,7 +114,10 @@ class FixturesView:
                     status = STATUS_TEXT.get(short, short or "未知")
                     goals = fx.get("goals") or {}
                     gh, ga = goals.get("home"), goals.get("away")
-                    score = f" <b>{esc(gh)}-{esc(ga)}</b>" if gh is not None and ga is not None else " ⚔️ "
+                    # 比分两侧都要空格：只有左侧有空格会渲染成「2-1狼队」，
+                    # 比分与客队名直接粘连。⚔️ 分支前后都有空格，所以只有
+                    # 已完场的比赛会暴露这个 bug —— 未开赛时看不出来。
+                    score = f" <b>{esc(gh)}-{esc(ga)}</b> " if gh is not None and ga is not None else " ⚔️ "
                     # 序号用等宽 2 位补位：个位数与两位数在比例字体下会错开半格
                     # 每场独立成块：序号+时间一行、对阵一行、状态一行，块间空行。
                     # 挤在一行时队名长的比赛会被折行，序号和状态就对不上了。

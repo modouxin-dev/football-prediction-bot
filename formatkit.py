@@ -42,6 +42,21 @@ def team_name(raw: str | None, bilingual: bool = True) -> str:
         return raw
     return f"{cn} ({raw})"
 
+def team_short_name(raw: str | None) -> str:
+    """列表用短名：已收录的队显示中文名，未收录的显示英文原名。
+
+    为什么不复用 team_name(..., bilingual=False)：那个参数的语义是「关闭双语、
+    返回数据源原名」，实测它会把「Arsenal FC」原样输出成英文，而不是返回
+    「阿森纳」。两者名字相近但行为相反，混用会静默出错，故另开一个函数名。
+
+    与 team_name 同样遵守「未收录绝不猜测」：宁可显示长英文名，也不编造中文。
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return "?"
+    return TEAM_NAMES.get(raw) or raw
+
+
 def league_label(league_id: int) -> str:
     """展示用联赛名：已知 ID 显示中文名 + ID，未知则只显示 ID。"""
     name = LEAGUE_NAMES.get(int(league_id))
