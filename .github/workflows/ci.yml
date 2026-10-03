@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
@@ -44,15 +44,14 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PY_VER: ${{ matrix.python-version }}
         # pytest.ini 已配置 pythonpath = . 与 testpaths = tests
         # 测试不联网，使用 tests/sample_data.py 的仿真响应
         #
-        # 失败时把 FAILED/ERROR 行写进 job summary：Actions 的日志 zip 需要
-        # 单独下载（且部分网络环境取不到），摘要则能直接在页面上看到，
-        # 不必为了「哪个用例挂了」去翻几十秒的日志。
+        # 失败时把输出尾部同时写进 job summary 与 ::error:: 注解：
+        # Actions 的日志 zip 走 results-receiver 域名，部分网络环境取不到，
+        # 而注解可通过 api.github.com 的 check-runs 接口读取。
+        # 注：不只抓 FAILED 行——集合错误 / 启动失败时没有 FAILED 行，
+        # 那样会漏掉真正的报错，所以整体回传尾部输出。
         run: |
           set -o pipefail
           python -m pytest -q --tb=line -rf > /tmp/pytest.txt 2>&1
@@ -60,105 +59,14 @@ jobs:
           if [ "$code" -ne 0 ]; then
             echo "### ❌ pytest 失败（退出码 $code）" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
-            grep -E "^(FAILED|ERROR)" /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY" \
-              || tail -40 /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY"
+            tail -60 /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
-            # ::error:: 注解会进 check-run 的 annotations，API 可读，
-            # 不必下载日志 zip（部分网络环境取不到）。
-            grep -E "^(FAILED|ERROR)" /tmp/pytest.txt | head -10 | while read -r line; do
+            tail -40 /tmp/pytest.txt | while IFS= read -r line; do
               echo "::error::$line"
             done
-            # 日志 zip / artifact 都走 results-receiver 域名（网络策略 403）。
-            # 这里把完整输出写进 ci-debug 分支的文件——contents API 走
-            # api.github.com，可被外部直接读取，用于定位失败用例。
-            python - <<'PYEOF'
-import base64, json, os, urllib.request
-API = "https://api.github.com/repos/modouxin-dev/football-prediction-bot"
-TOK = os.environ["GITHUB_TOKEN"]
-H = {"Authorization": "Bearer " + TOK, "Accept": "application/vnd.github+json",
-     "Content-Type": "application/json", "User-Agent": "ci"}
-
-
-def api(path, method="GET", data=None):
-    req = urllib.request.Request(
-        API + path, data=json.dumps(data).encode() if data else None,
-        method=method, headers=H)
-    try:
-        return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
-    except Exception as exc:
-        print("  api %s %s -> %s" % (method, path, exc))
-        return {}
-
-
-txt = open('/tmp/pytest.txt', encoding='utf-8', errors='replace').read()
-name = "pytest-py%s.txt" % os.environ.get("PY_VER", "x")
-branch = "ci-debug"
-
-ref = api("/git/ref/heads/main")
-sha = (ref.get("object") or {}).get("sha")
-if sha:
-    api("/git/refs", "POST", {"ref": "refs/heads/" + branch, "sha": sha})
-res = api("/contents/" + name, "PUT", {
-    "message": "ci: dump failing pytest output (%s)" % name,
-    "content": base64.b64encode(txt.encode()).decode(),
-    "branch": branch})
-print("写文件结果:", (res.get("content") or {}).get("path") or res.get("message") or "?")
-PYEOF
           fi
           tail -60 /tmp/pytest.txt
           exit $code
-
-      - name: Dump pytest output for external reading
-        # 日志 zip / artifact 走 results-receiver 域名（网络策略 403 取不到）。
-        # 这里把完整输出写进 ci-debug 分支的文件——contents API 走
-        # api.github.com，外部可直接读取，用于定位失败用例。
-        if: failure()
-        env:
-          CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PY_VER: ${{ matrix.python-version }}
-        run: |
-          python - <<'PYEOF'
-          import base64, json, os, urllib.request
-          API = "https://api.github.com/repos/modouxin-dev/football-prediction-bot"
-          TOK = os.environ.get("CI_TOKEN", "")
-          H = {"Authorization": "Bearer " + TOK,
-               "Accept": "application/vnd.github+json",
-               "Content-Type": "application/json", "User-Agent": "ci"}
-          def api(path, method="GET", data=None):
-              req = urllib.request.Request(
-                  API + path,
-                  data=json.dumps(data).encode() if data else None,
-                  method=method, headers=H)
-              try:
-                  return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
-              except Exception as exc:
-                  print("api %s %s -> %s" % (method, path, exc))
-                  return {}
-          txt = open("/tmp/pytest.txt", encoding="utf-8", errors="replace").read()
-          name = "pytest-py%s.txt" % os.environ.get("PY_VER", "x")
-          branch = "ci-debug"
-          ref = api("/git/ref/heads/main")
-          sha = (ref.get("object") or {}).get("sha")
-          print("main sha:", sha)
-          if sha:
-              print("create branch:", api("/git/refs", "POST",
-                    {"ref": "refs/heads/" + branch, "sha": sha}).get("ref"))
-          r = api("/contents/" + name, "PUT", {
-              "message": "ci: dump failing pytest output (%s)" % name,
-              "content": base64.b64encode(txt.encode()).decode(),
-              "branch": branch})
-          print("write:", (r.get("content") or {}).get("path") or r.get("message"))
-          PYEOF
-
-      - name: Upload pytest output on failure
-        # 日志 zip 需要从 results-receiver 域名下载（部分网络环境 403），
-        # artifact 走 api.github.com 域名，可正常下载，用于定位失败用例。
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-output-py${{ matrix.python-version }}
-          path: /tmp/pytest.txt
-          if-no-files-found: ignore
 
       - name: Static check (undefined name)
         # 独立步骤而非塞进 pytest：这类问题（NameError）此前靠测试完全拦不住
