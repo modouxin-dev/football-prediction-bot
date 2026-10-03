@@ -48,6 +48,19 @@ jobs:
         # 测试不联网，使用 tests/sample_data.py 的仿真响应
         run: python -m pytest -q
 
+      - name: Static check (undefined name)
+        # 独立步骤而非塞进 pytest：这类问题（NameError）此前靠测试完全拦不住
+        # —— 两个 P0 的 undefined name 在 883 条用例下活到了 main，因为对应
+        # 路径零覆盖。静态检查能一次性杜绝整类问题，且失败时报错清晰。
+        run: |
+          python -m pyflakes *.py commands/*.py views/*.py > /tmp/pyflakes.txt || true
+          if grep -q "undefined name" /tmp/pyflakes.txt; then
+            echo "::error::发现未定义名称（NameError 隐患）："
+            grep "undefined name" /tmp/pyflakes.txt
+            exit 1
+          fi
+          echo "静态检查通过：无 undefined name"
+
       - name: Smoke check (config + import)
         # 冒烟：配置加载与模块导入必须成功，否则部署后必崩。
         # 用假 token，只验证启动前置路径，不连接 Telegram。
