@@ -51,6 +51,8 @@ from formatkit import (
     pad_cjk,
     section,
     section_join,
+    fit_cols,
+    team_mobile,
     team_name,
     web_entry_text,
 )
@@ -72,21 +74,23 @@ class PredictionView:
     
             title = f"🏆 <b>{esc(p.league)}</b>" + (f" · {esc(p.round_label)}" if p.round_label else "")
             when = f"🕐 <code>{CommonView.fmt_time(p.kickoff, tz)}</code> ({CommonView.tz_label(tz, p.kickoff)})"
-            if p.venue:
-                when += f" · 🏟 {esc(p.venue)}"
+            # 场馆独占一行：与「时间 + 时区」挤在一行实测 38 列，手机上必折行；
+            # 分成两行各约 24 列，且不再需要截断场馆名（信息完整保留）。
+            venue_line = f"🏟 <code>{esc(p.venue)}</code>" if p.venue else None
     
             top_label, top_prob = max(probs, key=lambda kv: kv[1])
 
             lines = [
                 title,
                 when,
+                *([venue_line] if venue_line else []),
                 BLANK,
                 SEP,
                 BLANK,
                 # 对阵块：居中一个 ⚔️，两行队名，比挤在一行更容易扫读
-                f"🏠 <b>{esc(team_name(p.home))}</b>",
+                f"🏠 <b>{esc(team_mobile(p.home))}</b>",
                 "　　　⚔️",
-                f"✈️ <b>{esc(team_name(p.away))}</b>",
+                f"✈️ <b>{esc(team_mobile(p.away))}</b>",
                 BLANK,
                 SEP,
                 BLANK,
@@ -143,9 +147,9 @@ class PredictionView:
                 # 同一节内的补充指标，列宽对齐后才不会比上面的行突出一格。
                 lines.append(
                     kv_line("💰", "赔率",
-                            f"{p.odds['home']:.2f} | {p.odds['draw']:.2f} | {p.odds['away']:.2f}",
+                            f"{p.odds['home']:.2f} | {p.odds['draw']:.2f} | {p.odds['away']:.2f}"
+                            f" ·{p.odds['n']}家",
                             CORE_LABEL_WIDTH)
-                    + f"（{p.odds['n']} 家中位数）"
                 )
                 # 价值偏差的值含 <b> 与 🚀，不能整行进 <code>（不支持嵌套），
                 # 因此标签沿用等宽块、值留在外层，两侧标签同宽故起点一致
@@ -239,7 +243,7 @@ class PredictionView:
                 lines.append("主/客场已赛场次不足 5 场，强度估计不稳定。")
             if not p.odds:
                 lines.append("暂无赔率数据，未做价值偏差对比。")
-            lines.append("本结果基于历史进球数据，未考虑伤停、赛程密度与临场变数。")
+            lines.append("未计入伤停、赛程密度等临场因素。")
             return lines
 
         @classmethod
@@ -257,7 +261,7 @@ class PredictionView:
             a = p.analysis
             probs = (("主胜", a["win_prob"]), ("平局", a["draw_prob"]), ("客胜", a["loss_prob"]))
             top_label, top_prob = max(probs, key=lambda kv: kv[1])
-            home, away = esc(team_name(p.home)), esc(team_name(p.away))
+            home, away = esc(team_mobile(p.home)), esc(team_mobile(p.away))
             level = p.level
     
             # 大结论：不败 / 单一结果，比「最可能结果」更接近用户直觉

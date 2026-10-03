@@ -43,6 +43,7 @@ from formatkit import (
     league_label,
     section,
     section_join,
+    team_mobile,
     team_name,
     web_entry_text,
 )
@@ -206,12 +207,14 @@ class AnalysisView:
                 ),
                 section(
                     "🧮", "球队强度 · 1.00 = 联赛平均",
-                    f"🏠 {esc(team_name(p.home))} 主场：攻击 <code>{hs.attack_home:.2f}</code>"
-                    f" · 防守 <code>{hs.defense_home:.2f}</code>（已赛 {hs.games_home} 场）",
-                    f"✈️ {esc(team_name(p.away))} 客场：攻击 <code>{aws.attack_away:.2f}</code>"
-                    f" · 防守 <code>{aws.defense_away:.2f}</code>（已赛 {aws.games_away} 场）",
+                    f"🏠 {esc(team_mobile(p.home))} 主场：攻击 <code>{hs.attack_home:.2f}</code>"
+                    f" · 防守 <code>{hs.defense_home:.2f}</code>",
+                    f"✈️ {esc(team_mobile(p.away))} 客场：攻击 <code>{aws.attack_away:.2f}</code>"
+                    f" · 防守 <code>{aws.defense_away:.2f}</code>",
+                    f"　 主场已赛 {hs.games_home} 场 · 客场已赛 {aws.games_away} 场",
                     "",
-                    "攻击 &gt;1：进球高于平均；防守 &lt;1：失球低于平均（防守更好）。",
+                    "攻击 &gt;1：进球高于平均",
+                    "防守 &lt;1：失球低于平均",
                 ),
             ]
             lines = section_join(blocks).split("\n")

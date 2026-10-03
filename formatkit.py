@@ -57,6 +57,42 @@ def team_short_name(raw: str | None) -> str:
     return TEAM_NAMES.get(raw) or raw
 
 
+# 手机单行可读上限（显示宽度）。Telegram 消息气泡在常见 360dp 屏上约能放
+# 18 个中文字符 = 36 列；超过就会折行，对「一眼扫完」的卡片是致命的。
+MOBILE_MAX_COLS = 36
+
+
+def fit_cols(text: str, max_cols: int = MOBILE_MAX_COLS) -> str:
+    """按显示宽度截断，超宽以 … 收尾；不补空格（补位请用 align_cjk）。
+
+    与 align_cjk 的分工：那个用于 <code> 等宽块内的**表格对齐**（必须补到
+    固定列宽），这个用于正文/标题等**非表格**位置（补空格无意义，只会让
+    行尾出现看不见的空白）。
+
+    只截断不猜测：宁可显示「Borussia Mönchen…」也不编造一个中文名。
+    """
+    text = str(text)
+    if display_width(text) <= max_cols:
+        return text
+    out = ""
+    for ch in text:
+        if display_width(out) + display_width(ch) > max_cols - 1:
+            break
+        out += ch
+    return (out + "…").strip()
+
+
+def team_mobile(raw: str | None, max_cols: int = 16) -> str:
+    """移动端队名：优先中文短名，过长（多为未收录的英文原名）按列宽截断。
+
+    为什么不是直接用 team_short_name：实测「Wolverhampton Wanderers FC」
+    这类未收录原名宽 26 列，两个队名横排就是 52 列，在手机上必然折成三行。
+    已收录的队（五大联赛主流球队）几乎都落在 16 列内，因此截断只作用于
+    极少数未收录队，不影响正常观感。
+    """
+    return fit_cols(team_short_name(raw), max_cols)
+
+
 def league_label(league_id: int) -> str:
     """展示用联赛名：已知 ID 显示中文名 + ID，未知则只显示 ID。"""
     name = LEAGUE_NAMES.get(int(league_id))

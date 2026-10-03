@@ -39,6 +39,7 @@ from formatkit import (
     fmt_time as _fmt_time,
     hbar,
     league_label,
+    team_mobile,
     team_name,
     web_entry_text,
 )
@@ -62,8 +63,10 @@ class CommonView:
         @staticmethod
         def matchup(p, tz) -> str:
             """详情页顶部的一行比赛信息。"""
+            # 横排对阵用移动端短名：双语全称两个队名相加可到 77 列，
+            # 实测在手机上折成三行，横排布局完全失去意义。
             return (
-                f"🏠 <b>{esc(team_name(p.home))}</b> 🆚 <b>{esc(team_name(p.away))}</b> ✈️\n"
+                f"🏠 <b>{esc(team_mobile(p.home))}</b> 🆚 <b>{esc(team_mobile(p.away))}</b> ✈️\n"
                 f"🕐 <code>{CommonView.fmt_time(p.kickoff, tz)}</code> ({CommonView.tz_label(tz, p.kickoff)})"
             )
     
