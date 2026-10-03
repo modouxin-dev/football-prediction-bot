@@ -48,6 +48,36 @@ DB_PATH=/data/football.db KEEP=30 ./backup_db.sh /path/to/dir
 docker compose --profile backup up -d
 ```
 
+> **「有备份无恢复」等于没有备份。** `backup_db.sh` 一直存在，但仓库里
+> 长期没有对应的恢复脚本——真出事时备份文件无法落地。现已补齐：
+
+```bash
+# 恢复（默认取 /data/backups 里最新的一份）
+./restore.sh                                  # 交互式，需输入 yes 确认
+YES=1 ./restore.sh                            # 自动化场景跳过确认
+./restore.sh football-20261003-120000.db.gz    # 指定某一份
+
+# 恢复前会自动做三件事：备份当前库（可回滚）、完整性校验、二次确认
+# 校验不通过的坏备份会被拒绝，原库保持不变
+```
+
+### 存储自检
+
+`storage_check.py` 是**独立于机器人**的只读检查——机器人起不来时
+`/status` 里的存储信息根本看不到，这个脚本直接开库检查：
+
+```bash
+python storage_check.py                    # 检查默认库
+DB_PATH=/data/football.db python storage_check.py
+```
+
+检查项：文件存在/大小、完整性校验、核心表与已完赛场次、WAL 模式、
+备份目录与 `restore.sh` 是否就位、磁盘余量。
+**退出码 0 = 无 ERROR；1 = 存在 ERROR 级问题**，可直接用于 cron 或健康检查。
+
+> 注：`backup_db.sh` 未改名为 `backup.sh`——它被 `docker-compose.yml`
+> 的备份服务直接引用，改名会破坏部署配置，而改名本身没有功能收益。
+
 已实测：备份文件可正常打开、数据完整，保留份数策略生效（连续跑 5 次 + KEEP=3 → 只留 3 份）。
 
 > 仅挂载卷仍不够稳妥——宿主机磁盘故障会一并丢失。**建议定期把备份同步到别处**（Oracle 有 20GB 免费对象存储，其他平台可用 `rclone` 传到任意对象存储）。

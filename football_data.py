@@ -35,6 +35,10 @@ def resolve_base_url() -> str:
 TTL_MATCHES = 10 * 60  # 今日赛程
 TTL_STANDINGS = 30 * 60  # 联赛排名
 TTL_SEASONS = 24 * 3600  # 赛季列表
+# 整季赛程（get_fixtures_by_season 用）。与 api_client.TTL_FIXTURES 同值：
+# 本模块此前只定义上面三个，却在第 435 行引用 TTL_FIXTURES，触发 NameError，
+# 且被 sync.py 的 except Exception 吞掉 —— 表现为「回填失败」而无真实原因。
+TTL_FIXTURES = 30 * 60
 
 MAX_RETRIES = 2  # 429 最多重试 2 次，指数退避
 
@@ -172,7 +176,7 @@ class FootballDataAPI:
                 detail = str(body["message"])[:200]
         except ValueError:
             detail = (resp.text or "")[:120]
-        return f"HTTP 403 无权访问该资源（免费层仅覆盖 12 个竞赛）" + (f"（{detail}）" if detail else "")
+        return "HTTP 403 无权访问该资源（免费层仅覆盖 12 个竞赛）" + (f"（{detail}）" if detail else "")
 
     @staticmethod
     def _json(resp: httpx.Response) -> dict:

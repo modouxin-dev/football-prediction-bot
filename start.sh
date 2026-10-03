@@ -13,7 +13,9 @@ PORT="${PORT:-8000}"
 if [ "${ENABLE_WEB:-1}" = "1" ]; then
     echo "[start] starting web dashboard on :${PORT}"
     # 后台运行；日志直接打到 stdout，Railway 会一并采集
-    python -m uvicorn api:app --host 0.0.0.0 --port "${PORT}" &
+    # 2>&1：uvicorn 的 INFO 日志默认写 stderr，Railway 会把 stderr 一律标 [err]，
+    # 淹没真正的 ERROR。合并到 stdout 后日志分级才准确（真错误仍含 ERROR/Traceback）。
+    python -m uvicorn api:app --host 0.0.0.0 --port "${PORT}" 2>&1 &
 fi
 
 # 机器人放前台：它挂了容器就退出，Railway 会自动重启（与原来的行为一致）

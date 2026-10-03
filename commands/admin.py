@@ -26,6 +26,7 @@ from scheduler import DAILY_JOB, run_push
 from support import describe_error
 
 from . import CommandDispatcher
+from typing import Any
 
 log = logging.getLogger("bot")
 
@@ -596,7 +597,7 @@ async def backfill_cmd(update, context) -> None:
         finished = service.repo.count_finished_matches(service.sync.competition)
         total_saved = sum(x[2] for x in done)
         lines = "\n".join(
-            f"{'✅' if s else '⚠️'} {sn} 赛季：收到 {rc} 保存 {sv}" for sn, rc, sv in done
+            f"{'✅' if sv else '⚠️'} {sn} 赛季：收到 {rc} 保存 {sv}" for sn, rc, sv in done
         )
         await progress.edit_text(
             f"✅ 全赛季回填完成\n\n{lines}\n\n"

@@ -295,12 +295,17 @@ def match_card(prediction, tz, level: dict, league_name: str = "",
     ax.text(0.225, 0.331, f"{lname} CONFIDENCE".strip(), color=bcolor,
             fontsize=9, fontweight="bold", ha="center", va="center")
 
-    # xG / expected goals
+    # 预期进球 λ。
+    # 注意：全仓没有任何地方给 home_xg / away_xg 赋值（statistics 端点未解析真实
+    # xG），所以这两个键取不到、永远回落到 lambda_home/lambda_away。
+    # 旧代码把标签打成「xG」，会让读者以为是真实 xG，实为模型自身的泊松 λ。
+    # 与「标题写 Elo 但代码里没有 Elo」是同一类展示层标注与数据源不一致，
+    # 因此改标 λ，若日后接入真实 xG 再改回。
     hg = a.get("home_xg") or a.get("lambda_home")
     ag = a.get("away_xg") or a.get("lambda_away")
     if hg is not None and ag is not None:
-        ax.text(0.075, 0.225, f"xG  {float(hg):.2f}", color=BLUE, fontsize=11, va="center")
-        ax.text(0.925, 0.225, f"xG  {float(ag):.2f}", color=BLUE, fontsize=11,
+        ax.text(0.075, 0.225, f"λ  {float(hg):.2f}", color=BLUE, fontsize=11, va="center")
+        ax.text(0.925, 0.225, f"λ  {float(ag):.2f}", color=BLUE, fontsize=11,
                 va="center", ha="right")
 
     ax.plot([0.075, 0.925], [0.175, 0.175], color="#1E3555", linewidth=1.1)

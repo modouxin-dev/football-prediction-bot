@@ -630,8 +630,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # --- Heartbeat Start ---
-import logging
-from datetime import datetime
+# logging / datetime 已在模块顶部导入（第 9、14 行），此处不再重复导入。
 
 async def send_heartbeat(application):
     admin_id = os.getenv("ADMIN_CHAT_ID")

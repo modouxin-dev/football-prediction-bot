@@ -779,3 +779,97 @@ M3 不按时间排序 → test_sorted_by_time                  FAILED
 单场样本不足以定性，需按新逻辑重跑多场才能区分
 「端点不可用」与「该场未收录」。
 
+
+---
+
+## [审计修复] 2026-10-03 · 总控审计四项 undefined name + 运维缺口
+
+来源：总控审计（143 文件 / 883 passed 基线）。**逐条实测核验后再改，
+未采信任何未经复现的结论。**
+
+### 核验方式与结果
+
+先用 `pyflakes` 全仓扫描，再逐个做运行时实证，**四条全部复现**：
+
+```
+football_data.py:435:91  undefined name 'TTL_FIXTURES'
+commands/admin.py:599:25 undefined name 's'
+commands/admin.py:51:24  undefined name 'Any'
+commands/admin.py:270:51 undefined name 'Any'
+```
+
+运行时实证（未修复前）：
+
+```
+get_fixtures_by_season(39, 2021) → NameError: name 'TTL_FIXTURES' is not defined
+/backfill all 生成器          → NameError: name 's' is not defined
+```
+
+### 改了什么
+
+| 项 | 位置 | 内容 |
+|---|---|---|
+| P0-1 | `football_data.py` | 补 `TTL_FIXTURES = 30 * 60`（与 `api_client.TTL_FIXTURES` 同值） |
+| P0-2 | `commands/admin.py:599` | `s` → `sv`（按「保存数 > 0 显示 ✅」判定） |
+| P2-1 | `commands/admin.py` | 补 `from typing import Any` |
+| P3-1 | `football_data.py:175` | 去掉无占位符的 `f` 前缀 |
+| P3-2 | `main.py:633-634` | 删除重复的 `import logging` / `from datetime import datetime` |
+| 4.2 | `chart.py` | 图表标签 `xG` → `λ` |
+| 4.3 | `start.sh` | uvicorn 加 `2>&1` |
+| 4.1 | 新增 `restore.sh` | 备份的恢复侧 |
+| 4.1 | 新增 `storage_check.py` | 独立于机器人的存储自检 |
+
+**P0-1 影响**：整季赛程回填的备用源路径此前完全不可用，且异常被
+`sync.py` 的 `except Exception` 吞掉，用户只看到「回填失败」看不到真实原因。
+
+**4.2 说明**：全仓**没有任何地方**给 `home_xg` / `away_xg` 赋值，
+`statistics` 端点只解析射正数、未取 xG，所以图表上的「xG」永远是
+模型自己的泊松 λ。与「标题写 Elo 但代码里没有 Elo」是同一类
+**展示层标注与数据源不一致**，故改标 λ。
+
+### 根因防线（审计建议第 1 条，本次一并落地）
+
+两个 P0 能活到 main，根因是**测试盲区 + 无静态门禁**：
+`get_fixtures_by_season` 零覆盖、`/backfill all` 分支零覆盖。
+补多少条运行时用例都只能覆盖被想到的路径，故加静态门禁一次性杜绝：
+
+- `tests/test_static_gate.py` — pyflakes `undefined name` 必须为 0
+- `.github/workflows/ci.yml` — 新增 Static check 步骤
+- `requirements-dev.txt` — 新增 `pyflakes>=3.0`
+
+### 实测证据
+
+```
+基线（远端 5c768e8 干净副本）  883 passed
+改动后                        895 passed   ← +12，零破坏
+```
+
+新增用例分布：`test_audit_p0.py` 7 条、`test_static_gate.py` 2 条、
+`test_storage_check.py` 3 条。
+
+**变异验证**（回退代码，确认测试真能拦错）：
+
+| 注入的错误 | 结果 |
+|---|---|
+| 删掉 `TTL_FIXTURES` 定义 | 3 条 FAILED ✅ |
+| `sv` 退回 `s` | 2 条 FAILED ✅ |
+| 注入任意未定义名 | 静态门禁 FAILED ✅ |
+| 还原后 | 895 passed ✅ |
+
+### restore.sh 实测（四场景，非纸面）
+
+| 场景 | 结果 |
+|---|---|
+| 库被删 → 恢复 | 100 行完整恢复 ✅ |
+| 库存在 → 覆盖 | 先自动备份到 `pre-restore-*.db`，再恢复 ✅ |
+| 坏备份 | 完整性校验拒绝，退出码 1，原库未改动 ✅ |
+| 二次确认输 no | 取消，不改动 ✅ |
+
+实测中**发现并修掉一个自己的 bug**：恢复前备份文件名只用到秒级时间戳，
+同一秒内连跑两次会撞名，`VACUUM INTO` 报 `output file already exists`
+并中止恢复。已加 PID 后缀。
+
+### 一项决定不做
+
+`backup_db.sh` **未改名**为 `backup.sh`：它被 `docker-compose.yml` 的
+备份服务直接引用，改名会破坏部署配置，而改名本身没有功能收益。
