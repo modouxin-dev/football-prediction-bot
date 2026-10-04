@@ -20,13 +20,16 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from telegram import InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from bot_handler import BotUI
+from keyboards import nav_row
 from config import Settings
 from service import PredictionService
 from tghtml import normalize
 from support import describe_error, notify_admins
+from views.digest import DigestView
 
 log = logging.getLogger("bot")
 ui = BotUI()
@@ -71,6 +74,36 @@ class NotificationManager:
             reply_markup=ui.get_main_keyboard(prediction.fixture_id, "home"),
         )
 
+    async def send_digest(self, predictions, *, note: str | None = None) -> int:
+        """推送「按联赛分组的单条汇总」，返回实际发出的消息条数。
+
+        五大联赛周末一天能有 30+ 场，逐场推送 = 30 条消息、30 次通知，会把
+        聊天列表整个刷掉。汇总压成 1 条（超长时按联赛块自动分页，绝不从一场
+        中间切断），细节留给用户点进单场看。
+
+        无比赛时**不推送**：国际比赛日天天发「暂无比赛」是纯噪音，
+        静默比打扰好。手动触发（按钮 / /test）的反馈由调用方负责。
+        """
+        if not predictions:
+            return 0
+
+        settings = self.settings
+        pages = DigestView.format_daily_digest_pages(
+            predictions, settings, settings.timezone, note=note,
+        )
+        # 汇总只给结论，细节在单场页；挂导航键让用户一键跳进去
+        markup = InlineKeyboardMarkup([nav_row()])
+        sent = 0
+        for page in pages:
+            await self.app.bot.send_message(
+                chat_id=settings.chat_target,
+                text=normalize(page),
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            sent += 1
+        return sent
+
     async def notify_admins(self, text: str) -> None:
         await notify_admins(self.app, text)
 
@@ -93,8 +126,9 @@ async def run_push(app, *, widen: bool = False) -> PushResult:
             note = service.last_note  # 降级/空结果的真实原因，必须让用户看到
 
     sender = NotificationManager(app)
-    for p in predictions:
-        await sender.send_prediction(p)
+    await sender.send_digest(predictions, note=note)
+    # PushResult.sent 语义保持「推送了多少场比赛」；分页只是传输细节，
+    # 不该让调用方（/test 回显、日志）看到消息条数和场数混在一起。
     return PushResult(len(predictions), note)
 
 

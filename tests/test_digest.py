@@ -152,6 +152,51 @@ def test_value_flag_shown_when_edge_high():
     assert "🚀" in text
 
 
+def test_single_page_has_no_page_number():
+    """只有一页时不加页码——否则每次推送都挂着「（1/1）」很奇怪。"""
+    preds = [_mk(1, 39, "Arsenal FC", "Liverpool FC", 30)]
+    pages = DigestView.format_daily_digest_pages(preds, None, TZ)
+    assert len(pages) == 1
+    assert "1/1" not in pages[0]
+
+
+def test_many_matches_split_into_multiple_pages():
+    """场次多到超限必须分页，且每页都不超过硬上限。"""
+    preds = [
+        _mk(i, lid, f"Home Team {i}", f"Away Team {i}", i % 60)
+        for i, lid in enumerate([39, 140, 78, 135, 61] * 12)  # 60 场
+    ]
+    pages = DigestView.format_daily_digest_pages(preds, None, TZ)
+    assert len(pages) > 1, "60 场应当触发分页"
+    for p in pages:
+        assert len(p) <= 4096, f"单页超长：{len(p)}"
+
+
+def test_pagination_loses_no_match():
+    """分页最容易犯的错是丢数据：总数必须对得上。"""
+    preds = [
+        _mk(i, lid, f"Home{i}", f"Away{i}", i % 60)
+        for i, lid in enumerate([39, 140, 78, 135, 61] * 12)
+    ]
+    pages = DigestView.format_daily_digest_pages(preds, None, TZ)
+    joined = "\n".join(pages)
+    for i in range(60):
+        # 队名被移动端短名处理过，用数字部分核对是否出现
+        assert f"Home{i}" in joined or f"Home{str(i)[:8]}" in joined
+
+
+def test_each_page_is_independently_readable():
+    """每页都要自带页眉和免责声明——用户可能只翻到第 2 页。"""
+    preds = [
+        _mk(i, lid, f"Home{i}", f"Away{i}", i % 60)
+        for i, lid in enumerate([39, 140, 78, 135, 61] * 12)
+    ]
+    pages = DigestView.format_daily_digest_pages(preds, None, TZ)
+    for p in pages:
+        assert "今日预测汇总" in p
+        assert DISCLAIMER in p
+
+
 def test_no_value_flag_when_edge_low():
     p = _mk(1, 39, "Arsenal FC", "Liverpool FC", 30)
     p.best = ("home", {"edge": 0.01})

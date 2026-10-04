@@ -50,6 +50,11 @@ from templates import (
 # 与 formatkit.MOBILE_MAX_COLS=36 同源，这里略放宽是因为已经用了短名。
 HEADLINE_MAX_COLS = 34
 
+# Telegram 单条消息硬上限 4096 字符（含 HTML 标签）。这里留出页眉、页脚和
+# 一点余量，避免刚好踩线导致整条推送 400 失败。
+TELEGRAM_MAX_CHARS = 4096
+PAGE_SOFT_LIMIT = 3600
+
 
 def _league_id_of(p) -> int:
     """取比赛所属联赛 ID。
@@ -70,6 +75,32 @@ def _league_sort_key(league_id: int) -> tuple[int, int]:
         return (LEAGUE_ORDER.index(league_id), 0)
     except ValueError:
         return (len(LEAGUE_ORDER), league_id)
+
+
+def _group_blocks(predictions, tz) -> list[tuple[int, list[str]]]:
+    """按联赛分组并排序，返回 [(联赛ID, 该组的展示行), ...]。
+
+    分组与排序的唯一实现：单页汇总与分页汇总都走这里，避免两处逻辑漂移。
+    """
+    grouped: dict[int, list] = {}
+    for p in predictions:
+        grouped.setdefault(_league_id_of(p), []).append(p)
+
+    ordered_ids = sorted(grouped, key=_league_sort_key)
+    blocks: list[tuple[int, list[str]]] = []
+    for lid in ordered_ids:
+        matches = sorted(grouped[lid], key=lambda p: p.kickoff)
+        flag = LEAGUE_FLAGS.get(lid, "⚽")
+        name = LEAGUE_NAMES.get(lid) or (league_label(lid) if lid else "其它")
+        lines = [
+            f"{flag} <b>{esc(name)}</b> <code>{len(matches)} 场</code>",
+            THIN_SEP,
+        ]
+        for p in matches:
+            lines.append(_headline(p, tz))
+            lines.append(_verdict_line(p))
+        blocks.append((lid, lines))
+    return blocks
 
 
 def _headline(p, tz) -> str:
@@ -136,12 +167,8 @@ class DigestView:
             lines += [BLANK, SEP, DISCLAIMER]
             return "\n".join(lines)
 
-        # ---- 分组 -----------------------------------------------------------
-        grouped: dict[int, list] = {}
-        for p in predictions:
-            grouped.setdefault(_league_id_of(p), []).append(p)
-
-        ordered_ids = sorted(grouped, key=_league_sort_key)
+        blocks = _group_blocks(predictions, tz)
+        ordered_ids = [lid for lid, _ in blocks]
         total = len(predictions)
         day_label = fmt_time(min(p.kickoff for p in predictions), tz, "%m月%d日")
 
@@ -157,21 +184,68 @@ class DigestView:
         lines.append(BLANK)
 
         # ---- 逐联赛输出 -----------------------------------------------------
-        for lid in ordered_ids:
-            matches = sorted(grouped[lid], key=lambda p: p.kickoff)
-            flag = LEAGUE_FLAGS.get(lid, "⚽")
-            name = LEAGUE_NAMES.get(lid) or (league_label(lid) if lid else "其它")
-            lines += [
-                f"{flag} <b>{esc(name)}</b> <code>{len(matches)} 场</code>",
-                THIN_SEP,
-            ]
-            for p in matches:
-                lines.append(_headline(p, tz))
-                lines.append(_verdict_line(p))
+        for _, block in blocks:
+            lines += block
             lines.append(BLANK)
 
         lines += [SEP, DISCLAIMER]
         return "\n".join(lines)
+
+    @staticmethod
+    def format_daily_digest_pages(predictions, settings, tz, *, note: str | None = None,
+                                  limit: int = PAGE_SOFT_LIMIT) -> list[str]:
+        """分页版汇总：返回可直接发送的字符串列表。
+
+        Telegram 单条消息上限 4096 字符。五大联赛周末一天 30+ 场，一场两行
+        很容易撑爆——超限时 send 会直接 400 失败，而这是无人值守的定时推送，
+        失败了没人知道。所以这里按**联赛块**切页（绝不从一场中间切断），
+        每页自带页眉页脚，独立可读。
+
+        只有一页时不加页码，与老格式完全一致。
+        """
+        if not predictions:
+            return [DigestView.format_daily_digest([], settings, tz, note=note)]
+
+        blocks = _group_blocks(predictions, tz)
+        total = len(predictions)
+        day_label = fmt_time(min(p.kickoff for p in predictions), tz, "%m月%d日")
+        footer = [SEP, DISCLAIMER]
+
+        # 先切块：按联赛累积，加入下一块会超限就翻页
+        chunks: list[list[str]] = []
+        cur: list[str] = []
+        for _, lines in blocks:
+            block = lines + [BLANK]
+            # 预留页眉页脚的量，否则最后一页拼完才发现超限
+            if cur and len("\n".join(cur + block + footer)) > limit:
+                chunks.append(cur)
+                cur = []
+            cur.extend(block)
+        if cur:
+            chunks.append(cur)
+        if not chunks:  # 极端情况：单个联赛就超限，也至少发一页
+            chunks = [[]]
+
+        count = len(chunks)
+
+        def head(page_no: int) -> list[str]:
+            suffix = f"（{page_no}/{count}）" if count > 1 else ""
+            lines = [
+                f"⚽ <b>今日预测汇总{suffix}</b>",
+                f"<code>{BRAND_EN} · DAILY</code>",
+                SEP,
+                BLANK,
+            ]
+            if page_no == 1:
+                lines.append(
+                    f"📅 {day_label} · 共 <b>{total}</b> 场 · <b>{len(blocks)}</b> 个联赛"
+                )
+                if note:
+                    lines += [BLANK, f"<i>{esc(note)}</i>"]
+            lines.append(BLANK)
+            return lines
+
+        return ["\n".join(head(i) + body + footer) for i, body in enumerate(chunks, 1)]
 
     @staticmethod
     def format_digest_empty(note: str | None = None) -> str:

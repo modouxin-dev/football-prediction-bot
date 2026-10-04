@@ -83,13 +83,21 @@ def live_fixtures(*hours):
 
 
 def test_run_push_sends_html_messages_with_keyboard_to_chat_id():
+    """推送应是一条「按联赛分组的汇总」，而不是逐场 N 条。
+
+    断言从「胜平负概率」（单场详情文案）改为「今日预测汇总」：这是有意的行为
+    变更——一天 30 场逐场推送会刷掉聊天列表，汇总压成 1 条。键盘保留，
+    让用户能从汇总一键跳进赛程看单场细节。
+    """
     app, _, _ = make_app(FakeAPI({2026: live_fixtures(2, 5)}), warm=False)
     result = run(main.run_push(app))
     assert result.sent == 2 and result.note is None
+    # 汇总压成 1 条：2 场比赛只应产生 1 次发送
+    assert app.bot.send_message.await_count == 1
     for call in app.bot.send_message.await_args_list:
         kwargs = call.kwargs
         assert kwargs["chat_id"] == 555 and str(kwargs["parse_mode"]) in ("HTML", "ParseMode.HTML")
-        assert "胜平负概率" in kwargs["text"] and kwargs["reply_markup"].inline_keyboard
+        assert "今日预测汇总" in kwargs["text"] and kwargs["reply_markup"].inline_keyboard
 
 
 def test_run_push_widens_window_only_for_manual_tests():
