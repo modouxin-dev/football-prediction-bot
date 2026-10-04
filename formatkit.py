@@ -150,19 +150,54 @@ _UNMATCHED: set[str] = set()
 
 
 def note_unmatched(raw: str | None) -> None:
-    """记录一个未命中队名（幂等，可安全高频调用）。"""
+    """记录一个未命中队名（幂等，可安全高频调用）。
+
+    两级存储 / Two-level storage:
+    - 内存 set：本次进程内去重，渲染热路径上零开销。
+      In-memory set: dedupes within the process, zero cost on render hot path.
+    - SQLite（teammiss）：跨进程、跨重启保留。容器里 uvicorn 与 bot 是
+      两个进程，内存 set 跨不过去，重启也会丢，所以这里顺带落盘。
+      SQLite (teammiss): survives processes and restarts. The container runs
+      uvicorn and the bot as two processes, so an in-memory set alone loses
+      everything on restart — hence the write-through.
+    """
     raw = (raw or "").strip()
     if raw and raw != "?":
         _UNMATCHED.add(raw)
+        # 落盘失败绝不影响渲染：埋点是诊断设施，不是主流程。
+        # Write-through failure must never break rendering.
+        try:
+            import teammiss as _teammiss
+            _teammiss.record(raw)
+        except Exception:
+            pass
 
 
 def unmatched_team_names(limit: int = 200) -> list[str]:
-    """导出未命中队名，按字母序，最多 limit 条。"""
+    """导出未命中队名，**优先返回持久化库**（跨重启完整），内存集合作补充。
+
+    为什么以持久化库为准：内存集合只反映「本次进程启动以来」渲染到的名字，
+    重启后归零；而管理员要补的是历史上出现过的全部漏网名单。
+    """
+    try:
+        import teammiss as _teammiss
+        persisted = [r[0] for r in _teammiss.recent(limit=limit)]
+    except Exception:
+        persisted = []
+    if persisted:
+        return persisted
+    # 埋点库不可用时降级为内存集合 / fall back to memory when DB unavailable
     return sorted(_UNMATCHED)[:limit]
 
 
 def clear_unmatched() -> None:
+    """清空内存集合与持久化库。"""
     _UNMATCHED.clear()
+    try:
+        import teammiss as _teammiss
+        _teammiss.clear()
+    except Exception:
+        pass
 
 
 def team_short_name(raw: str | None) -> str:

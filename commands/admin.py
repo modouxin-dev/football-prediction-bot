@@ -889,6 +889,59 @@ async def _typing(update) -> None:
         pass
 
 
+async def teammiss_cmd(update, context) -> None:
+    """/teammiss — 导出「未翻译、只能显示英文原名」的真实队名。
+
+    为什么需要 / Why: 静态收录表必然滞后（升班马、新联赛、数据源改写法）。
+    程序在渲染时自动记录没翻出来的原名（持久化在 /data，跨重启保留），
+    这里直接导出，拿去补 templates.TEAM_NAMES 即可。
+    /teammiss clear 清空重记。
+    """
+    await _typing(update)
+    args = (context.args or []) if getattr(context, "args", None) else []
+
+    if args and args[0].lower() == "clear":
+        try:
+            import formatkit
+            formatkit.clear_unmatched()
+        except Exception:
+            pass
+        await update.effective_message.reply_text("🧹 队名埋点已清空，重新开始收集。")
+        return
+
+    limit = 30
+    if args:
+        try:
+            limit = max(1, min(200, int(args[0])))
+        except ValueError:
+            limit = 30
+
+    try:
+        import formatkit
+        names = formatkit.unmatched_team_names(limit=limit)
+    except Exception as exc:
+        await update.effective_message.reply_text(f"❌ 读取失败：{esc(str(exc))}")
+        return
+
+    if not names:
+        await update.effective_message.reply_text(
+            "✅ 暂无未翻译队名：近期渲染到的队名都已在收录表中。")
+        return
+
+    lines = [f"🔤 未翻译队名 · 显示 {len(names)} 个", SEP]
+    for i, raw in enumerate(names, 1):
+        # 队名来自外部数据源，必须转义后再进 HTML 消息
+        lines.append(f"{i}. {esc(raw)}")
+    lines.append(SEP)
+    lines.append("把原名补进 templates.py 的 TEAM_NAMES 即可生效。")
+    lines.append("清空重记：/teammiss clear")
+
+    text = "\n".join(lines)
+    if len(text) > 3800:  # Telegram 单条上限 4096，留余量
+        text = text[:3800] + "\n…（已截断）"
+    await update.effective_message.reply_text(text)
+
+
 def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("test", test_cmd, admin_only=True, description="立即推送一次预测")
     dispatcher.register("status", status_cmd, admin_only=True, description="运行状态诊断")
@@ -901,3 +954,5 @@ def register(dispatcher: CommandDispatcher) -> None:
                         description="探测单场技术统计（射正数）是否可用")
     dispatcher.register("backtest", backtest_cmd, admin_only=True,
                         description="用本地真实赛果回测（不消耗额度）")
+    dispatcher.register("teammiss", teammiss_cmd, admin_only=True,
+                        description="导出未翻译队名（埋点收集的真实语料）")
