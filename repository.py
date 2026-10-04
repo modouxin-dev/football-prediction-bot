@@ -35,6 +35,10 @@ BACKOFF_MAX_SECONDS = 0.5        # 单次退避上限，避免长时间阻塞机
 CONNECTION_BUSY_TIMEOUT_MS = 15000   # 普通查询的等待上限（与既有行为一致）
 TRANSACTION_BUSY_TIMEOUT_MS = 100    # 原子事务内的等待上限：快速失败 + 退避接管
 
+# result 字段的合法取值：存的是「预测方向」，命中率按 result == 实际赛果判定。
+# 历史版本曾写入 'pending'/NULL，这类值永远不等于任何赛果，会把命中率压成 0。
+VALID_RESULTS = ("主胜", "平局", "客胜")
+
 
 def _restore_busy_timeout(conn: sqlite3.Connection) -> None:
     """事务结束后把 busy_timeout 还原为连接建立时的值。"""
@@ -363,7 +367,11 @@ class PredictionRepository:
             log.warning("保存预测失败（fixture=%s）：%s", prediction.fixture_id, exc)
 
     def settle(self, fixture_id, home_score: int | None, away_score: int | None) -> bool:
-        """回写真实比分。返回是否有记录被更新。"""
+        """回写真实比分。返回是否有记录被更新。
+
+        顺带保证 result 合法：命中判定是 `result == 实际赛果`，result 若为
+        'pending'/NULL 则这场永远算未命中，命中率会被悄悄压低。
+        """
         try:
             conn = self._connect()
             cur = conn.execute(
@@ -372,10 +380,62 @@ class PredictionRepository:
                 (home_score, away_score, _now_iso(), str(fixture_id)),
             )
             conn.commit()
-            return cur.rowcount > 0
+            updated = cur.rowcount > 0
         except Exception as exc:
             log.warning("回写赛果失败（fixture=%s）：%s", fixture_id, exc)
             return False
+        if updated:
+            self._backfill_result(fixture_id)
+        return updated
+
+    def _backfill_result(self, fixture_id) -> bool:
+        """单条修复：result 非法时按已保存的胜平负概率取最大方向回填。
+
+        概率本身没丢，方向可以确定性恢复；概率全为 0 的异常行不动，
+        避免凭空造出一个方向。
+        """
+        try:
+            conn = self._connect()
+            cur = conn.execute(
+                "UPDATE predictions SET result = CASE "
+                "  WHEN home_prob >= draw_prob AND home_prob >= away_prob THEN '主胜' "
+                "  WHEN away_prob >= draw_prob AND away_prob >= home_prob THEN '客胜' "
+                "  ELSE '平局' END "
+                "WHERE fixture_id=? "
+                "  AND (result IS NULL OR result NOT IN ('主胜','平局','客胜')) "
+                "  AND COALESCE(home_prob,0) + COALESCE(draw_prob,0) + COALESCE(away_prob,0) > 0",
+                (str(fixture_id),),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception as exc:
+            log.warning("回填预测方向失败（fixture=%s）：%s", fixture_id, exc)
+            return False
+
+    def backfill_results(self) -> int:
+        """批量修复历史遗留的非法 result，返回修复条数。
+
+        幂等：合法行不满足 NOT IN 条件，重复调用不会改动任何数据。
+        只动 result，不碰 actual_* / settled_at / 概率，命中判定口径不变。
+        """
+        try:
+            conn = self._connect()
+            cur = conn.execute(
+                "UPDATE predictions SET result = CASE "
+                "  WHEN home_prob >= draw_prob AND home_prob >= away_prob THEN '主胜' "
+                "  WHEN away_prob >= draw_prob AND away_prob >= home_prob THEN '客胜' "
+                "  ELSE '平局' END "
+                "WHERE (result IS NULL OR result NOT IN ('主胜','平局','客胜')) "
+                "  AND COALESCE(home_prob,0) + COALESCE(draw_prob,0) + COALESCE(away_prob,0) > 0",
+            )
+            conn.commit()
+            fixed = cur.rowcount or 0
+            if fixed:
+                log.info("回填非法预测方向 %s 条（历史遗留 pending/NULL，命中率会随之修正）", fixed)
+            return fixed
+        except Exception as exc:
+            log.warning("批量回填预测方向失败：%s", exc)
+            return 0
 
     # ---- 原子事务 -----------------------------------------------------------
     @contextmanager

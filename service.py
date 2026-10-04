@@ -277,6 +277,9 @@ class PredictionService:
         self._store: OrderedDict[int, Prediction] = OrderedDict()
         # 预测落盘到机器人自身存储（SQLite），重启不丢，支撑命中率统计
         self.repo: PredictionRepository = PredictionRepository(getattr(settings, "db_path", None))
+        # 历史库的 result 字段可能是 'pending'/NULL（旧版遗留），命中判定永远不相等，
+        # 命中率会被压成 0。启动时自愈一次；幂等，正常库零改动。
+        self.repo.backfill_results()
         # 赛程本地缓存：外部 API 只负责拉取，查询优先读本地库
         from sync import MatchSync
 
