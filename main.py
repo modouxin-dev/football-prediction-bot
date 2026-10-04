@@ -610,6 +610,67 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.answer()
 
 
+# 未知命令回复里最多列几条指令：列全了会把用户的聊天记录刷掉一屏，
+# 反而看不清自己刚才打错了什么。
+_UNKNOWN_CMD_HINT_LIMIT = 8
+
+
+def _unknown_command_text(name: str, commands: list, is_admin_user: bool) -> str:
+    """拼「未识别命令」的回复文案。"""
+    lines = [f"❓ <b>未识别的命令</b> /{esc(name)}"]
+    if commands:
+        rows = [f"/{n}　{d}" for n, d in commands[:_UNKNOWN_CMD_HINT_LIMIT]]
+        lines.append("")
+        lines.append("可用指令：")
+        lines.extend(rows)
+        if len(commands) > _UNKNOWN_CMD_HINT_LIMIT:
+            lines.append(f"…等共 {len(commands)} 条，发送 /help 查看全部")
+    else:
+        lines.append("")
+        lines.append("暂无可用指令。")
+    if is_admin_user:
+        lines.append("")
+        lines.append("另外：管理员指令发送 /help 可查看完整列表。")
+    else:
+        lines.append("")
+        lines.append("也可以直接点下方按钮开始。")
+    return "\n".join(lines)
+
+
+async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """未注册命令的兜底：明确告知，而不是静默忽略。
+
+    PTB 对没有任何 CommandHandler 匹配的命令默认不回应——用户看到自己发的
+    消息孤零零挂着、机器人毫无反应，只会以为机器人掉线了。这里统一回一句
+    并给出可用指令。
+
+    注册在 group=1：group 0 里的所有 CommandHandler 先跑，都没匹配才轮到
+    这里。用 group 而不是「放在最后注册」是因为后者依赖注册顺序，以后有人
+    在中间插入一个 handler 就会把它顶掉，而这种错误测试很难发现。
+    """
+    message = update.effective_message
+    if message is None or not message.text:
+        return
+    parts = message.text.strip().split()
+    # 纯空白：strip 后 split 得到空列表，直接取 [0] 会 IndexError
+    if not parts:
+        return
+    raw = parts[0]
+    # 群里常见 /cmd@BotName 写法，@ 及之后是 bot 用户名，不参与匹配
+    name = raw.lstrip("/").split("@", 1)[0].strip().lower()
+    if not name:
+        return
+    app = context.application
+    settings: Settings = app.bot_data.get("settings")
+    is_admin_user = settings is not None and is_admin(update, settings)
+    if is_admin_user:
+        commands = list(app.bot_data.get("public_commands") or [])
+        commands += list(app.bot_data.get("admin_commands") or [])
+    else:
+        commands = list(app.bot_data.get("public_commands") or [])
+    await reply_html(message, _unknown_command_text(name, commands, is_admin_user), None)
+
+
 async def on_panel_reopen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """「☰ 打开面板」按钮：把已收起的底部键盘重新展开。
 
@@ -920,6 +981,17 @@ def register_commands(app: Application) -> int:
     dispatcher = build_dispatcher()
     for spec in dispatcher.specs:
         app.add_handler(CommandHandler(spec.name, dispatcher.wrap(spec)))
+    # 兜底 handler 要给出「可用指令」提示，需要这份清单。
+    # admin_only 的单独存一份：不向普通用户暴露管理指令，但管理员自己
+    # 打错字时应该看到完整列表，否则会以为机器人坏了。
+    app.bot_data["public_commands"] = [
+        (spec.name, spec.description)
+        for spec in dispatcher.specs if not spec.admin_only
+    ]
+    app.bot_data["admin_commands"] = [
+        (spec.name, spec.description)
+        for spec in dispatcher.specs if spec.admin_only
+    ]
     return len(dispatcher)
 
 
@@ -947,6 +1019,8 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):.+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
+    # group=1：group 0 的所有 CommandHandler 先跑，都没匹配才到这里兜底。
+    app.add_handler(MessageHandler(filters.COMMAND, on_unknown_command), group=1)
     app.add_error_handler(on_error)
 
     if app.job_queue is None:
