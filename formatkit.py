@@ -60,13 +60,39 @@ _CLUB_TOKENS = frozenset(
 )
 
 
+# 数据源缩写 → 完整词。
+# API-Football 对西语/葡语联赛常用缩写（"Argentinos Jrs"、"Newells OB"、
+# "Ind. Rivadavia"、"Atl.Tucuman"、"Dep. Riestra"、"Est. Rio Cuarto"），
+# 而 TEAM_NAMES 收录的是完整名，直接匹配会全部落空、退化成英文原名。
+# 只收录确认无歧义的缩写；不认识的缩写原样保留（宁可显示英文也不臆造）。
+_CLUB_ABBREV = {
+    "jrs": "juniors",
+    "jr": "juniors",
+    "ob": "old boys",
+    "dep": "deportivo",
+    "deps": "deportivo",
+    "ind": "independiente",
+    "atl": "atletico",
+    "est": "estudiantes",
+    "sde": "santiago del estero",
+}
+
+
 def _team_key(name: str) -> str:
-    """队名归一键：去重音、去标点、去俱乐部词缀、小写、去多余空格。"""
+    """队名归一键：去重音、去标点、展开缩写、去俱乐部词缀、小写、去多余空格。"""
     s = _ud.normalize("NFKD", name or "")
     s = "".join(ch for ch in s if not _ud.combining(ch))
     s = s.lower().replace("&", " and ")
     s = _re.sub(r"[^a-z0-9]+", " ", s)
-    tokens = [t for t in s.split() if t and t not in _CLUB_TOKENS]
+    tokens = []
+    for t in s.split():
+        if not t:
+            continue
+        t = _CLUB_ABBREV.get(t, t)
+        # 展开后可能是多词（"old boys"），需再拆开分别过滤词缀
+        for part in t.split():
+            if part and part not in _CLUB_TOKENS:
+                tokens.append(part)
     return " ".join(tokens)
 
 

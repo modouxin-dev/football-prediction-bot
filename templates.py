@@ -311,6 +311,8 @@ TEAM_NAMES: dict[str, str] = {
     "Mirassol FC": "米拉索尔", "Mirassol": "米拉索尔",
     "EC Vitória": "维多利亚", "Vitoria": "维多利亚",
     "Grêmio Novorizontino": "诺瓦里桑蒂诺", "Goiás EC": "戈亚斯", "Goias": "戈亚斯",
+    # —— API-Football 下发的裸名写法（无 FC/EC 词缀）——
+    "Coritiba": "科里蒂巴", "Remo": "雷莫", "Chapecoense": "沙佩科恩斯",
     # 阿甲 / Liga Profesional Argentina（30 队）
     "CA River Plate": "河床", "River Plate": "河床",
     "CA Boca Juniors": "博卡青年", "Boca Juniors": "博卡青年",
@@ -345,6 +347,21 @@ TEAM_NAMES: dict[str, str] = {
     "Club de Gimnasia y Esgrima La Plata": "拉普拉塔体操", "Gimnasia La Plata": "拉普拉塔体操",
     "CA Belgrano de Córdoba": "贝尔格拉诺", "Belgrano": "贝尔格拉诺",
     "CA Tucumán": "图库曼竞技",
+    # —— 以下为 API-Football 实际下发的缩写/短名写法 ——
+    # 数据源并不总给完整名：同一支队可能下发 "Estudiantes L.P."、
+    # "Argentinos Jrs"、"Ind. Rivadavia"、"Instituto" 等缩写或裸名，
+    # 与上面收录的完整名对不上，会退化成英文。这里按**核实过的真实写法**
+    # 补录（来源：数据源公开积分榜 / 赛事资料库），不臆造中文名。
+    "Estudiantes L.P.": "拉普拉塔大学生", "Estudiantes LP": "拉普拉塔大学生",
+    "Argentinos Jrs": "阿根廷青年人", "Argentinos JRS": "阿根廷青年人",
+    "Independiente Rivadavia": "门多萨独立", "Ind. Rivadavia": "门多萨独立",
+    "Instituto": "科尔多瓦学院", "Sarmiento": "萨米恩托",
+    "Gimnasia Mendoza": "门多萨体操", "Gimnasia M.": "门多萨体操",
+    "Newells OB": "纽维尔老男孩", "Dep. Riestra": "列斯特拉",
+    "Atl.Tucuman": "图库曼竞技", "Atl. Tucuman": "图库曼竞技",
+    "Est. Rio Cuarto": "里奥夸尔托", "Estudiantes Rio Cuarto": "里奥夸尔托",
+    "Union de Santa Fe": "圣菲联", "Central Cordoba SdE": "中央科尔多瓦",
+    "Defensa Jus.": "国防与司法", "Est. Rio Cuarto ": "里奥夸尔托",
     # 日职 / J1 League（20 队）
     "Vissel Kobe": "神户胜利船", "Yokohama F. Marinos": "横滨水手",
     "Yokohama F Marinos": "横滨水手",
@@ -360,6 +377,9 @@ TEAM_NAMES: dict[str, str] = {
     "Machida Zelvia": "町田泽维亚", "Fagiano Okayama": "冈山雉鸡",
     "Kawasaki Frontale ": "川崎前锋", "Yokohama FC": "横滨FC",
     "Kashiwa Reysol ": "柏太阳神",
+    # —— API-Football 下发的写法（Reds / V-Varen / JEF United 等）——
+    "Mito Hollyhock": "水户蜀葵", "Urawa Reds": "浦和红钻",
+    "V-Varen Nagasaki": "长崎航海", "JEF United Chiba": "千叶市原",
     # 韩K / K League 1（13 队）
     "Ulsan Hyundai FC": "蔚山现代", "Ulsan Hyundai": "蔚山现代",
     "Jeonbuk Hyundai Motors FC": "全北现代", "Jeonbuk Hyundai Motors": "全北现代",
