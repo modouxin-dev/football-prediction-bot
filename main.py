@@ -10,6 +10,7 @@ import logging
 import os
 
 import paths
+import pytz
 import sys
 from datetime import datetime
 
@@ -636,9 +637,13 @@ async def send_heartbeat(application):
     admin_id = os.getenv("ADMIN_CHAT_ID")
     if admin_id:
         try:
+            # 服务器多为 UTC，直接用 datetime.now() 会让心跳时间比本地早 8 小时，
+            # 看起来像"时间不对"。按 TIMEZONE 配置取本地时间展示。
+            tz = pytz.timezone(os.getenv("TIMEZONE", "Asia/Shanghai"))
+            now_text = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
             await application.bot.send_message(
-                chat_id=admin_id, 
-                text=f"🚀 [Bot Online]\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n状态: 工业级部署已生效，心跳正常。"
+                chat_id=admin_id,
+                text=f"🚀 [Bot Online]\n时间: {now_text}\n状态: 工业级部署已生效，心跳正常。"
             )
             logging.info("Heartbeat message sent to admin.")
         except Exception as e:
