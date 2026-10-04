@@ -21,6 +21,7 @@ from analyzer import (
 from api_client import APIError, FootballAPI
 from data_source import DataSourceError
 from config import Settings
+from templates import LEAGUE_ORDER
 
 log = logging.getLogger(__name__)
 
@@ -589,6 +590,32 @@ class PredictionService:
                 result["day_label"] = self.fixture_day_label
         return picked
 
+    def _sort_fixtures_by_league(self, fixtures):
+        """多联赛下按「联赛聚堆 + 联赛内按开赛时间」排序。
+
+        赛程视图是按联赛打印分组标题的（只在联赛切换时打印一次）。若只按
+        开赛时间排序，五大联赛的比赛会交替出现，同一个联赛标题被反复打印，
+        分组等于失效——用户看不出哪场属于哪个联赛。这里让同联赛的比赛先
+        聚成一堆，组内再按时间升序；未登记的联赛排最后，不会被丢弃。
+        """
+        if not fixtures:
+            return fixtures
+
+        def key(fx):
+            raw = (fx.get("league") or {}).get("id")
+            try:
+                lid = int(raw)
+            except (TypeError, ValueError):
+                lid = 0
+            try:
+                order = LEAGUE_ORDER.index(lid)
+            except ValueError:
+                order = len(LEAGUE_ORDER)
+            kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
+            return (order, lid, kickoff or datetime.min.replace(tzinfo=timezone.utc))
+
+        return sorted(fixtures, key=key)
+
     async def query_fixtures(self, mode: str = MODE_TODAY, target: date | None = None,
                              now: datetime | None = None) -> dict:
         """统一赛程查询入口：今日 / 未来 N 天 / 下一场 / 指定日期。
@@ -634,12 +661,12 @@ class PredictionService:
             except Exception:
                 cached = []
             if cached:
-                result["fixtures"] = cached
+                result["fixtures"] = self._sort_fixtures_by_league(cached)
                 result["from_cache"] = True
                 result["season_range"] = self._season_range()
                 if mode == MODE_NEXT:
                     cached = self._limit_to_next(cached, now, s.timezone, result)
-                    result["fixtures"] = cached
+                    result["fixtures"] = self._sort_fixtures_by_league(cached)
                     if not cached:
                         result["status"] = ST_WINDOW_EMPTY
                         result["note"] = "ℹ️ 本地缓存中没有未来的比赛，可尝试「刷新数据」。"
@@ -687,7 +714,7 @@ class PredictionService:
 
         fb = getattr(self.api, "fallback", None)
         if fixtures:
-            result["fixtures"] = fixtures
+            result["fixtures"] = self._sort_fixtures_by_league(fixtures)
             if fb and getattr(fb, "last_shifted_date", None):
                 result["status"] = ST_WINDOW_EMPTY
                 result["note"] = f"ℹ️ {fb.last_note}"
