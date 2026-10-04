@@ -276,6 +276,15 @@ class DataSourceRouter:
         """整季赛程（历史赛季回填用）。备用源免费层只支持当前赛季。"""
         return await self._run("get_fixtures_by_season", league_id, season)
 
+    async def get_fixtures_by_date(self, day: date) -> list[dict]:
+        """某一天的全部赛程，不按联赛过滤。
+
+        走主源直取：备用源（football-data.org）免费层不支持按日跨联赛查询，
+        且这条路本就是为了「一次拿到全天比赛」，无需赛季降级，
+        因此不套 _run 的逐源重试，避免空结果时反复回退放大请求量。
+        """
+        return await self.primary.get_fixtures_by_date(day)
+
     async def get_injuries(self, fixture_id: int) -> list[dict]:
         """伤停名单；两个源都没有时返回空列表（不中断预测）。"""
         return await self._run("get_injuries", fixture_id)

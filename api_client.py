@@ -274,6 +274,19 @@ class FootballAPI:
         params = {"league": league_id, "season": season, "from": date_from.isoformat(), "to": date_to.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
+    async def get_fixtures_by_date(self, day: date) -> list[dict]:
+        """某一天的全部赛程（不按联赛过滤）。
+
+        只传 date、不传 league/season，API 会返回当天所有联赛的比赛，
+        国家队赛事（世预赛、欧国联、友谊赛等）也在其中。
+
+        这是「今日赛程」的主路径：一次请求拿全天比赛，既不用逐个联赛
+        轮询（17 个联赛 × 赛季降级会放大到上百次请求），也不会因为某个
+        联赛停摆（例如国际比赛日欧洲联赛集体休战）就整个空窗。
+        """
+        params = {"date": day.isoformat()}
+        return await self._get("fixtures", params, ttl=TTL_FIXTURES)
+
     async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict]:
         """整季赛程（只按赛季拉取，不带日期范围）。
 
