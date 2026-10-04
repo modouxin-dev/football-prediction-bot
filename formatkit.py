@@ -41,6 +41,8 @@ def team_name(raw: str | None, bilingual: bool = True) -> str:
     if not cn:
         hit = _TEAM_INDEX.get(_team_key(raw))
         cn = TEAM_NAMES.get(hit) if hit else None
+    if not cn:
+        note_unmatched(raw)
     if not cn or not bilingual:
         return raw
     return f"{cn} ({raw})"
@@ -78,11 +80,26 @@ _CLUB_ABBREV = {
 }
 
 
+# NFKD 拆不开的字母：ø æ þ ð ı ł 等没有分解形式，正则会把它们当成非
+# [a-z0-9] 的分隔符，于是 "Lillestrøm SK" 被劈成 "lillestr m"、"Bodø/Glimt"
+# 变成 "bod glimt"——同一支队的两种写法归一不到一起，只能靠逐条硬收录。
+# 这里先做一次字符级音译替换，让北欧/土耳其联赛的键稳定下来。
+_UNDECOMPOSABLE = {
+    "ø": "o", "æ": "ae", "þ": "th", "ð": "d",
+    "ı": "i", "ł": "l", "œ": "oe", "ß": "ss",
+    "đ": "d", "ħ": "h", "ŧ": "t", "ə": "e",
+}
+
+
 def _team_key(name: str) -> str:
     """队名归一键：去重音、去标点、展开缩写、去俱乐部词缀、小写、去多余空格。"""
     s = _ud.normalize("NFKD", name or "")
     s = "".join(ch for ch in s if not _ud.combining(ch))
+    s = "".join(_UNDECOMPOSABLE.get(ch, ch) for ch in s)
     s = s.lower().replace("&", " and ")
+    # 撇号直接去掉而不是当分隔符："Newell's Old Boys" 若按分隔符切会得到
+    # 单字母碎片 "s"，键变成 "newell s old boys"，与 "Newells OB" 对不上。
+    s = s.replace("'", "").replace("\u2019", "").replace("`", "")
     s = _re.sub(r"[^a-z0-9]+", " ", s)
     tokens = []
     for t in s.split():
@@ -96,20 +113,56 @@ def _team_key(name: str) -> str:
     return " ".join(tokens)
 
 
-def _build_team_index() -> dict[str, str]:
-    """TEAM_NAMES 的归一化索引；同一归一键冲突时保留最长原名（信息更全）。"""
-    idx: dict[str, str] = {}
+def _build_team_index() -> tuple[dict[str, str], dict[str, list[str]]]:
+    """建 TEAM_NAMES 的归一化索引。
+
+    返回 (索引, 冲突表)。冲突的键**不进索引**——这是刻意的：同一个归一键
+    对应多支不同的队时（"EC Vitória" 巴西 vs "Vitória SC" 葡萄牙葡吉马良斯），
+    无论留哪个代表，另一支队的数据源别名都会被显示成错的中文名。宁可让
+    这些队退回英文原名，也不能张冠李戴——名字错了用户会以为数据坏了。
+    """
+    buckets: dict[str, list[str]] = {}
     for raw in TEAM_NAMES:
         k = _team_key(raw)
         if not k:
             continue
-        prev = idx.get(k)
-        if prev is None or len(raw) > len(prev):
-            idx[k] = raw
-    return idx
+        buckets.setdefault(k, []).append(raw)
+    idx: dict[str, str] = {}
+    collisions: dict[str, list[str]] = {}
+    for k, names in buckets.items():
+        # 同一键下的多个原名，若中文名相同则只是写法差异，取最长原名即可
+        cn = {TEAM_NAMES[n] for n in names}
+        if len(cn) > 1:
+            collisions[k] = sorted(names)
+            continue
+        idx[k] = max(names, key=len)
+    return idx, collisions
 
 
-_TEAM_INDEX = _build_team_index()
+_TEAM_INDEX, TEAM_COLLISIONS = _build_team_index()
+
+# —— 未命中埋点 ——
+# 静态收录表永远滞后：新赛季升班马、新联赛、数据源改写法，都会冒出没收录的
+# 队名，而这些只有线上碰到才知道。与其等用户截图，不如让程序自己把「没翻出来
+# 的原名」记下来，攒一段时间导出即是最新语料。只记原名、不猜中文（猜了就会
+# 显示错的名字，比显示英文更糟）。
+_UNMATCHED: set[str] = set()
+
+
+def note_unmatched(raw: str | None) -> None:
+    """记录一个未命中队名（幂等，可安全高频调用）。"""
+    raw = (raw or "").strip()
+    if raw and raw != "?":
+        _UNMATCHED.add(raw)
+
+
+def unmatched_team_names(limit: int = 200) -> list[str]:
+    """导出未命中队名，按字母序，最多 limit 条。"""
+    return sorted(_UNMATCHED)[:limit]
+
+
+def clear_unmatched() -> None:
+    _UNMATCHED.clear()
 
 
 def team_short_name(raw: str | None) -> str:
@@ -129,7 +182,11 @@ def team_short_name(raw: str | None) -> str:
         return cn
     # 精确未命中时走归一化索引：同一个队在不同数据源里词缀/重音写法不同
     hit = _TEAM_INDEX.get(_team_key(raw))
-    return TEAM_NAMES.get(hit) if hit else raw
+    cn = TEAM_NAMES.get(hit) if hit else None
+    if cn:
+        return cn
+    note_unmatched(raw)
+    return raw
 
 
 # 手机单行可读上限（显示宽度）。Telegram 消息气泡在常见 360dp 屏上约能放

@@ -22,8 +22,10 @@ BRAND_EN = "FOOTBALL INSIGHT"
 
 BRAND_CN = "Football Insight"
 
-# 联赛编号 → 中文名。编号取自 API-Football（api_football_id），
-# 与数据源严格对应，不要凭印象改——写错编号只会静默拉到空数据。
+# 联赛编号 → 中文名（行尾注释为官方英文名，便于对照 API 与文档）。
+# 编号取自 API-Football（api_football_id），与数据源严格对应，不要凭印象改
+# ——写错编号只会静默拉到空数据，不会报错。新增联赛请同时补中文名、英文名
+# 注释，以及下方 LEAGUE_SHORT / LEAGUE_ORDER（缺一会导致显示成裸编号）。
 #
 # 为什么从 12 个扩到 50 个：五大联赛在休赛期 / 国际比赛日会整体停摆，
 # 只挂五个联赛的话，那些天用户点开就是「暂无比赛」，会以为机器人坏了。
@@ -31,19 +33,19 @@ BRAND_CN = "Football Insight"
 # 北欧、南美、亚洲的联赛照常开踢。扩池是「每天都有球看」的根本解法。
 LEAGUE_NAMES = {
     # ── 五大联赛（默认启用）────────────────────────────
-    39: "英格兰超级联赛",
-    140: "西班牙甲级联赛",
-    78: "德国甲级联赛",
-    135: "意大利甲级联赛",
-    61: "法国甲级联赛",
+    39: "英格兰超级联赛",  # Premier League
+    140: "西班牙甲级联赛",  # La Liga / Primera División
+    78: "德国甲级联赛",  # Bundesliga
+    135: "意大利甲级联赛",  # Serie A
+    61: "法国甲级联赛",  # Ligue 1
     # ── 欧战 ────────────────────────────────────────
-    2: "欧洲冠军联赛",
-    3: "欧罗巴联赛",
-    848: "欧洲协会联赛",
+    2: "欧洲冠军联赛",  # UEFA Champions League
+    3: "欧罗巴联赛",  # UEFA Europa League
+    848: "欧洲协会联赛",  # UEFA Europa Conference League
     # ── 英格兰 / 次级 ────────────────────────────────
-    40: "英格兰冠军联赛",
-    41: "英格兰甲级联赛",
-    42: "英格兰乙级联赛",
+    40: "英格兰冠军联赛",  # EFL Championship
+    41: "英格兰甲级联赛",  # EFL League One
+    42: "英格兰乙级联赛",  # EFL League Two
     # ── 西欧 ────────────────────────────────────────
     141: "西班牙乙级联赛",   # Segunda División
     136: "意大利乙级联赛",   # Serie B
@@ -52,48 +54,48 @@ LEAGUE_NAMES = {
     88: "荷兰甲级联赛",     # Eredivisie
     94: "葡萄牙超级联赛",   # Primeira Liga
     144: "比利时甲级联赛",   # Jupiler Pro League
-    207: "瑞士超级联赛",
-    218: "奥地利甲级联赛",
-    179: "苏格兰超级联赛",
-    180: "苏格兰冠军联赛",
+    207: "瑞士超级联赛",  # Swiss Super League
+    218: "奥地利甲级联赛",  # Austrian Bundesliga
+    179: "苏格兰超级联赛",  # Scottish Premiership
+    180: "苏格兰冠军联赛",  # Scottish Championship
     # ── 北欧 / 东欧 ──────────────────────────────────
     103: "挪威超级联赛",    # Eliteserien
     113: "瑞典超级联赛",    # Allsvenskan
-    119: "丹麦超级联赛",
-    244: "芬兰超级联赛",
+    119: "丹麦超级联赛",  # Danish Superliga
+    244: "芬兰超级联赛",  # Veikkausliiga
     106: "波兰甲级联赛",    # Ekstraklasa
-    235: "俄罗斯超级联赛",
-    345: "捷克甲级联赛",
-    271: "匈牙利甲级联赛",
-    283: "罗马尼亚甲级联赛",
-    210: "克罗地亚甲级联赛",
-    197: "希腊超级联赛",
-    318: "塞浦路斯甲级联赛",
+    235: "俄罗斯超级联赛",  # Russian Premier League
+    345: "捷克甲级联赛",  # Czech Fortuna Liga
+    271: "匈牙利甲级联赛",  # Nemzeti Bajnokság I
+    283: "罗马尼亚甲级联赛",  # Liga I
+    210: "克罗地亚甲级联赛",  # HNL
+    197: "希腊超级联赛",  # Super League Greece
+    318: "塞浦路斯甲级联赛",  # Cypriot First Division
     # ── 南欧 / 地中海 ────────────────────────────────
-    203: "土耳其超级联赛",
-    357: "爱尔兰超级联赛",
-    383: "以色列超级联赛",
+    203: "土耳其超级联赛",  # Süper Lig
+    357: "爱尔兰超级联赛",  # League of Ireland Premier Division
+    383: "以色列超级联赛",  # Israeli Premier League
     # ── 美洲 ────────────────────────────────────────
-    71: "巴西甲级联赛",
-    128: "阿根廷甲级联赛",
-    253: "美国职业大联盟",
-    262: "墨西哥甲级联赛",
-    239: "哥伦比亚甲级联赛",
-    242: "厄瓜多尔甲级联赛",
-    250: "巴拉圭甲级联赛",
+    71: "巴西甲级联赛",  # Brasileirão Série A
+    128: "阿根廷甲级联赛",  # Liga Profesional de Fútbol
+    253: "美国职业大联盟",  # Major League Soccer
+    262: "墨西哥甲级联赛",  # Liga MX
+    239: "哥伦比亚甲级联赛",  # Categoría Primera A
+    242: "厄瓜多尔甲级联赛",  # LigaPro Serie A
+    250: "巴拉圭甲级联赛",  # Primera División
     # ── 亚洲 / 非洲 ──────────────────────────────────
-    98: "日本职业联赛",
-    292: "韩国甲级联赛",
-    169: "中国超级联赛",
-    307: "沙特职业联赛",
-    301: "阿联酋甲级联赛",
-    305: "卡塔尔星级联赛",
-    233: "埃及超级联赛",
-    200: "摩洛哥甲级联赛",
-    186: "阿尔及利亚甲级联赛",
+    98: "日本职业联赛",  # J1 League
+    292: "韩国甲级联赛",  # K League 1
+    169: "中国超级联赛",  # Chinese Super League
+    307: "沙特职业联赛",  # Saudi Pro League
+    301: "阿联酋甲级联赛",  # UAE Pro League
+    305: "卡塔尔星级联赛",  # Qatar Stars League
+    233: "埃及超级联赛",  # Egyptian Premier League
+    200: "摩洛哥甲级联赛",  # Botola Pro
+    186: "阿尔及利亚甲级联赛",  # Algerian Ligue 1
     # ── 国家队赛事 ───────────────────────────────────
-    1: "国际足联世界杯",
-    4: "欧洲足球锦标赛",
+    1: "国际足联世界杯",  # FIFA World Cup
+    4: "欧洲足球锦标赛",  # UEFA European Championship
 }
 
 # 按钮用联赛短名：中文全称在按钮上放不下（「英格兰超级联赛」= 14 列，
@@ -244,7 +246,7 @@ TEAM_NAMES: dict[str, str] = {
     "SC Heerenveen": "海伦芬", "Heerenveen": "海伦芬",
     "SBV Vitesse": "维特斯", "Vitesse": "维特斯",
     "FC Groningen": "格罗宁根", "Groningen": "格罗宁根",
-    "Sparta Rotterdam": "鹿特丹斯巴达", "Sparta Rotterdam ": "鹿特丹斯巴达",
+    "Sparta Rotterdam": "鹿特丹斯巴达",
     "NEC Nijmegen": "奈梅亨", "NEC": "奈梅亨",
     "Go Ahead Eagles": "前进之鹰", "PEC Zwolle": "兹沃勒", "Zwolle": "兹沃勒",
     "Heracles Almelo": "阿尔梅罗大力神", "Heracles": "阿尔梅罗大力神",
@@ -361,7 +363,7 @@ TEAM_NAMES: dict[str, str] = {
     "Atl.Tucuman": "图库曼竞技", "Atl. Tucuman": "图库曼竞技",
     "Est. Rio Cuarto": "里奥夸尔托", "Estudiantes Rio Cuarto": "里奥夸尔托",
     "Union de Santa Fe": "圣菲联", "Central Cordoba SdE": "中央科尔多瓦",
-    "Defensa Jus.": "国防与司法", "Est. Rio Cuarto ": "里奥夸尔托",
+    "Defensa Jus.": "国防与司法",
     # 日职 / J1 League（20 队）
     "Vissel Kobe": "神户胜利船", "Yokohama F. Marinos": "横滨水手",
     "Yokohama F Marinos": "横滨水手",
@@ -375,8 +377,8 @@ TEAM_NAMES: dict[str, str] = {
     "Shonan Bellmare": "湘南比马", "Albirex Niigata": "新潟天鹅",
     "Kyoto Sanga FC": "京都桑加", "Tokyo Verdy": "东京绿茵",
     "Machida Zelvia": "町田泽维亚", "Fagiano Okayama": "冈山雉鸡",
-    "Kawasaki Frontale ": "川崎前锋", "Yokohama FC": "横滨FC",
-    "Kashiwa Reysol ": "柏太阳神",
+    "Kawasaki Frontale": "川崎前锋", "Yokohama FC": "横滨FC",
+    "Kashiwa Reysol": "柏太阳神",
     # —— API-Football 下发的写法（Reds / V-Varen / JEF United 等）——
     "Mito Hollyhock": "水户蜀葵", "Urawa Reds": "浦和红钻",
     "V-Varen Nagasaki": "长崎航海", "JEF United Chiba": "千叶市原",
