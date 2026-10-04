@@ -184,7 +184,12 @@ def test_concurrent_read_during_heavy_writes():
     这是 Railway 上的真实场景——定时任务写、用户命令读，同时进行。
     """
     db = Path(tempfile.mkdtemp()) / "rw.db"
+    # 先在**主线程**建好库：否则读线程会卡在构造函数的建表 DDL 上等写锁，
+    # 等它建完表，写线程早已跑完、stop 也已置位，循环一次都进不去，
+    # 于是断言 reads["n"] > 0 偶发失败——测的是启动竞态，不是并发读写。
+    PredictionRepository(str(db))
     stop = threading.Event()
+    ready = threading.Event()   # 读线程已成功读满一轮，写线程才准开工
     read_errors: list[str] = []
     reads = {"n": 0}
 
@@ -195,6 +200,7 @@ def test_concurrent_read_during_heavy_writes():
                 repo.elo_ratings("PL")
                 repo.stats()
                 reads["n"] += 1
+                ready.set()   # 第一次成功后放行写线程，确保真的在并发
             except Exception as exc:
                 read_errors.append(f"{type(exc).__name__}: {exc}")
                 return
@@ -207,6 +213,8 @@ def test_concurrent_read_during_heavy_writes():
 
     t = threading.Thread(target=reader, daemon=True)
     t.start()
+    # 等读线程真正跑起来再开写；超时则视为环境异常，让下面的断言给出明确信息
+    ready.wait(timeout=10)
     threads = [threading.Thread(target=writer, args=(n,)) for n in range(10)]
     for th in threads:
         th.start()
