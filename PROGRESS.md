@@ -1478,3 +1478,30 @@ DB 里已结算的预测 `result` 字段全为 `'pending'`，而命中判定是
 | 2 | ~~未命中埋点导出接成 `/teammiss`~~ | ✅ 阶段 25 |
 | 3 | 其余联赛队名覆盖（韩K/沙特/土超/挪超/瑞超/荷甲/葡超） | 靠 `/teammiss` 攒真实语料后再补 |
 | 4 | Web 页面美化 | **别的模型**，我只供接口 |
+
+## 阶段 26 · 补中央科尔多瓦省略省份写法 · HEAD b9087dce
+
+埋点首战即见效：用户发 `/fixtures` 后 `/teammiss` 立刻吐出 1 条真实漏网
+原名 `Central Cordoba de Santiago`（数据源省略 del Estero）。已补收录。
+
+**修复**：归一化后键为 `central cordoba santiago`，与 `central cordoba`
+不同 → 落空。补带/不带重音的常见写法，中文名一致，无索引冲突。
+
+**教训（与阶段 23 同类，第四次）**：带重音与不带重音的两条归一键相同，
+删掉任一条测试仍绿（另一条兜住）。**冗余条目必须整体删除才能验证。**
+本次第二次变异连删两条，3 条测试变红才确认守住。
+
+**发现但未擅自修（视觉权衡，需用户定）**：
+`views/fixtures.py` 的 `SIDE_MAX = 10` 会把 6 字以上中文名截断成 4 字+…。
+实测 316 个中文名中 34 个超 10 列（11%），其中 29 个 6 字、5 个 7 字。
+放宽上限会让整行从 40 列涨到 44 列，注释明确警告会触发手机横向滚动、
+三列对齐失效。**截断是设计权衡不是 bug**，改动属视觉决策，交用户或美化模型。
+
+**验证**：1131 passed / 1 skipped / 0 failed（+6 条）；
+远端回读 2 文件逐字节 MATCH；干净副本全量复跑一致。
+
+### 环境备忘（沙盒会被重置，每次开工先查）
+`python3 -m pip install pytest pytest-asyncio httpx==0.24.1
+python-telegram-bot[job-queue] fastapi uvicorn`
+缺 `job-queue` 会让 `test_bot.py` 2 条 RuntimeError 失败（PTB 警告已指明），
+非代码问题。httpx 0.24.1 与 jupyterlab 冲突的警告无害。
