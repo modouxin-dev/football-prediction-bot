@@ -2,7 +2,7 @@ import os
 import logging
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -87,12 +87,16 @@ def probe_storage() -> dict:
         except Exception:
             try:
                 created_at = marker.stat().st_mtime
-                first_write = datetime.fromtimestamp(created_at).isoformat()
+                # 与 elo.py / api.py 一致：落库时间戳统一用 UTC，避免服务器
+                # 时区不同导致同一份数据出现不同的写入时间。
+                first_write = datetime.fromtimestamp(
+                    created_at, timezone.utc
+                ).isoformat()
             except OSError:
                 created_at = None
     if created_at is None:
         try:
-            first_write = datetime.now().isoformat()
+            first_write = datetime.now(timezone.utc).isoformat()
             marker.write_text(first_write, encoding="utf-8")
             created_at = time.time()
         except Exception as exc:
