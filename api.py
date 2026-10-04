@@ -39,6 +39,21 @@ import analytics
 import paths
 from repository import PredictionRepository
 
+# 默认日期必须按项目时区（默认 Asia/Shanghai）算，不能用 UTC。
+# 反例：上海 10-05 07:00，UTC 仍是 10-04 23:00 —— 用 UTC 取「今天」
+# 会返回昨天的赛程，看板与 Telegram 推送差一整天。
+_TZ_NAME = os.getenv("TIMEZONE", "Asia/Shanghai")
+
+
+def _today() -> str:
+    """按项目时区返回今天日期（YYYY-MM-DD）。时区无效时退化为 UTC。"""
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo(_TZ_NAME)).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
 # templates 是零依赖模块（只放静态文案与联赛名表），可以安全地在顶层引入。
 # 刻意**不在顶层** import formatkit：它依赖 service，实测导入耗时 1192ms，
 # 会直接压垮首请求。改为在 lifespan 预热时绑定一次（见 _team_cn）。
@@ -274,7 +289,7 @@ async def fixtures(date: str | None = None, limit: int = 100) -> JSONResponse:
     未生成预测的比赛 `prediction` 为 null —— 表示「还没算」而非「算出来是 0」，
     前端必须区分这两种状态。
     """
-    day = (date or "").strip() or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    day = (date or "").strip() or _today()
     limit = max(1, min(int(limit), 300))
     repo = _repo()
     try:

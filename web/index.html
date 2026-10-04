@@ -187,7 +187,7 @@ function strengthCard(st){
   if(!teams.length) return head + `<div class="empty">暂无数据。</div></div>`;
   let rows = '';
   teams.slice(0,20).forEach((t,i)=>{
-    rows += `<tr><td class="num">${i+1}</td><td>${esc(t.name)}</td>
+    rows += `<tr><td class="num">${i+1}</td><td>${esc(t.name_cn || t.name)}</td>
       <td class="num">${t.played}</td><td class="num">${t.attack.toFixed(2)}</td>
       <td class="num">${t.defense.toFixed(2)}</td><td class="num"><b>${t.overall.toFixed(2)}</b></td></tr>`;
   });
@@ -206,7 +206,7 @@ function auditCard(a){
   items.slice(0,30).forEach(it=>{
     rows += `<tr>
       <td>${esc(it.kickoff||'').slice(0,10)}</td>
-      <td>${esc(it.home)} vs ${esc(it.away)}</td>
+      <td>${esc(it.home_cn || it.home)} vs ${esc(it.away_cn || it.away)}</td>
       <td>${esc(it.predicted)}</td>
       <td class="num">${esc(it.score)}</td>
       <td class="${it.hit?'hit':'miss'}">${it.hit?'✓':'✗'}</td></tr>`;
@@ -216,11 +216,55 @@ function auditCard(a){
     <tbody>${rows}</tbody></table></div>`;
 }
 
+/* ---------- 今日赛程：与 Telegram 推送同源 ---------- */
+const ST = {NS:'未开始', TBD:'待定', FT:'完场', AET:'加时', PEN:'点球',
+            '1H':'上半场', '2H':'下半场', HT:'中场', LIVE:'进行中',
+            PST:'推迟', CANC:'取消', ABD:'中断', SUSP:'暂停', INT:'待续'};
+
+function hhmm(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(isNaN(d)) return String(iso).slice(11,16);
+  return d.toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', hour12:false, timeZone:'Asia/Shanghai'});
+}
+
+function fixturesCard(fx){
+  const head = `<div class="card"><h2>今日赛程 <span>${esc(fx.date||'')} · 与 Telegram 推送同源</span></h2>`;
+  const leagues = fx.leagues || [];
+  if(!leagues.length) return head + `<div class="empty">今日暂无比赛。</div></div>`;
+
+  let html = '';
+  leagues.forEach(g=>{
+    let rows = '';
+    (g.matches||[]).forEach(m=>{
+      const p = m.prediction;
+      // 「还没算」与「算出来是平局」必须区分：p 为 null 表示未生成预测。
+      const pred = p
+        ? `${esc(p.result)} <span class="num">${(Math.max(p.home_prob||0,p.draw_prob||0,p.away_prob||0)*100).toFixed(0)}%</span>`
+        : '<span style="color:var(--dim)">未预测</span>';
+      const done = m.status === 'FT' || m.status === 'AET' || m.status === 'PEN';
+      const score = done && m.home_score != null && m.away_score != null
+        ? `<b>${m.home_score}-${m.away_score}</b>` : (ST[m.status] || m.status || '');
+      rows += `<tr>
+        <td class="num">${hhmm(m.kickoff)}</td>
+        <td>${esc(m.home_cn || m.home)} vs ${esc(m.away_cn || m.away)}</td>
+        <td class="num">${score}</td>
+        <td>${pred}</td></tr>`;
+    });
+    html += `<div style="margin-top:10px"><b>${esc(g.competition_cn || g.competition || '未知联赛')}</b>
+      <span style="color:var(--dim);font-size:12px">${g.count} 场</span></div>
+      <table><thead><tr><th>时间</th><th>对阵</th><th class="num">比分/状态</th><th>预测</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  });
+  return head + html + `<div style="font-size:12px;color:var(--dim);margin-top:8px">共 ${fx.total} 场 · 时间为北京时间 · 仅供参考，不构成投注建议</div></div>`;
+}
+
 async function load(){
   $('root').innerHTML = '<div class="empty">正在加载数据…</div>';
   try{
-    const [h, health, audit, strength] = await Promise.all([
-      get('/health'), get('/health/model'), get('/audit?limit=50'), get('/strength')
+    const [h, health, audit, strength, fx] = await Promise.all([
+      get('/health'), get('/health/model'), get('/audit?limit=50'), get('/strength'),
+      get('/fixtures').catch(() => ({status:'empty', date:'', total:0, leagues:[]}))
     ]);
     $('ver').textContent = 'v' + (h.version || '?');
     const ok = h.status === 'ok';
@@ -229,7 +273,8 @@ async function load(){
     if(h.warning) console.warn(h.warning);
 
     $('root').innerHTML =
-      statCard(health) + trendCard(health) + calibCard(health) + levelCard(health)
+      fixturesCard(fx)
+      + statCard(health) + trendCard(health) + calibCard(health) + levelCard(health)
       + strengthCard(strength) + auditCard(audit);
   }catch(err){
     $('health').className = 'pill bad';
