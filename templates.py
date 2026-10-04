@@ -101,6 +101,7 @@ TABS = (("home", "📈 预测"), ("deep", "🔍 深度分析"), ("h2h", "📊 �
 
 MENU_ITEMS = (
     ("fixtures", "📅 今日赛程"),
+    ("digest", "🎯 生成今日预测"),
     ("predict", "⚽ 比赛预测"),
     ("analysis", "📊 深度分析"),
     ("standings", "🏆 联赛排名"),

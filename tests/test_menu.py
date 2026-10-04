@@ -316,6 +316,9 @@ class FakeQuery:
     def __init__(self, data):
         self.data = data
         self.answers, self.edits = [], []
+        # 生成汇总要读点击者（并发守卫）与所在会话（分页时追加新消息）
+        self.from_user = SimpleNamespace(id=555)
+        self.message = SimpleNamespace(chat_id=555)
 
     async def answer(self, text=None, show_alert=False):
         self.answers.append(text)
@@ -336,7 +339,8 @@ def make_ctx(api, user_data=None):
         bot_data={"settings": SETTINGS, "service": service, "api": api},
         job_queue=SimpleNamespace(get_jobs_by_name=lambda n: []),
     )
-    return SimpleNamespace(application=app, user_data=user_data or {}), service
+    # bot 一并挂上：汇总分页时除就地编辑外还要追加新消息
+    return SimpleNamespace(application=app, user_data=user_data or {}, bot=app.bot), service
 
 
 def query_update(data):
@@ -491,6 +495,38 @@ def test_query_window_empty_shows_season_range():
     assert res["status"] == "window_empty"
     assert res["season_range"] == (date(2026, 8, 15), date(2027, 5, 24))
     assert "没有比赛" in res["note"]
+
+
+def test_menu_digest_callback_generates_single_summary():
+    """点「生成今日预测」：一条汇总就地展示，而不是逐场发 N 条。"""
+    ctx, _ = make_ctx(TodayAPI(today_fixtures(3)))
+    update, q = query_update("menu:digest")
+    run(main.on_menu(update, ctx))
+    assert q.edits, "应当就地编辑出汇总"
+    assert "今日预测汇总" in q.edits[0][0]
+    # 3 场压成 1 条：不应再调用 send_message 逐场发送
+    assert ctx.bot.send_message.await_count == 0
+
+
+def test_menu_digest_gives_feedback_when_no_match():
+    """手动点按钮却无比赛：必须给出可见反馈，不能像定时推送那样静默。
+
+    定时推送静默是对的（避免每天噪音），但用户主动点了按钮没任何反应，
+    会以为机器人坏了。
+    """
+    ctx, _ = make_ctx(TodayAPI([]))
+    update, q = query_update("menu:digest")
+    run(main.on_menu(update, ctx))
+    assert q.edits, "无比赛也要给出反馈"
+    assert "暂无比赛" in q.edits[0][0]
+
+
+def test_menu_digest_reports_real_error():
+    """接口故障时如实报错，不伪装成「今天没比赛」。"""
+    ctx, _ = make_ctx(BoomAPI())
+    update, q = query_update("menu:digest")
+    run(main.on_menu(update, ctx))
+    assert q.edits and "生成失败" in q.edits[0][0]
 
 
 def test_reply_keyboard_every_menu_item_has_branch():

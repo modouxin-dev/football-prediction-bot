@@ -15,7 +15,7 @@ import sys
 from datetime import datetime
 
 from dotenv import load_dotenv
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
@@ -39,6 +39,8 @@ from commands import CommandRuntime, build_dispatcher
 # 定时任务已迁到 scheduler.py。以下两个名字仍是既有测试与调用方的入口，
 # 保留再导出；其余不再从 main 暴露。
 from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
+from keyboards import nav_row
+from views.digest import DigestView
 from tghtml import normalize
 from support import (back_to_menu_markup, begin_task, deny, describe_error,
                      edit_view, end_task, is_admin,
@@ -223,6 +225,8 @@ async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: s
     settings: Settings = context.application.bot_data["settings"]
     if key == "home":
         await edit_view(query, ui.format_menu(settings), ui.menu_keyboard())
+    elif key == "digest":
+        await generate_digest(update, context)
     elif key == "fixtures":
         await show_fixtures(update, context, page=0)
     elif key == "refresh":
@@ -242,6 +246,80 @@ async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: s
         await storage_cmd(update, context)
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
+
+
+async def _build_digest_predictions(service) -> tuple[list, str | None]:
+    """取今日预测；无比赛时放宽到 WIDE_HOURS，并返回说明文案。
+
+    抽出是因为「按钮回调」和「底部键盘文字」两个入口都要用同一套取数逻辑，
+    各写一份必然漂移（一个放宽了另一个没放宽，用户会看到两种不一致的结论）。
+    """
+    predictions = await service.build_predictions()
+    note = service.last_note
+    if not predictions:
+        predictions = await service.build_predictions(lookahead_hours=WIDE_HOURS)
+        if predictions:
+            note = (f"当前时间范围内没有未开赛的比赛，"
+                    f"已放宽到 {WIDE_HOURS // 24} 天内。")
+        elif service.last_note:
+            note = service.last_note
+    return predictions, note
+
+
+async def generate_digest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """手动生成「今日预测汇总」并就地展示。
+
+    定时推送是每天一次，但赛程会变（补赛、改期），用户也需要随时看当前口径的
+    结论，所以给一个随时可点的生成按钮。
+
+    与定时推送的差别只有两点：
+    1. 手动触发时无比赛会**放宽到 14 天**——用户点了按钮却只看到「暂无比赛」，
+       无法判断是机器人坏了还是真没比赛；放宽后至少能验证链路是通的。
+    2. 无比赛也必须给出可见反馈（就地编辑），不能静默。定时推送才静默。
+    """
+    query = update.callback_query
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+
+    await query.answer("正在生成今日预测…")
+    user_id = query.from_user.id
+    # 生成要调 API 算几十场，耗时数秒；用 pending 守卫避免重复点击把 API 打爆
+    if not await begin_task(app.bot_data, user_id, "digest"):
+        return
+    try:
+        predictions, note = await _build_digest_predictions(service)
+    except Exception as exc:  # 手动触发：失败必须让用户看见，不能只写日志
+        log.exception("手动生成汇总失败")
+        await edit_view(
+            query,
+            f"❌ <b>生成失败</b>\n{esc(describe_error(exc))}",
+            back_to_menu_markup(),
+        )
+        return
+    finally:
+        end_task(app.bot_data, user_id, "digest")
+
+    if not predictions:
+        # 兜底文案用汇总视图的空态，保证与推送口径一致
+        await edit_view(
+            query,
+            DigestView.format_digest_empty(note),
+            back_to_menu_markup(),
+        )
+        return
+
+    pages = DigestView.format_daily_digest_pages(
+        predictions, settings, settings.timezone, note=note,
+    )
+    await edit_view(query, pages[0], InlineKeyboardMarkup([nav_row()]))
+    # 分页的其余几页新发：edit_message_text 只能改当前这一条
+    for extra in pages[1:]:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=normalize(extra),
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def on_fixtures_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -508,6 +586,37 @@ async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def reply_digest(message, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """底部键盘入口：生成汇总后作为新消息回复（不是就地编辑）。
+
+    与按钮入口的差别只在于输出方式：底部键盘点出来的是一条普通文字消息，
+    没有可编辑的原消息，所以整份汇总逐页新发。
+    """
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    user_id = message.from_user.id
+    if not await begin_task(app.bot_data, user_id, "digest"):
+        return
+    try:
+        predictions, note = await _build_digest_predictions(service)
+    except Exception as exc:
+        log.exception("手动生成汇总失败")
+        await reply_html(message, f"❌ <b>生成失败</b>\n{esc(describe_error(exc))}", None)
+        return
+    finally:
+        end_task(app.bot_data, user_id, "digest")
+
+    if not predictions:
+        await reply_html(message, DigestView.format_digest_empty(note), None)
+        return
+    pages = DigestView.format_daily_digest_pages(
+        predictions, settings, settings.timezone, note=note,
+    )
+    for page in pages:
+        await reply_html(message, page, None)
+
+
 def _panel_key_from_text(text: str) -> str | None:
     """识别底部面板的收放按钮，命中则返回目标状态。
 
@@ -581,6 +690,8 @@ async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif key == "refresh":
         context.application.bot_data["fx_cache"] = None
         await show_fixtures(update, context, page=0)
+    elif key == "digest":
+        await reply_digest(message, context)
     elif key in ("fixtures", "analysis", "predict"):
         # 这三个入口都需要先选一场比赛，统一落到赛程列表
         await show_fixtures(update, context, page=0)
