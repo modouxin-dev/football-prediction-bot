@@ -265,6 +265,8 @@ class PredictionService:
         # 建模必须用「该场比赛所属联赛」的赛季，不能统一套主联赛的。
         self._season_by_league: dict[int, int] = {}
         self.using_upcoming: bool = False  # 当前赛程是否为「今日无比赛 → 扩展到未来」的结果
+        # 配置联赛当天休战、改用国家队赛事兜底（国际比赛日）
+        self.using_national_fallback: bool = False
         self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
         self._store: OrderedDict[int, Prediction] = OrderedDict()
@@ -496,6 +498,62 @@ class PredictionService:
                 out.append(season)
         return out
 
+    # 国家队 / 洲际赛事判定：靠 API 返回的真实字段，绝不猜联赛 ID。
+    # 国际比赛日期间俱乐部联赛集体休战，只有这类赛事还有球，
+    # 认不出它们就会整天显示「暂无比赛」。
+    _NAT_COUNTRIES = frozenset({
+        "world", "europe", "south america", "asia", "africa",
+        "north central america", "oceania",
+    })
+    _NAT_KEYWORDS = (
+        "world cup", "nations league", "qualification", "friendly",
+        "copa america", "european championship", "asian cup", "africa cup",
+        "confederations", "olympic", "gold cup", "euro",
+    )
+
+    @classmethod
+    def _is_national(cls, fx: dict) -> bool:
+        """该场是否国家队/洲际赛事（世预赛、欧国联、友谊赛等）。"""
+        lg = fx.get("league") or {}
+        country = str(lg.get("country") or "").strip().lower()
+        if country and country in cls._NAT_COUNTRIES:
+            return True
+        name = str(lg.get("name") or "").strip().lower()
+        return any(k in name for k in cls._NAT_KEYWORDS)
+
+    async def _fetch_all_by_date(self, day) -> list[dict]:
+        """某一天的全部赛程：一次请求拿全天，再按需筛选。
+
+        主路径不再逐个联赛轮询——17 个联赛各带赛季降级与空结果重试，
+        单次点击能放大到上百次请求，而且只要配置里的联赛当天休战
+        （国际比赛日典型情况）就整体空窗。
+
+        筛选策略：
+        1. 优先保留 LEAGUE_IDS 配置的联赛；
+        2. 配置联赛当天一场都没有时，回退到国家队 / 洲际赛事，
+           保证「今日赛程」永远有内容可看。
+        """
+        try:
+            fixtures = await self.api.get_fixtures_by_date(day)
+        except Exception as exc:  # 按日拉取失败不致命，上层会走原有路径
+            log.warning("按日拉取赛程失败（%s）：%s", day, type(exc).__name__)
+            return []
+        if not fixtures:
+            return []
+        s = self.settings
+        wanted = {int(x) for x in (getattr(s, "league_ids", None) or (s.league_id,))}
+        picked = [
+            fx for fx in fixtures
+            if int((fx.get("league") or {}).get("id") or 0) in wanted
+        ]
+        if picked:
+            return picked
+        # 配置联赛当天无球（国际比赛日）——回退国家队赛事，避免空白页
+        national = [fx for fx in fixtures if self._is_national(fx)]
+        if national:
+            self.using_national_fallback = True
+        return national
+
     async def _fetch_fixtures(self, date_from, date_to,
                               league_id: int | None = None) -> tuple[list[dict], int, str | None]:
         """按候选赛季依次请求赛程，遇到「赛季不可用」就自动降级。
@@ -721,6 +779,52 @@ class PredictionService:
             self.last_note = result["note"]
             return result
 
+        # 今日无比赛时自动扩窗重查：直接抛空态会让用户以为机器人坏了，
+        # 实际上只是今天没球（国际比赛日 / 休赛期）。这里回退到未来 N 天，
+        # 并用 note 说清「今日无比赛」，避免把「今天没球」说成「数据源异常」。
+        if mode == MODE_TODAY and not fixtures:
+            span_from, span_to = today, today + timedelta(days=UPCOMING_DAYS)
+            retry: list[dict] = []
+            if self.local_first:
+                try:
+                    retry = self.repo.load_matches(
+                        self.sync.competition,
+                        span_from.isoformat(), span_to.isoformat(),
+                    )
+                except Exception:
+                    retry = []
+            if not retry:
+                try:
+                    retry, season, _ = await self._fetch_fixtures_multi(span_from, span_to)
+                except APIError:
+                    retry = []
+            if retry:
+                result["fixtures"] = self._sort_fixtures_by_league(retry)
+                result["status"] = ST_OK
+                result["mode"] = MODE_UPCOMING
+                self.using_upcoming = True
+                self.fixture_day_label = (
+                    f"{span_from.isoformat()} ~ {span_to.isoformat()}"
+                )
+                result["day_label"] = self.fixture_day_label
+                result["note"] = (
+                    f"ℹ️ 今日（{today.isoformat()}）暂无比赛，"
+                    f"已自动显示未来 {UPCOMING_DAYS} 天的赛程。"
+                )
+                self.last_note = result["note"]
+                return result
+            # 扩窗后依然没有：必须说清「未来 N 天也查过了」，
+            # 否则用户看到的是「今天没比赛」，以为机器人只查了当天。
+            result["status"] = ST_WINDOW_EMPTY
+            result["day_label"] = f"{span_from.isoformat()} ~ {span_to.isoformat()}"
+            result["note"] = (
+                f"ℹ️ 今日及未来 {UPCOMING_DAYS} 天内均没有比赛"
+                f"（{span_from.isoformat()} ~ {span_to.isoformat()}），"
+                f"可尝试指定其它日期或「刷新数据」。"
+            )
+            self.last_note = result["note"]
+            return result
+
         # 无比赛：区分「接口没数据」还是「窗口内没比赛」
         if raw_count and mode == MODE_NEXT:
             # 接口确实返回了比赛，只是都已开赛 —— 属于窗口内没比赛，不是故障
@@ -764,25 +868,44 @@ class PredictionService:
         now = now or datetime.now(timezone.utc)
         day = now.astimezone(s.timezone).date()
         self.using_upcoming = False
+        self.using_national_fallback = False
         self.fixture_day_label = day.isoformat()
+        season = s.season
+        note = None
 
-        fixtures, season, note = await self._fetch_fixtures_multi(day, day)
+        # 主路径：一次请求拿当天全部比赛（含国家队赛事，省去逐联赛轮询）
+        fixtures = await self._fetch_all_by_date(day)
+        if not fixtures:
+            fixtures, season, note = await self._fetch_fixtures_multi(day, day)
         if not fixtures:
             # 今日无比赛：自动扩展到未来 N 天，避免「今天没比赛」就给用户一片空白。
             # 注意区分：这里是「正常无数据」，仍不能把权限/故障错误伪装成空。
             end = day + timedelta(days=UPCOMING_DAYS)
-            fixtures, season, note = await self._fetch_fixtures_multi(day, end)
-            if fixtures:
-                self.using_upcoming = True
-                self.fixture_day_label = f"{day.isoformat()} ~ {end.isoformat()}"
-                fixtures = sorted(
-                    fixtures,
-                    key=lambda fx: (parse_kickoff((fx.get("fixture") or {}).get("date")) or now),
-                )
-                note = (
-                    f"ℹ️ 今日（{day.isoformat()}）暂无比赛，"
-                    f"已自动展示未来 {UPCOMING_DAYS} 天内的赛程。"
-                )
+            for offset in range(1, UPCOMING_DAYS + 1):
+                d = day + timedelta(days=offset)
+                fixtures = await self._fetch_all_by_date(d)
+                if fixtures:
+                    self.using_upcoming = True
+                    self.fixture_day_label = f"{day.isoformat()} ~ {d.isoformat()}"
+                    note = (
+                        f"ℹ️ 今日（{day.isoformat()}）暂无比赛，"
+                        f"已自动展示未来 {UPCOMING_DAYS} 天内的赛程。"
+                    )
+                    break
+            if not fixtures:
+                fixtures, season, note = await self._fetch_fixtures_multi(day, end)
+                if fixtures:
+                    self.using_upcoming = True
+                    self.fixture_day_label = f"{day.isoformat()} ~ {end.isoformat()}"
+                    note = (
+                        f"ℹ️ 今日（{day.isoformat()}）暂无比赛，"
+                        f"已自动展示未来 {UPCOMING_DAYS} 天内的赛程。"
+                    )
+        if fixtures:
+            fixtures = sorted(
+                fixtures,
+                key=lambda fx: (parse_kickoff((fx.get("fixture") or {}).get("date")) or now),
+            )
         # 备用源把数据「回退到最近比赛日」时，把真实日期带出来，别只说「暂无比赛」
         fb = getattr(self.api, "fallback", None)
         if fixtures and fb and getattr(fb, "last_shifted_date", None):
