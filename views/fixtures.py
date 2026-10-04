@@ -38,6 +38,8 @@ from formatkit import (
     _num,
     _row_line,
     _row_summary,
+    align_cjk,
+    display_width,
     BLANK,
     bar,
     esc,
@@ -49,25 +51,96 @@ from formatkit import (
     web_entry_text,
 )
 
+WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+# ---- 赛程表格列宽（显示列，中文 = 2 列）----------------------------------
+# 一行 = 序号(2) + 空格 + 时间(5) + 空格 + 队名(side) + " vs " + 队名(side)
+#      + 空格 + 进度。手机上 <pre> 等宽块太宽就会横向滚动，一滚动
+# 「日期时间 / 对阵 / 进度」三列就散了，对齐也就白做了 —— 所以队名列宽
+# 按本页实际内容自适应：短名页面只占 32 列，遇到 5 字中文队名才撑到 40。
+SIDE_MIN = 6     # 队名列下限：3 个中文字，再窄就没法看了
+SIDE_MAX = 10    # 队名列上限：5 个中文字。超出的（长英文名）截断，
+                 # 否则一行会被单个队名撑爆，整页都跟着横向滚动
+
+
+def _side_col(names) -> int:
+    """按本页最长队名决定列宽，钳在 [SIDE_MIN, SIDE_MAX]。"""
+    widest = max((display_width(n) for n in names), default=0)
+    return max(SIDE_MIN, min(SIDE_MAX, widest))
+
+
+def _relative_day(day, tz) -> str:
+    """相对日期标签：今天/明天/后天，再往后回退到星期。
+
+    按钮上放不下「今天 10-04」（10 列），所以把相对标签挪到标题行——
+    标题没有宽度限制，信息一点不丢。
+    """
+    offset = (day - datetime.now(tz).date()).days
+    if offset == 0:
+        return "今天"
+    if offset == 1:
+        return "明天"
+    if offset == 2:
+        return "后天"
+    return WEEKDAY_CN[day.weekday()]
+
+
 def _day_nav_row(tz, active_day):
     """生成横排日期导航：今天起连续 4 天，active_day 打勾标记。
 
-    用 ✅ 而不是括号标注当前项——手机上窄按钮里多两个字符就会被挤成
-    省略号，反而看不出选中了谁。
+    按钮上只放 MM-DD（6 列）。此前写「今天 10-04」共 10 列，而手机上
+    4 个按钮平分一行、每格仅约 8 列，文案被截成「今天 10-…」——恰恰
+    是要看的日期被挤没了。改成纯日期后完整可见，相对标签移到标题行。
     """
     base = datetime.now(tz).date()
     row = []
     for offset in range(DAY_NAV_SPAN):
         day = base + timedelta(days=offset)
-        label = f"{day.strftime('%m-%d')}"
-        if offset == 0:
-            label = f"今天 {label}"
-        elif offset == 1:
-            label = f"明天 {label}"
+        label = day.strftime("%m-%d")
         if active_day == day:
-            label = f"✅ {label}"
+            label = f"✅{label}"
         row.append(InlineKeyboardButton(label, callback_data=f"fxd:{offset}"))
     return row
+
+
+def _progress_text(short: str, goals: dict | None) -> str:
+    """进度列文本：已完场给比分（最有用），进行中给状态，未开始给「未开始」。
+
+    列宽只有 6 列，所以「中场休息」「时间待定」这类四字状态要缩短，
+    否则会被截成「中场休…」，反而看不懂。
+    """
+    if short in ("FT", "AET", "PEN"):
+        gh = (goals or {}).get("home")
+        ga = (goals or {}).get("away")
+        return f"{gh}-{ga}" if gh is not None and ga is not None else "已完场"
+    if short in ("1H", "2H", "ET", "BT", "P", "LIVE"):
+        return "进行中"
+    if short == "HT":
+        return "中场"
+    if short == "TBD":
+        return "待定"
+    return STATUS_TEXT.get(short) or "未知"
+
+
+def _match_cell(home: str, away: str, side: int) -> str:
+    """对阵列「主队 vs 客队」：两侧各自补到固定列宽，中间的 vs 永远在同一列。
+
+    为什么不整串拼接后统一补位：那样 vs 的位置会随队名长度左右漂移，
+    扫视时两场比赛的对阵就对不齐。固定两侧列宽后，视觉上是一条竖线。
+    """
+    return f"{align_cjk(home, side)} vs {align_cjk(away, side)}"
+
+
+def _table_row(idx: int, when: str, home: str, away: str, progress: str, side: int) -> str:
+    """一行赛程。整行进 <pre> 才有等宽：正文是比例字体，补多少空格都对不齐。
+
+    进度列不补位：它是最后一列，补的空格在行尾既看不见也会被渲染器 trim，
+    但会白白占掉宽度、把队名挤压得更窄。
+    """
+    cell = _match_cell(home, away, side)
+    # 先按显示宽度补齐、再转义：esc 只改变源码字符数（& -> &amp;），
+    # 不改变渲染后的列宽，反过来做会让含 & 的队名（Brighton & Hove）少一列。
+    return esc(f"{idx:>2} {when} {cell} {progress}")
 
 
 class FixturesView:
@@ -89,9 +162,12 @@ class FixturesView:
             chunk = items[page * per_page : (page + 1) * per_page]
     
             title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
+            # 相对标签（今天/明天）放标题：按钮上放不下，标题没有宽度限制。
+            rel_day = active_day if active_day is not None else datetime.now(tz).date()
             lines = [
                 title,
-                f"📆 <code>{esc(day_label)}</code> · 🌍 <code>{esc(tz.zone)}</code>",
+                f"📆 <code>{esc(day_label)}</code> · {_relative_day(rel_day, tz)}"
+                f" · 🌍 <code>{esc(tz.zone)}</code>",
                 SEP,
             ]
             rows: list[list[InlineKeyboardButton]] = []
@@ -114,7 +190,31 @@ class FixturesView:
                 lines.append(f"<code>{esc(span_text)}</code>")
                 lines += ["", "你可以尝试："]
             else:
+                # 列宽按本页最长队名自适应：短名页面不浪费宽度，遇到
+                # 5 字中文队名（里奥夸尔托）才撑到 SIDE_MAX，避免一刀切
+                # 按最宽值把每行都拉长——那样短名页面会空出一大片空白。
+                def _names():
+                    for f in chunk:
+                        t = f.get("teams") or {}
+                        yield team_short_name((t.get("home") or {}).get("name"))
+                        yield team_short_name((t.get("away") or {}).get("name"))
+
+                side = _side_col(list(_names()))
+
+                buf: list[str] = []
+
+                def flush_table():
+                    """把累积的数据行收成一个 <pre> 块。
+
+                    整块进 <pre> 才有等宽：Telegram 正文是比例字体，补多少
+                    空格都对不齐，三列会各自漂移。
+                    """
+                    if buf:
+                        lines.append("<pre>" + "\n".join(buf) + "</pre>")
+                        buf.clear()
+
                 current = None  # None 与任何联赛 id 都不同，首场必打印标题
+                prev_day = None
                 for offset, fx in enumerate(chunk):
                     idx = page * per_page + offset + 1
                     info = fx.get("fixture") or {}
@@ -123,6 +223,8 @@ class FixturesView:
                     except (TypeError, ValueError):
                         lid = 0
                     if lid != current:  # 按联赛分组，只在切换联赛时打印标题
+                        flush_table()
+                        prev_day = None  # 新联赛块内重新按日期分组
                         current = lid
                         # 标题用中文联赛名而不是数据源的英文名（API 返回的是
                         # "Liga Profesional Argentina" 之类，中文用户扫视时
@@ -150,33 +252,30 @@ class FixturesView:
                     kickoff = parse_kickoff(info.get("date"))
                     if kickoff:
                         local = kickoff.astimezone(tz)
-                        when = local.strftime("%m-%d %H:%M") if multi_day else local.strftime("%H:%M")
+                        when = local.strftime("%H:%M")
+                        day = local.date()
                     else:
                         when = "--:--"
+                        day = None
+                    # 跨天时先打一行日期小标题，行内就只留时间。若把
+                    # 「10-07 21:45」硬塞进 5 列的时间列，对阵列会被压到
+                    # 14 列，两侧队名各只剩 5 列——中文字被砍一半。
+                    if multi_day and day is not None and day != prev_day:
+                        prev_day = day
+                        if buf:
+                            buf.append("")
+                        buf.append(f"{day.strftime('%m-%d')} {WEEKDAY_CN[day.weekday()]}")
                     short = (info.get("status") or {}).get("short") or ""
-                    status = STATUS_TEXT.get(short, short or "未知")
                     goals = fx.get("goals") or {}
-                    gh, ga = goals.get("home"), goals.get("away")
-                    # 比分两侧都要空格：只有左侧有空格会渲染成「2-1狼队」，
-                    # 比分与客队名直接粘连。⚔️ 分支前后都有空格，所以只有
-                    # 已完场的比赛会暴露这个 bug —— 未开赛时看不出来。
-                    score = f" <b>{esc(gh)}-{esc(ga)}</b> " if gh is not None and ga is not None else " ⚔️ "
-                    # 序号用等宽 2 位补位：个位数与两位数在比例字体下会错开半格
-                    # 每场独立成块：序号+时间一行、对阵一行、状态一行，块间空行。
-                    # 挤在一行时队名长的比赛会被折行，序号和状态就对不上了。
-                    lines.append(f"<code>{idx:>2}</code> ⏰ <code>{when}</code>")
-                    lines.append(f"　　🏠 {esc(home)}{score}{esc(away)}")
-                    lines.append(
-                        f"　　 {status_emoji(short)} <code>{esc(status)}</code>"
-                        f" · <code>#{esc(info.get('id'))}</code>"
-                    )
-                    lines.append(BLANK)
+                    # 日期时间 · 主队 vs 客队 · 进度，三列固定列宽对齐
+                    buf.append(_table_row(idx, when, home, away, _progress_text(short, goals), side))
                     rows.append(
                         [
                             InlineKeyboardButton(f"⚽ 预测 {idx}", callback_data=f"fx:{info.get('id')}"),
                             InlineKeyboardButton(f"📊 分析 {idx}", callback_data=f"fa:{info.get('id')}"),
                         ]
                     )
+                flush_table()
             # 日期导航条：主流赛程站的标配。没有它，用户想看明天只能
             # 手打 /date 命令——而「明天有什么球」恰恰是最常见的需求。
             # 横排 4 天，当前所在日期打勾，一眼能看出自己停在哪一天。

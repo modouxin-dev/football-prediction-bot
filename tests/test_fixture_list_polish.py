@@ -53,7 +53,9 @@ def test_score_has_space_on_both_sides():
                  "2026-10-03T14:00:00+00:00", "FT", 2, 1)]
     text, _, _, _ = BotUI.format_fixtures_page(items, SETTINGS.timezone, 0, 5, "d")
     plain = _plain(text)
-    assert re.search(r"布莱顿\s+2-1\s+狼队", plain), plain
+    # 已完场的比分独占行尾的「进度」列，与客队名之间必须有空格分隔，
+    # 否则会渲染成「狼队2-1」这种粘连。
+    assert re.search(r"狼队\s+2-1\s*$", plain, re.M), plain
 
 
 def test_unknown_team_keeps_original_name():
@@ -61,7 +63,9 @@ def test_unknown_team_keeps_original_name():
     items = [_fx(1, "Ipswich Town FC", "Arsenal FC", "2026-10-03T18:30:00+00:00")]
     text, _, _, _ = BotUI.format_fixtures_page(items, SETTINGS.timezone, 0, 5, "d")
     plain = _plain(text)
-    assert "Ipswich Town FC" in plain  # 未收录：原样输出
+    # 未收录：保留英文原名（超长的会被截到队名列宽，但绝不编造中文名）
+    assert "Ipswich" in plain
+    assert "伊普斯" not in plain
     assert "阿森纳" in plain            # 已收录：中文名
 
 
