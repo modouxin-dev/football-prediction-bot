@@ -223,7 +223,11 @@ def test_fixtures_page_groups_by_league():
     items = today_fixtures(3)
     text, markup, page, total = BotUI.format_fixtures_page(items, SETTINGS.timezone, 0, 5, "2026-09-25")
     assert page == 0 and total == 1
-    assert text.count("🏆") == 1  # 同一联赛只打印一次标题
+    # 分组标题改为「国旗 + 中文联赛名 + 场数」（原为 🏆 + 数据源英文名），
+    # 断言随之收紧：标题整行只出现一次，且必须是中文联赛名。
+    assert text.count("英格兰超级联赛") == 1, "同一联赛只打印一次标题"
+    assert "Premier League" not in text, "标题不应再用数据源英文名"
+    assert "3 场" in text, "标题应带上该联赛场数"
     assert "主队1" in text and "客队1" in text
     assert "未开始" in text and "已完场" in text  # 状态中文映射
 

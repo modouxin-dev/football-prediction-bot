@@ -14,6 +14,8 @@ from service import MODEL_VERSION, parse_kickoff
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from templates import (
     BRAND_CN,
+    LEAGUE_FLAGS,
+    LEAGUE_NAMES,
     BRAND_EN,
     BULLET,
     DISCLAIMER,
@@ -112,14 +114,31 @@ class FixturesView:
                 lines.append(f"<code>{esc(span_text)}</code>")
                 lines += ["", "你可以尝试："]
             else:
-                current = None
+                current = None  # None 与任何联赛 id 都不同，首场必打印标题
                 for offset, fx in enumerate(chunk):
                     idx = page * per_page + offset + 1
                     info = fx.get("fixture") or {}
-                    league = (fx.get("league") or {}).get("name") or "未知联赛"
-                    if league != current:  # 按联赛分组，只在切换联赛时打印标题
-                        current = league
-                        lines.append(f"🏆 <b>{esc(league)}</b>")
+                    try:
+                        lid = int((fx.get("league") or {}).get("id"))
+                    except (TypeError, ValueError):
+                        lid = 0
+                    if lid != current:  # 按联赛分组，只在切换联赛时打印标题
+                        current = lid
+                        # 标题用中文联赛名而不是数据源的英文名（API 返回的是
+                        # "Liga Profesional Argentina" 之类，中文用户扫视时
+                        # 定位不了）。未登记的联赛回退数据源原名，绝不丢弃。
+                        flag = LEAGUE_FLAGS.get(lid, "⚽")
+                        name = LEAGUE_NAMES.get(lid) or (
+                            (fx.get("league") or {}).get("name") or f"联赛 {lid}"
+                        )
+                        # 场数按「本页内该联赛」统计，翻页时不会误导
+                        count = sum(
+                            1 for f in chunk
+                            if (int((f.get("league") or {}).get("id") or 0)
+                                if str((f.get("league") or {}).get("id") or "").lstrip("-").isdigit()
+                                else 0) == lid
+                        )
+                        lines.append(f"{flag} <b>{esc(name)}</b> <code>{count} 场</code>")
                         lines.append(THIN_SEP)
                     teams = fx.get("teams") or {}
                     # 列表是扫视场景，只放中文短名：双语全名实测中位数 25 列、

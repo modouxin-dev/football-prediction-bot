@@ -38,9 +38,53 @@ def team_name(raw: str | None, bilingual: bool = True) -> str:
     if not raw:
         return "?"
     cn = TEAM_NAMES.get(raw)
+    if not cn:
+        hit = _TEAM_INDEX.get(_team_key(raw))
+        cn = TEAM_NAMES.get(hit) if hit else None
     if not cn or not bilingual:
         return raw
     return f"{cn} ({raw})"
+
+# —— 队名归一化索引 ——
+# API-Football 对同一支队的写法并不唯一（"Fenerbahçe SK" / "Fenerbahce"、
+# "1. FC Köln" / "FC Koln"），精确匹配会漏。这里在导入期建一张归一化索引：
+# 去掉重音、标点、常见俱乐部词缀后做匹配。归一化只用于**找已收录的队**，
+# 找不到仍返回英文原名，绝不按发音或子串臆造中文名。
+import re as _re
+import unicodedata as _ud
+
+# 俱乐部通用词缀：剥离后 "Liverpool FC" 与 "Liverpool" 归一到同一个键
+_CLUB_TOKENS = frozenset(
+    "fc afc cf sc sv bv vfb vfl ac cd ud rc ca ec aa sk jk if bk fk ff "
+    "club de del della the 1909 1899 1846 1848 05 98 08".split()
+)
+
+
+def _team_key(name: str) -> str:
+    """队名归一键：去重音、去标点、去俱乐部词缀、小写、去多余空格。"""
+    s = _ud.normalize("NFKD", name or "")
+    s = "".join(ch for ch in s if not _ud.combining(ch))
+    s = s.lower().replace("&", " and ")
+    s = _re.sub(r"[^a-z0-9]+", " ", s)
+    tokens = [t for t in s.split() if t and t not in _CLUB_TOKENS]
+    return " ".join(tokens)
+
+
+def _build_team_index() -> dict[str, str]:
+    """TEAM_NAMES 的归一化索引；同一归一键冲突时保留最长原名（信息更全）。"""
+    idx: dict[str, str] = {}
+    for raw in TEAM_NAMES:
+        k = _team_key(raw)
+        if not k:
+            continue
+        prev = idx.get(k)
+        if prev is None or len(raw) > len(prev):
+            idx[k] = raw
+    return idx
+
+
+_TEAM_INDEX = _build_team_index()
+
 
 def team_short_name(raw: str | None) -> str:
     """列表用短名：已收录的队显示中文名，未收录的显示英文原名。
@@ -54,7 +98,12 @@ def team_short_name(raw: str | None) -> str:
     raw = (raw or "").strip()
     if not raw:
         return "?"
-    return TEAM_NAMES.get(raw) or raw
+    cn = TEAM_NAMES.get(raw)
+    if cn:
+        return cn
+    # 精确未命中时走归一化索引：同一个队在不同数据源里词缀/重音写法不同
+    hit = _TEAM_INDEX.get(_team_key(raw))
+    return TEAM_NAMES.get(hit) if hit else raw
 
 
 # 手机单行可读上限（显示宽度）。Telegram 消息气泡在常见 360dp 屏上约能放
