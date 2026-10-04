@@ -340,6 +340,13 @@ TEAM_NAMES: dict[str, str] = {
     "CA Platense": "普拉滕斯", "Platense": "普拉滕斯",
     "CA Central Córdoba de Santiago del Estero": "中央科尔多瓦",
     "Central Cordoba": "中央科尔多瓦",
+    # 省略省份的写法 / Province dropped: 埋点实测到数据源下发
+    # "Central Cordoba de Santiago"（少了 del Estero）。归一化后键是
+    # "central cordoba santiago"，与上面任何一条都不同 → 落空退回英文原名。
+    # 这里补上带/不带重音的常见写法，中文名相同，不构成索引冲突。
+    "Central Cordoba de Santiago": "中央科尔多瓦",
+    "Central Córdoba de Santiago": "中央科尔多瓦",
+    "Central Córdoba": "中央科尔多瓦",
     "Instituto AC Córdoba": "科尔多瓦学院", "Instituto Cordoba": "科尔多瓦学院",
     "CA Barracas Central": "中央巴卡拉斯", "Barracas Central": "中央巴卡拉斯",
     "Deportivo Riestra": "列斯特拉", "CA Sarmiento de Junín": "萨米恩托",
