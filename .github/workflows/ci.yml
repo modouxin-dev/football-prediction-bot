@@ -5,7 +5,8 @@ on:
     branches: [ci-debug]
 
 permissions:
-  contents: write
+  contents: read
+  issues: write
 
 jobs:
   test:
@@ -33,14 +34,12 @@ jobs:
           python -m pytest -q --tb=line -rf > /tmp/pytest.txt 2>&1
           code=$?
           if [ "$code" -ne 0 ]; then
-            B64=$(base64 -w0 /tmp/pytest.txt)
-            NAME="pytest-py${{ matrix.python-version }}-${{ github.run_id }}.txt"
-            curl -sS -X PUT \
+            BODY=$(jq -Rs . /tmp/pytest.txt)
+            curl -sS -X POST \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              "https://api.github.com/repos/modouxin-dev/football-prediction-bot/contents/$NAME" \
-              -d "{\"message\":\"ci: dump failing pytest output [skip ci]\",\"content\":\"$B64\",\"branch\":\"ci-debug\"}"
+              "https://api.github.com/repos/modouxin-dev/football-prediction-bot/issues" \
+              -d "{\"title\":\"CI 失败 py${{ matrix.python-version }} run${{ github.run_id }}\",\"body\":$BODY}"
           fi
           tail -60 /tmp/pytest.txt
           exit $code
