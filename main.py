@@ -12,7 +12,7 @@ import os
 import paths
 import pytz
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardMarkup, Update
@@ -174,10 +174,14 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
     else:
         multi_day = bool(getattr(service, "using_upcoming", False))
         day_label = cache.get("day_label") or getattr(service, "fixture_day_label", "") or label
+        # 日期导航条要能标出「你现在停在哪一天」，否则点完明天就分不清
+        # 看到的是哪天的球——尤其是今天没比赛、自动扩窗之后。
+        _active = target if mode == MODE_DATE else (cache.get("active_day"))
         text, markup, page, _ = ui.format_fixtures_page(
             items, tz, page, FX_PER_PAGE, day_label, multi_day=multi_day,
             empty_range=cache.get("season_range"),
             empty_source_ok=cache.get("status") != ST_NO_DATA,
+            active_day=_active,
         )
         # 三态渲染：有数据不啰嗦；窗口无比赛给范围+下一步；接口无数据说清真实原因
         note = cache.get("note")
@@ -341,6 +345,29 @@ async def on_fixtures_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["fx_mode"] = raw
     context.user_data["fx_page"] = 0
     # 清空缓存，强制按新模式重新查询（不同模式查询区间不同，不能复用）
+    context.application.bot_data["fx_cache"] = None
+    await show_fixtures(update, context, page=0)
+
+
+async def on_fixtures_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """日期导航条：点「明天」直接看明天的赛程，不用手打 /date 命令。
+
+    「明天有什么球」是最常见的需求，而它原本只能靠记命令完成——
+    按钮化的代价只是把偏移天数换算成具体日期，其余走既有的指定日期流程。
+    """
+    query = update.callback_query
+    _, _, raw = (query.data or "").partition(":")
+    await query.answer()
+    try:
+        offset = int(raw)
+    except (TypeError, ValueError):
+        offset = 0
+    offset = max(0, min(offset, 30))  # 只允许看未来一个月，防越界
+    tz = context.application.bot_data["settings"].timezone
+    day = (datetime.now(tz) + timedelta(days=offset)).date()
+    context.user_data["fx_mode"] = MODE_DATE
+    context.user_data["fx_date"] = day
+    context.user_data["fx_page"] = 0
     context.application.bot_data["fx_cache"] = None
     await show_fixtures(update, context, page=0)
 
@@ -542,6 +569,20 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.answer()
 
 
+async def on_panel_reopen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """「☰ 打开面板」按钮：把已收起的底部键盘重新展开。
+
+    Reply 键盘只能随消息下发，所以这里必须补发一条消息把键盘带下去；
+    不能只 answer 回调——那样键盘不会出现在屏幕上。
+    """
+    query = update.callback_query
+    await query.answer()
+    set_panel_state(context, PANEL_EXPANDED)
+    await reply_html(
+        query.message, PANEL_HINTS[PANEL_EXPANDED], ui.reply_menu_keyboard(True)
+    )
+
+
 async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """赛程里的 [⚽ 预测]：为单场比赛生成预测卡片。"""
     query = update.callback_query
@@ -633,6 +674,10 @@ def _panel_key_from_text(text: str) -> str | None:
     if normalized and normalized == _strip_emoji(PANEL_CLOSE_LABEL):
         return PANEL_COLLAPSED
     if normalized and normalized == _strip_emoji(PANEL_OPEN_LABEL):
+        return PANEL_EXPANDED
+    # 兼容旧写法：标签改成「打开面板」后，用户手打「菜单」仍应唤回面板，
+    # 而不是掉进菜单解析被当成未知输入。
+    if normalized in ("菜单", "打开面板", "展开面板"):
         return PANEL_EXPANDED
     return None
 
@@ -852,9 +897,11 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_mode, pattern=r"^fxm:(today|upcoming|next|date)$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_day, pattern=r"^fxd:\d+$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
     app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:.+$"))
     app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|ring|card|form|goals|h2h|schedule):.+$"))
+    app.add_handler(CallbackQueryHandler(on_panel_reopen, pattern=r"^panel:open$"))
     app.add_handler(CallbackQueryHandler(on_noop, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(home|deep|h2h|odds|refresh):.+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_text))
