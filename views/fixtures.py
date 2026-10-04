@@ -16,6 +16,8 @@ from templates import (
     BRAND_CN,
     LEAGUE_FLAGS,
     LEAGUE_NAMES,
+    LEAGUE_ORDER,
+    LEAGUE_SHORT,
     BRAND_EN,
     BULLET,
     DISCLAIMER,
@@ -103,6 +105,68 @@ def _day_nav_row(tz, active_day):
     return row
 
 
+def _league_of(fx: dict) -> int:
+    """取联赛 ID。数据源可能给字符串或 None，统一成 int，失败归 0。"""
+    raw = (fx.get("league") or {}).get("id")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _league_sort_key(league_id: int) -> tuple[int, int]:
+    """联赛先后：登记过的按 LEAGUE_ORDER，未登记的排最后并按 ID 升序。"""
+    try:
+        return (LEAGUE_ORDER.index(league_id), 0)
+    except ValueError:
+        return (len(LEAGUE_ORDER), league_id)
+
+
+def _kickoff_key(fx: dict, tz):
+    """开赛时间排序键。解析不出的排最后，而不是让整个排序炸掉。"""
+    k = parse_kickoff((fx.get("fixture") or {}).get("date"))
+    return k.astimezone(tz) if k else datetime.max.replace(tzinfo=tz)
+
+
+def _group_by_league(items: list[dict], tz) -> list[dict]:
+    """同联赛先聚成一堆，组内再按开赛时间排。
+
+    数据源返回的是按开赛时间排的全局序列，直接渲染的话五个联赛的比赛
+    会交替出现，同一个联赛标题被反复打印——分组标题就成了摆设，想只看
+    英超得自己在几十行里挑。聚合后标题只出现一次，才是真的分组。
+    """
+    return sorted(items, key=lambda f: (_league_sort_key(_league_of(f)), _kickoff_key(f, tz)))
+
+
+def _league_rows(all_items: list[dict], active_lid):
+    """联赛筛选按钮：每个有比赛的联赛一个，当前选中的打勾。
+
+    为什么用短名（英超）而不是全称（英格兰超级联赛）：4 个按钮平分一行
+    时每格只有约 8 列，全称会被截成「英格兰超…」，而国别恰恰是区分联赛
+    唯一有用的信息——截掉就等于没写。未登记短名的联赛回退全称，不丢弃。
+    """
+    seen: list[int] = []
+    for fx in all_items or ():
+        lid = _league_of(fx)
+        if lid and lid not in seen:
+            seen.append(lid)
+    if not seen:
+        return []
+    btns = []
+    for lid in seen:
+        name = LEAGUE_SHORT.get(lid) or LEAGUE_NAMES.get(lid) or f"联赛 {lid}"
+        flag = LEAGUE_FLAGS.get(lid, "⚽")
+        label = f"{flag}{name}"
+        if active_lid is not None and lid == active_lid:
+            label = f"✅{label}"
+        btns.append(InlineKeyboardButton(label, callback_data=f"fxl:{lid}"))
+    # 每行 4 个：再多手机上会换行挤压成两列窄条，短名也会被截断
+    rows = [btns[i:i + 4] for i in range(0, len(btns), 4)]
+    if active_lid is not None:
+        rows.append([InlineKeyboardButton("↩️ 全部联赛", callback_data="fxl:all")])
+    return rows
+
+
 def _progress_text(short: str, goals: dict | None) -> str:
     """进度列文本：已完场给比分（最有用），进行中给状态，未开始给「未开始」。
 
@@ -151,17 +215,39 @@ class FixturesView:
         empty_range: tuple[str, str] | None = None,
         empty_source_ok: bool = True,
         active_day=None,
+        all_items: list[dict] | None = None,
+        league_filter: int | None = None,
         ) -> tuple[str, InlineKeyboardMarkup, int, int]:
             """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。
     
             multi_day=True 表示这批赛程跨越多天（今日无比赛时扩展到未来），
             此时标题改为「近期赛程」，且每场比赛显示日期，避免用户误以为是今天的比赛。
+
+            league_filter 非 None 时只渲染该联赛，序号与「预测/分析」按钮
+            随之重排——否则点了「预测 3」会落到另一场完全不相干的比赛上。
             """
+            pool = list(all_items if all_items is not None else items)
+            if league_filter is not None:
+                items = [f for f in pool if _league_of(f) == league_filter]
+            elif not multi_day:
+                # 单日视图按联赛聚合：数据源给的是按开赛时间排的全局序列，
+                # 直接渲染会让各联赛比赛交替出现、同一标题反复打印。
+                items = _group_by_league(pool, tz)
+            else:
+                # 跨天视图按日期优先，日期小标题已经在行内分组了。
+                items = sorted(pool, key=lambda f: (_kickoff_key(f, tz),
+                                                    _league_sort_key(_league_of(f))))
             total_pages = max(1, -(-len(items) // per_page))
             page = min(max(page, 0), total_pages - 1)
             chunk = items[page * per_page : (page + 1) * per_page]
     
-            title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
+            if league_filter is not None:
+                lname = (LEAGUE_SHORT.get(league_filter)
+                         or LEAGUE_NAMES.get(league_filter) or f"联赛 {league_filter}")
+                lflag = LEAGUE_FLAGS.get(league_filter, "⚽")
+                title = f"{lflag} <b>{esc(lname)}{'近期' if multi_day else '今日'}赛程</b>"
+            else:
+                title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
             # 相对标签（今天/明天）放标题：按钮上放不下，标题没有宽度限制。
             rel_day = active_day if active_day is not None else datetime.now(tz).date()
             lines = [
@@ -188,6 +274,13 @@ class FixturesView:
                     else esc(day_label)
                 )
                 lines.append(f"<code>{esc(span_text)}</code>")
+                if league_filter is not None:
+                    # 筛选后为空要说清「是这个联赛今天没球」，而不是「系统坏了」，
+                    # 并给出直接看该联赛近期赛程的出口。
+                    lname = (LEAGUE_SHORT.get(league_filter)
+                             or LEAGUE_NAMES.get(league_filter) or f"联赛 {league_filter}")
+                    lines.append("")
+                    lines.append(f"🔎 当前仅看 <b>{esc(lname)}</b>，该联赛本时段无比赛。")
                 lines += ["", "你可以尝试："]
             else:
                 # 列宽按本页最长队名自适应：短名页面不浪费宽度，遇到
@@ -276,6 +369,9 @@ class FixturesView:
                         ]
                     )
                 flush_table()
+            # 联赛筛选条：先看全部联赛的分组总览，再点进关心的那一个。
+            # 放在日期导航条之前——筛选联赛比切日期更高频。
+            rows.extend(_league_rows(pool, league_filter))
             # 日期导航条：主流赛程站的标配。没有它，用户想看明天只能
             # 手打 /date 命令——而「明天有什么球」恰恰是最常见的需求。
             # 横排 4 天，当前所在日期打勾，一眼能看出自己停在哪一天。

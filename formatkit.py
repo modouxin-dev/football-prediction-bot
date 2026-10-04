@@ -203,8 +203,21 @@ def display_width(text: str) -> int:
     中英混排的表格错开，所以对齐必须按显示宽度算。
     """
     width = 0
-    for ch in text:
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        # 英格兰/苏格兰/威尔士旗是「黑旗 + 若干 tag 字符」的序列，渲染成
+        # 一个字形（2 列）。逐字符累加会把一个旗算成 8 列，按钮宽度判断
+        # 和任何含旗的等宽表格都会跟着算错。
+        if ch == "\U0001f3f4" and i + 1 < len(text) and 0xE0020 <= ord(text[i + 1]) <= 0xE007F:
+            j = i + 1
+            while j < len(text) and 0xE0020 <= ord(text[j]) <= 0xE007F:
+                j += 1
+            width += 2
+            i = j
+            continue
         width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        i += 1
     return width
 
 

@@ -177,15 +177,24 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
         # 日期导航条要能标出「你现在停在哪一天」，否则点完明天就分不清
         # 看到的是哪天的球——尤其是今天没比赛、自动扩窗之后。
         _active = target if mode == MODE_DATE else (cache.get("active_day"))
+        # 联赛筛选按用户隔离（user_data），赛程缓存是全局共享（bot_data）：
+        # 筛的是同一批数据，不重新请求，切联赛零延迟。
+        lid = context.user_data.get("fx_league")
+        if lid is not None:
+            try:
+                lid = int(lid)
+            except (TypeError, ValueError):
+                lid = None
         text, markup, page, _ = ui.format_fixtures_page(
             items, tz, page, FX_PER_PAGE, day_label, multi_day=multi_day,
             empty_range=cache.get("season_range"),
             empty_source_ok=cache.get("status") != ST_NO_DATA,
             active_day=_active,
+            all_items=items, league_filter=lid,
         )
         # 三态渲染：有数据不啰嗦；窗口无比赛给范围+下一步；接口无数据说清真实原因
         note = cache.get("note")
-        if not items and note:
+        if not items and note and lid is None:
             span = cache.get("season_range")
             if cache.get("status") == ST_NO_DATA:
                 err = cache.get("error")
@@ -377,6 +386,29 @@ async def on_fixtures_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     _, _, raw = (query.data or "").partition(":")
     await query.answer()
     await show_fixtures(update, context, page=int(raw))
+
+
+async def on_fixtures_league(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """点联赛按钮只看这一个联赛的赛程。
+
+    全部联赛一起列时，五大联赛的比赛会交替出现、同一联赛标题被反复打印，
+    想只看英超的比赛得自己在几十行里挑。筛选后序号与「预测/分析」按钮
+    一并重排，点「预测 3」落在的就是当前这个联赛的第 3 场。
+
+    筛选只切视图、不重新请求：赛程数据已在缓存里，切联赛零延迟。
+    """
+    query = update.callback_query
+    _, _, raw = (query.data or "").partition(":")
+    await query.answer()
+    if raw == "all":
+        context.user_data.pop("fx_league", None)
+    else:
+        try:
+            context.user_data["fx_league"] = int(raw)
+        except (TypeError, ValueError):
+            pass
+    context.user_data["fx_page"] = 0
+    await show_fixtures(update, context, page=0)
 
 
 async def show_standings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -898,6 +930,7 @@ def build_application(settings: Settings) -> Application:
     app.add_handler(CallbackQueryHandler(on_fixtures_page, pattern=r"^fxp:\d+$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_mode, pattern=r"^fxm:(today|upcoming|next|date)$"))
     app.add_handler(CallbackQueryHandler(on_fixtures_day, pattern=r"^fxd:\d+$"))
+    app.add_handler(CallbackQueryHandler(on_fixtures_league, pattern=r"^fxl:(all|-?\d+)$"))
     app.add_handler(CallbackQueryHandler(on_predict_fixture, pattern=r"^fx:.+$"))
     app.add_handler(CallbackQueryHandler(on_analysis_fixture, pattern=r"^fa:.+$"))
     app.add_handler(CallbackQueryHandler(on_chart, pattern=r"^chart:(prob|ring|card|form|goals|h2h|schedule):.+$"))
