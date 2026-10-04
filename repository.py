@@ -852,6 +852,63 @@ class PredictionRepository:
                 continue
         return out
 
+    def matches_with_predictions(self, day: str, *, limit: int = 300) -> list[dict]:
+        """指定日期（YYYY-MM-DD）的全部比赛，左连已生成的预测。
+
+        为什么连表而不是让上层自己拼：predictions 的键是 API fixture_id 的
+        **文本**形式，matches 的主键是**整数** id，两者写法还不一致
+        （"fd-123" vs 123）。上层各自拼接极易漏配，这里统一 CAST 后比较。
+
+        未生成预测的比赛 `prediction` 为 None —— 调用方据此显示「未预测」，
+        而不是假装成 0%，避免把「没算过」误读成「算出来是 0」。
+        """
+        try:
+            conn = self._connect()
+            rows = list(conn.execute(
+                """SELECT m.id AS match_id, m.competition_code AS comp,
+                          m.utc_date AS kickoff, m.status AS status,
+                          m.home_team_name AS home, m.away_team_name AS away,
+                          m.home_score AS hs, m.away_score AS aws,
+                          p.result AS pred_result, p.home_prob, p.draw_prob,
+                          p.away_prob, p.level_key,
+                          p.actual_home, p.actual_away
+                   FROM matches m
+                   LEFT JOIN predictions p ON p.fixture_id = CAST(m.id AS TEXT)
+                   WHERE substr(m.utc_date,1,10)=?
+                   ORDER BY m.competition_code, m.utc_date
+                   LIMIT ?""",
+                (str(day), int(limit)),
+            ))
+        except Exception as exc:
+            log.warning("读取当日赛程失败：%s", exc)
+            return []
+        out: list[dict] = []
+        for r in rows:
+            if r["pred_result"] is None:
+                pred = None
+            else:
+                pred = {
+                    "result": r["pred_result"],
+                    "home_prob": r["home_prob"],
+                    "draw_prob": r["draw_prob"],
+                    "away_prob": r["away_prob"],
+                    "level": r["level_key"],
+                }
+            out.append({
+                "fixture_id": str(r["match_id"]),
+                "competition": r["comp"],
+                "kickoff": r["kickoff"],
+                "status": r["status"],
+                "home": r["home"],
+                "away": r["away"],
+                "home_score": r["hs"],
+                "away_score": r["aws"],
+                "actual_home": r["actual_home"],
+                "actual_away": r["actual_away"],
+                "prediction": pred,
+            })
+        return out
+
     def matches_count(self) -> int:
         try:
             conn = self._connect()
