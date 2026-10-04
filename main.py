@@ -644,9 +644,13 @@ async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     消息孤零零挂着、机器人毫无反应，只会以为机器人掉线了。这里统一回一句
     并给出可用指令。
 
-    注册在 group=1：group 0 里的所有 CommandHandler 先跑，都没匹配才轮到
-    这里。用 group 而不是「放在最后注册」是因为后者依赖注册顺序，以后有人
-    在中间插入一个 handler 就会把它顶掉，而这种错误测试很难发现。
+    注册在 group=1，但**不能**依赖 group 顺序来判定「是否已被处理」：
+    PTB 的 process_update 会遍历所有 group，每个 group 内最多跑一个匹配
+    的 handler，跨 group 会继续往下走，只有抛 ApplicationHandlerStop 才
+    中断。也就是说 group 0 处理过的命令，group 1 里这个 handler 照样会被
+    触发。所以必须显式查 known_commands 白名单，命中就直接返回——否则
+    /start、/test 这类正常指令都会被追加一条「未识别的命令」，用户看到
+    指令执行了却报未识别，比静默忽略更迷惑。
     """
     message = update.effective_message
     if message is None or not message.text:
@@ -661,6 +665,9 @@ async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not name:
         return
     app = context.application
+    # 已注册指令：group 0 已经处理过了，这里必须安静返回。
+    if name in (app.bot_data.get("known_commands") or set()):
+        return
     settings: Settings = app.bot_data.get("settings")
     is_admin_user = settings is not None and is_admin(update, settings)
     if is_admin_user:
@@ -992,6 +999,9 @@ def register_commands(app: Application) -> int:
         (spec.name, spec.description)
         for spec in dispatcher.specs if spec.admin_only
     ]
+    # 已注册指令名的全集。兜底 handler 必须先查这张表，否则会把正常指令
+    # 也当成「未识别」——见 on_unknown_command 里的说明。
+    app.bot_data["known_commands"] = {spec.name.lower() for spec in dispatcher.specs}
     return len(dispatcher)
 
 
