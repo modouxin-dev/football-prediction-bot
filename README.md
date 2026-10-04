@@ -40,7 +40,7 @@ Telegram 足球量化预测机器人：用泊松模型估算比赛结果概率�
 | `LEAGUE_ID` / `SEASON` | | 默认 39（英超）/ 按日期推算的当前赛季 |
 | `LEAGUE_IDS` | | **多联赛**：逗号分隔，如 `39,140,78`。不填则只跑 `LEAGUE_ID` 单联赛（与旧版行为一致）。`league_ids[0]` 恒等于 `LEAGUE_ID` |
 | `PUSH_TIME` / `TIMEZONE` | | 默认 `08:00` / `Asia/Shanghai`。也兼容 `SCHEDULED_HOUR`、`SCHEDULED_MINUTE` |
-| `MAX_MATCHES` / `LOOKAHEAD_HOURS` | | 每次最多 3 场 / 只推未来 36 小时内开赛的比赛 |
+| `MAX_MATCHES` / `LOOKAHEAD_HOURS` | | 每次最多 50 场（须覆盖一个完整比赛日） / 只推未来 36 小时内开赛的比赛 |
 | `LOG_LEVEL` | | 默认 `INFO` |
 
 ### 存储与持久化

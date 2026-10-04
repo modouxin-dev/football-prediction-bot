@@ -261,13 +261,22 @@ async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: s
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
 
 
+def settings_timezone_of(service):
+    """取服务配置的时区，供汇总按本地自然日对齐赛程页。"""
+    return service.settings.timezone
+
+
 async def _build_digest_predictions(service) -> tuple[list, str | None]:
     """取今日预测；无比赛时放宽到 WIDE_HOURS，并返回说明文案。
 
     抽出是因为「按钮回调」和「底部键盘文字」两个入口都要用同一套取数逻辑，
     各写一份必然漂移（一个放宽了另一个没放宽，用户会看到两种不一致的结论）。
     """
-    predictions = await service.build_predictions()
+    # 用「本地自然日」窗口取数，与赛程页口径一致：
+    # 否则赛程显示 10-04 的比赛，汇总却按滚动 36 小时窗口跳到 10-05，
+    # 用户会看到两个模块日期对不上、场数也对不上。
+    today = datetime.now(settings_timezone_of(service)).date()
+    predictions = await service.build_predictions(day=today)
     note = service.last_note
     if not predictions:
         predictions = await service.build_predictions(lookahead_hours=WIDE_HOURS)

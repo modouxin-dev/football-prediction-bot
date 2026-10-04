@@ -33,6 +33,10 @@ H2H_MATCHES = 10  # 历史交锋取几场
 SEASON_FALLBACK_STEPS = 3  # 赛季不可用时，最多再向下降级几个赛季（不硬编码具体年份）
 UPCOMING_DAYS = 7
 
+# 未开赛状态：只认 NS 会漏掉 TBD（时间待定），赛程页显示了它预测却没有，
+# 用户就会看到「赛程 4 场、预测 3 场」这种对不上的现象。
+PRE_MATCH_STATUS = frozenset({"NS", "TBD"})
+
 # 赛程查询模式 / Fixture query modes
 MODE_TODAY = "today"        # 今日
 MODE_UPCOMING = "upcoming"  # 未来 N 天
@@ -269,6 +273,7 @@ class PredictionService:
         self.using_national_fallback: bool = False
         self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
+        self.truncated_count: int = 0  # 最近一次预测被上限砍掉的场数（0 表示未截断）
         self._store: OrderedDict[int, Prediction] = OrderedDict()
         # 预测落盘到机器人自身存储（SQLite），重启不丢，支撑命中率统计
         self.repo: PredictionRepository = PredictionRepository(getattr(settings, "db_path", None))
@@ -304,7 +309,7 @@ class PredictionService:
             info = fx.get("fixture") or {}
             kickoff = parse_kickoff(info.get("date"))
             status = (info.get("status") or {}).get("short")
-            if kickoff and status == "NS" and now <= kickoff <= end:
+            if kickoff and status in PRE_MATCH_STATUS and now <= kickoff <= end:
                 result.append((kickoff, fx))
         result.sort(key=lambda item: item[0])
         return result
@@ -361,18 +366,48 @@ class PredictionService:
             cache[lid] = model
         return model
 
+    @staticmethod
+    def _day_window(day, tz) -> tuple[datetime, datetime]:
+        """自然日 [00:00, 23:59:59] 在 UTC 下的区间。
+
+        赛程页按自然日取数，预测若按滚动小时窗口取数，两者就不是同一批比赛——
+        汇总标题会跳到别的日期（用户实测：赛程 10-04、汇总 10-05）。
+        要对齐就必须用同一套窗口，这里把本地自然日换算成 UTC 区间。
+        """
+        start = tz.localize(datetime(day.year, day.month, day.day, 0, 0, 0))
+        end = start + timedelta(days=1) - timedelta(seconds=1)
+        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
     async def build_predictions(
-        self, *, lookahead_hours: int | None = None, limit: int | None = None, now: datetime | None = None
+        self, *, lookahead_hours: int | None = None, limit: int | None = None,
+        now: datetime | None = None, day=None
     ) -> list[Prediction]:
-        """取未来 lookahead_hours 小时内尚未开赛的比赛，按开赛时间排序后生成预测。"""
+        """取未来 lookahead_hours 小时内尚未开赛的比赛，按开赛时间排序后生成预测。
+
+        day 给定时改用「本地自然日」窗口（00:00~23:59:59），与赛程页口径一致，
+        保证「今日赛程 N 场」和「今日预测汇总」是同一批比赛。
+        """
         s = self.settings
         now = now or datetime.now(timezone.utc)
-        end = now + timedelta(hours=lookahead_hours or s.lookahead_hours)
+        if day is not None:
+            start, end = self._day_window(day, s.timezone)
+            now = start
+        else:
+            end = now + timedelta(hours=lookahead_hours or s.lookahead_hours)
 
         # 按候选赛季探测：SEASON 过期或套餐不支持当前赛季时，自动向下降级
         fixtures, season, note = await self._fetch_fixtures_multi(now.date(), end.date())
         upcoming = self._upcoming(fixtures, now, end)
-        upcoming = upcoming[: limit or s.max_matches]
+        cap = limit or s.max_matches
+        # 截断必须留痕：赛程页按自然日显示全部比赛，预测若静默砍掉一部分，
+        # 用户会看到「赛程 4 场 / 预测 3 场」却无从判断是数据少了还是坏了。
+        self.truncated_count = max(0, len(upcoming) - cap)
+        upcoming = upcoming[:cap]
+        if self.truncated_count:
+            self.last_note = (
+                f"ℹ️ 该时段共 {len(upcoming) + self.truncated_count} 场未开赛比赛，"
+                f"本次只生成前 {len(upcoming)} 场的预测（上限 {cap} 场）。"
+            )
         if not upcoming:
             # 降级成功但旧赛季没有「未来」的比赛：必须说清原因，不能报成「今天没比赛」
             self.last_note = note or (

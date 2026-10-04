@@ -40,7 +40,8 @@ def test_missing_required_variables():
 
 def test_defaults_and_admin_fallback_to_private_chat_id():
     s = load_settings(BASE)
-    assert (s.league_id, s.max_matches, s.lookahead_hours) == (39, 3, 36)
+    # max_matches 默认必须能覆盖一个完整比赛日（默认 3 会让赛程与预测场数对不上）
+    assert (s.league_id, s.max_matches, s.lookahead_hours) == (39, 50, 36)
     assert s.timezone.zone == "Asia/Shanghai"
     assert s.push_time == time(8, 0)
     assert s.admin_ids == frozenset({555})

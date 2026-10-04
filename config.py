@@ -249,7 +249,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         push_time=parse_push_time(push_raw),
         timezone=tz,
         log_level=level,
-        max_matches=_get_int(env, "MAX_MATCHES", 3),
+        # 默认必须能覆盖一个完整比赛日：五大联赛一天可达 30+ 场，
+        # 默认 3 会让「赛程 4 场 / 预测 3 场」这种不一致成为常态。
+        max_matches=_get_int(env, "MAX_MATCHES", 50),
         lookahead_hours=_get_int(env, "LOOKAHEAD_HOURS", 36),
         season=season,
         season_mode=season_mode,
