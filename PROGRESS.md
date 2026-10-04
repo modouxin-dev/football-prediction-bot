@@ -1096,3 +1096,59 @@ Cuarto`、`Racing Club`、`Huracan`、`Aldosivi`），分组标题也是数据�
 | 4 | Web 页面美化 | 建议别的模型，我只供接口 |
 
 **红线**：未拿到数据库 schema 前，不写任何查询或迁移。
+
+---
+
+## 阶段 19：Web 看板今日赛程卡 + 默认日期时区修正
+
+**提交**：`9affad8`　**测试**：1031 passed / 1 skipped（基线 1028，+3）
+
+### 变更
+
+1. **修正 `/fixtures` 默认日期时区**（`api.py`）
+   原按 `datetime.now(timezone.utc)` 取「今天」，但项目时区是 `Asia/Shanghai`
+   （`config.py:192`）。上海时间 00:00–08:00 时 UTC 仍是前一天 →
+   **看板默认返回昨天赛程，与 Telegram 推送差一整天**。改为按 `TIMEZONE`
+   环境变量取（默认 Asia/Shanghai），时区无效时退化为 UTC 且不抛异常。
+
+2. **`web/index.html` 新增今日赛程卡**
+   并发请求 `/fixtures`，按联赛分组渲染：时间 / 对阵 / 比分或状态 / 预测。
+   「未预测」与「算出来是平局」明确区分（`prediction` 为 null 显示「未预测」）。
+   顶部显示日期，底部标注共 N 场 + 北京时间 + 免责声明。
+
+3. **队名中文化（Web 侧）**
+   `/audit` 用 `home_cn`/`away_cn`，`/strength` 用 `name_cn`，
+   均**保留原字段**（只追加不替换），未收录保持原名、不臆造。
+
+### 审计更正（前一轮判断作废）
+
+曾据「grep 只命中 1 处 fetch」推断前端没渲染 `/audit` `/strength`——**错误**。
+实际 fetch 被包进 `get()` 辅助函数（index.html:70），`load()` 里
+`Promise.all` 并发请求 4 个端点并全部渲染。教训：grep 命中数 ≠ 调用次数。
+
+### 变异验证
+
+- 第一次只测了 `_today()` 函数本身，把调用点改回 UTC **测试仍全绿**——
+  又犯了「只测底层、没测调用方」的老毛病。
+- 补 `test_fixtures_default_date_uses_project_tz`（从 HTTP 端点验证，
+  mock `_repo` 与 `datetime`）后：调用点改回 UTC → **1 条变红** ✅
+
+### 环境事实（避免重复试错）
+
+- 沙盒被清理过，`repo_now` 无 `.git`，依赖需重装
+  （`python-telegram-bot[job-queue]==20.3` `httpx==0.24.1` `pytz` `matplotlib` `fastapi`）。
+  缺 job-queue 会让 `test_bot.py` 2 条失败——**是环境问题，非代码问题**。
+- token 存于 `/data/workspace/.github_token`；`github.com` 直连被拦，走 `api.github.com`。
+
+### 待办队列（更新）
+
+| # | 事项 | 归属 |
+|---|---|---|
+| 1 | ~~Web 看板今日赛程 + 中文队名~~ | ✅ 完成（阶段 19） |
+| 2 | `/test` 等未知命令无回应 | 我 |
+| 3 | 键盘 ⌨️ 文案与实际不一致 | 我 |
+| 4 | Web 页面美化（配色/间距/字号） | **用户已安排别的模型**，我只供接口 |
+
+**阶段三方向**：多联赛接入 ✅ + Web 看板同步（数据随 TG 机器人实时更新）✅
++ 历史数据 / 预测 / 回测命中率展示——历史与命中率已有 `/audit` `/stats`
+`/health/model`，Elo 有 `/strength`，**均已在前端渲染**，待美化验收。
