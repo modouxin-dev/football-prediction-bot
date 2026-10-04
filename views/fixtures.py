@@ -1,11 +1,13 @@
 """赛程视图 / Fixtures view
 
-本文件内的文案与生成它的逻辑同在一处，改文案只动这一个文件。
-"""
+本文件内的文案与生成它的逻辑同在一处，改文案只动这一个文件。"""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+
+# 日期导航条显示的天数：4 天是手机上不换行的上限，再多只能滚动。
+DAY_NAV_SPAN = 4
 
 from analyzer import OUTCOMES, calculate_prediction_level, overround
 from service import MODEL_VERSION, parse_kickoff
@@ -45,6 +47,27 @@ from formatkit import (
     web_entry_text,
 )
 
+def _day_nav_row(tz, active_day):
+    """生成横排日期导航：今天起连续 4 天，active_day 打勾标记。
+
+    用 ✅ 而不是括号标注当前项——手机上窄按钮里多两个字符就会被挤成
+    省略号，反而看不出选中了谁。
+    """
+    base = datetime.now(tz).date()
+    row = []
+    for offset in range(DAY_NAV_SPAN):
+        day = base + timedelta(days=offset)
+        label = f"{day.strftime('%m-%d')}"
+        if offset == 0:
+            label = f"今天 {label}"
+        elif offset == 1:
+            label = f"明天 {label}"
+        if active_day == day:
+            label = f"✅ {label}"
+        row.append(InlineKeyboardButton(label, callback_data=f"fxd:{offset}"))
+    return row
+
+
 class FixturesView:
         @staticmethod
         def format_fixtures_page(
@@ -52,6 +75,7 @@ class FixturesView:
             multi_day: bool = False,
         empty_range: tuple[str, str] | None = None,
         empty_source_ok: bool = True,
+        active_day=None,
         ) -> tuple[str, InlineKeyboardMarkup, int, int]:
             """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。
     
@@ -134,6 +158,11 @@ class FixturesView:
                             InlineKeyboardButton(f"📊 分析 {idx}", callback_data=f"fa:{info.get('id')}"),
                         ]
                     )
+            # 日期导航条：主流赛程站的标配。没有它，用户想看明天只能
+            # 手打 /date 命令——而「明天有什么球」恰恰是最常见的需求。
+            # 横排 4 天，当前所在日期打勾，一眼能看出自己停在哪一天。
+            rows.append(_day_nav_row(tz, active_day))
+
             if not chunk:
                 # 空状态直接给可继续操作的按钮，避免用户以为系统坏了
                 rows.append([
