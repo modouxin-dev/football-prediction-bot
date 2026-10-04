@@ -456,6 +456,15 @@ TEAM_NAMES: dict[str, str] = {
     "GAIS": "盖斯", "Östers IF": "厄斯特斯", "Osters IF": "厄斯特斯",
     "IFK Värnamo": "韦纳穆", "IFK Varnamo": "韦纳穆",
     "Örebro SK": "厄勒布鲁", "Orebro SK": "厄勒布鲁",
+    # —— 联赛扩容后，/teammiss 埋点导出的真实原名（2026-10-05 首次采集）——
+    # 西乙/英冠等新联赛接入后，数据源下发的写法与上面收录的全名对不上，例如
+    # "RCD Espanyol de Barcelona"（收录的是 "RCD Espanyol"）。这里按埋点
+    # **实测到的字符串**逐条补录，不按规律推演。
+    # 另有一类短名（Tottenham / Newcastle / Leeds / Brighton）由 formatkit 的
+    # 前缀回退自动覆盖，无需硬录——硬录反而会让「机制失效」测不出来。
+    "Tenerife": "特内里费", "Cordoba": "科尔多瓦",
+    "RCD Espanyol de Barcelona": "西班牙人", "Málaga CF": "马拉加",
+    "Coventry": "考文垂", "Ipswich": "伊普斯维奇", "Hull City": "赫尔城",
 }
 
 

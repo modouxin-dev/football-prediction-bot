@@ -1505,3 +1505,39 @@ DB 里已结算的预测 `result` 字段全为 `'pending'`，而命中判定是
 python-telegram-bot[job-queue] fastapi uvicorn`
 缺 `job-queue` 会让 `test_bot.py` 2 条 RuntimeError 失败（PTB 警告已指明），
 非代码问题。httpx 0.24.1 与 jupyterlab 冲突的警告无害。
+
+---
+
+## 阶段 27 · 联赛扩容后的队名短名回退
+
+**背景**：联赛从 17 个扩到 55 个（Railway `LEAGUE_IDS` 配置），新联赛队名
+大面积退回英文。用户发 `/teammiss` 导出 12 个真实未翻译原名。
+
+**12 个名字其实是两类问题**：
+
+| 类型 | 例子 | 解法 |
+|---|---|---|
+| 数据源下发**短名**（去掉通名） | Tottenham / Newcastle / Leeds / Brighton | 前缀回退自动覆盖 |
+| 写法与收录名**不同** | Tenerife / Cordoba / RCD Espanyol de Barcelona / Málaga CF / Coventry / Ipswich / Hull City | 硬录真实字符串 |
+| 已收录（误报） | Central Cordoba de Santiago | 无需处理 |
+
+前缀回退：把索引键按 token 切出的**真前缀**登记，**仅唯一时采用**。
+三道闸门：值存原名（不存归一键）、本身是完整键则排除、是冲突键则排除。
+
+### 本轮犯的错（必须记住）
+
+1. **用落后副本整体覆盖干净副本** —— `repo_now` 缺 3 个测试文件与 `teammiss.py`，
+   直接 `cp` 过去等于回退远端改动，导致 7 条已有测试变红。
+   **规则：只允许在当轮新拉的干净副本上做增量编辑，禁止整文件覆盖。**
+2. **基于落后副本写测试断言** —— 断言 `Central Cordoba de Santiago` 未收录，
+   实际远端已收录，测试自造失败。**断言必须先回读当轮副本确认。**
+3. **测试因"前缀索引值存归一键"静默失效** —— 索引里明明有键，`TEAM_NAMES.get()`
+   却查不到（键是原名不是归一化键）。**返回值语义必须与调用方一致。**
+
+### 验证
+
+- 12/12 命中（前缀 5 + 硬录 7，其中 1 条本就收录）
+- **1160 passed / 1 skipped / 0 failed**（基线 1131 + 新增 30，精确吻合）
+- 埋点假名 `Zzz Unknown FC` / `Ppp Persisted One` 仍正确不命中
+- 变异 5 次全被拦截：去回退→12 红；值存归一键→13 红；不排除完整键→2 红；
+  不排除冲突键→2 红；允许歧义→2 红

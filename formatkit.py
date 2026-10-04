@@ -39,7 +39,8 @@ def team_name(raw: str | None, bilingual: bool = True) -> str:
         return "?"
     cn = TEAM_NAMES.get(raw)
     if not cn:
-        hit = _TEAM_INDEX.get(_team_key(raw))
+        key = _team_key(raw)
+        hit = _TEAM_INDEX.get(key) or _TEAM_PREFIX.get(key)
         cn = TEAM_NAMES.get(hit) if hit else None
     if not cn:
         note_unmatched(raw)
@@ -139,7 +140,43 @@ def _build_team_index() -> tuple[dict[str, str], dict[str, list[str]]]:
     return idx, collisions
 
 
+def _build_prefix_index(
+    idx: dict[str, str], collisions: dict[str, list[str]]
+) -> dict[str, str]:
+    """短名前缀索引 / Short-name prefix index.
+
+    把联赛从 17 个扩到 55 个后暴露出的规律：数据源常下发**不带通名的短名**
+    （"Tottenham"、"Newcastle"、"Leeds"、"Brighton"），而 TEAM_NAMES 收录的是
+    全名（"Tottenham Hotspur FC"）。两者归一化后键不同（"tottenham" vs
+    "tottenham hotspur"），精确匹配必然落空，退回英文原名。
+
+    这里把每个索引键按 token 切出的**真前缀**登记下来，但**只在唯一时采用**——
+    若多个不同的队共用同一前缀（"manchester" 同时是 united 与 city 的前缀），
+    一律不进索引。宁可退回英文原名，也不张冠李戴。
+    """
+    buckets: dict[str, set[str]] = {}
+    for k in idx:
+        toks = k.split()
+        # 只取真前缀（不含完整键本身，完整键由 _TEAM_INDEX 精确命中）
+        for i in range(1, len(toks)):
+            buckets.setdefault(" ".join(toks[:i]), set()).add(k)
+
+    # 三道闸门，缺一不可：
+    # 1) 值必须存**原名**而非归一键——调用方拿它去查 TEAM_NAMES（键是数据源
+    #    原名），存成归一键会静默查不到，前缀索引形同虚设。
+    # 2) 前缀若**本身已经是某支队的完整键**，视为歧义。"Suwon" 既是水原FC 的
+    #    完整键，又是水原三星的前缀；只按「贡献者唯一」判断会误判成无歧义。
+    # 3) 前缀若**已是已知冲突键**（"vitoria" = 巴西维多利亚 vs 葡萄牙吉马良斯），
+    #    同样不进——它虽没进 idx，但语义上就是歧义的。
+    return {
+        p: idx[next(iter(v))]
+        for p, v in buckets.items()
+        if len(v) == 1 and p not in idx and p not in collisions
+    }
+
+
 _TEAM_INDEX, TEAM_COLLISIONS = _build_team_index()
+_TEAM_PREFIX = _build_prefix_index(_TEAM_INDEX, TEAM_COLLISIONS)
 
 # —— 未命中埋点 ——
 # 静态收录表永远滞后：新赛季升班马、新联赛、数据源改写法，都会冒出没收录的
@@ -215,8 +252,10 @@ def team_short_name(raw: str | None) -> str:
     cn = TEAM_NAMES.get(raw)
     if cn:
         return cn
-    # 精确未命中时走归一化索引：同一个队在不同数据源里词缀/重音写法不同
-    hit = _TEAM_INDEX.get(_team_key(raw))
+    # 精确未命中时走归一化索引：同一个队在不同数据源里词缀/重音写法不同；
+    # 再未命中则走前缀索引（数据源常下发不带通名的短名）
+    key = _team_key(raw)
+    hit = _TEAM_INDEX.get(key) or _TEAM_PREFIX.get(key)
     cn = TEAM_NAMES.get(hit) if hit else None
     if cn:
         return cn
