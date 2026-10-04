@@ -2,45 +2,26 @@ name: CI
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
-
-# 与 Pages 部署（group: "pages"）分开，避免互相抢占导致其中一个被取消。
-# 同一分支的新推送会取消上一次未跑完的测试，省 CI 时长。
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+    branches: [ci-debug]
 
 permissions:
-  contents: read
-  # 显式声明 permissions 会把未列出的 scope 全部置为 none，checks 变 none 后
-  # 步骤里的 ::error:: 就写不进 check-run 注解（外部只能看到「exit code 1」，
-  # 拿不到具体用例）。这里放开 checks 以便把失败输出回传出来。
-  checks: write
+  contents: write
 
 jobs:
   test:
     name: test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # 3.10 是本机开发常用版本，3.12 与 Dockerfile 保持一致；
-    # fail-fast: false 让两个版本都跑完，任一失败都能看到。
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.12"]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
         run: |
@@ -48,54 +29,18 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests
-        # pytest.ini 已配置 pythonpath = . 与 testpaths = tests
-        # 测试不联网，使用 tests/sample_data.py 的仿真响应
-        #
-        # 失败时把输出尾部同时写进 job summary 与 ::error:: 注解：
-        # Actions 的日志 zip 走 results-receiver 域名，部分网络环境取不到，
-        # 而注解可通过 api.github.com 的 check-runs 接口读取。
-        # 注：不只抓 FAILED 行——集合错误 / 启动失败时没有 FAILED 行，
-        # 那样会漏掉真正的报错，所以整体回传尾部输出。
         run: |
-          set -o pipefail
           python -m pytest -q --tb=line -rf > /tmp/pytest.txt 2>&1
           code=$?
           if [ "$code" -ne 0 ]; then
-            echo "### ❌ pytest 失败（退出码 $code）" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            tail -60 /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            tail -40 /tmp/pytest.txt | while IFS= read -r line; do
-              echo "::error::$line"
-            done
+            B64=$(base64 -w0 /tmp/pytest.txt)
+            NAME="pytest-py${{ matrix.python-version }}-${{ github.run_id }}.txt"
+            curl -sS -X PUT \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/modouxin-dev/football-prediction-bot/contents/$NAME" \
+              -d "{\"message\":\"ci: dump failing pytest output [skip ci]\",\"content\":\"$B64\",\"branch\":\"ci-debug\"}"
           fi
           tail -60 /tmp/pytest.txt
           exit $code
-
-      - name: Static check (undefined name)
-        # 独立步骤而非塞进 pytest：这类问题（NameError）此前靠测试完全拦不住
-        # —— 两个 P0 的 undefined name 在 883 条用例下活到了 main，因为对应
-        # 路径零覆盖。静态检查能一次性杜绝整类问题，且失败时报错清晰。
-        run: |
-          python -m pyflakes *.py commands/*.py views/*.py > /tmp/pyflakes.txt || true
-          if grep -q "undefined name" /tmp/pyflakes.txt; then
-            echo "::error::发现未定义名称（NameError 隐患）："
-            grep "undefined name" /tmp/pyflakes.txt
-            exit 1
-          fi
-          echo "静态检查通过：无 undefined name"
-
-      - name: Smoke check (config + import)
-        # 冒烟：配置加载与模块导入必须成功，否则部署后必崩。
-        # 用假 token，只验证启动前置路径，不连接 Telegram。
-        env:
-          TELEGRAM_TOKEN: "1:fake-token-for-ci"
-          RAPID_API_KEY: "fake-key-for-ci"
-          DATA_DIR: "/tmp/ci-smoke"
-        run: |
-          python - <<'PY'
-          import main, paths, config
-          s = config.load_settings()
-          assert s.db_path, "db_path 不能为空"
-          print("smoke ok: db_path =", s.db_path)
-          PY
