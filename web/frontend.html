@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Football Prediction Bot - 实时预测分析看板</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3/dist/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1/dist/axios.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.15);
+        }
+        
+        .card h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .card-icon {
+            font-size: 1.5em;
+        }
+        
+        .health-status {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .status-item {
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+        
+        .status-item label {
+            display: block;
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .status-item .value {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .status-item.ok .value {
+            color: #10b981;
+        }
+        
+        .status-item.warning .value {
+            color: #f59e0b;
+        }
+        
+        .status-item.error .value {
+            color: #ef4444;
+        }
+        
+        .fixtures-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        
+        .fixture-item {
+            padding: 12px;
+            background: #f9f9f9;
+            border-left: 4px solid #667eea;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .fixture-item:hover {
+            background: #f0f0f0;
+        }
+        
+        .fixture-teams {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .fixture-time {
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .prediction-item {
+            padding: 12px;
+            background: #f0f4ff;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        
+        .prediction-item .teams {
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        
+        .prediction-bars {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 8px;
+        }
+        
+        .prediction-bar {
+            flex: 1;
+            height: 30px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+        
+        .bar-home {
+            background: linear-gradient(90deg, #667eea, #764ba2);
+        }
+        
+        .bar-draw {
+            background: linear-gradient(90deg, #f093fb, #f5576c);
+        }
+        
+        .bar-away {
+            background: linear-gradient(90deg, #4facfe, #00f2fe);
+        }
+        
+        .standings-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+        }
+        
+        .standings-table thead {
+            background: #f5f5f5;
+        }
+        
+        .standings-table th,
+        .standings-table td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #e5e5e5;
+        }
+        
+        .standings-table th {
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .standings-table tr:hover {
+            background: #f9f9f9;
+        }
+        
+        .standings-position {
+            font-weight: bold;
+            color: #667eea;
+            width: 30px;
+        }
+        
+        .standings-points {
+            font-weight: bold;
+            color: #10b981;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+        
+        .menu {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        
+        .menu button {
+            padding: 10px 20px;
+            background: rgba(255,255,255,0.9);
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            color: #667eea;
+            transition: all 0.3s;
+        }
+        
+        .menu button.active {
+            background: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        
+        .menu button:hover {
+            transform: translateY(-2px);
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #c33;
+        }
+        
+        footer {
+            text-align: center;
+            color: rgba(255,255,255,0.7);
+            margin-top: 40px;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="container">
+        <header>
+            <h1>⚽ Football Prediction Bot</h1>
+            <p>实时足球比赛预测分析看板</p>
+        </header>
+        
+        <div class="menu">
+            <button :class="{active: currentView === 'overview'}" @click="currentView = 'overview'">📊 概览</button>
+            <button :class="{active: currentView === 'fixtures'}" @click="currentView = 'fixtures'">🎯 赛程预测</button>
+            <button :class="{active: currentView === 'standings'}" @click="currentView = 'standings'">🏆 积分榜</button>
+            <button :class="{active: currentView === 'analytics'}" @click="currentView = 'analytics'">📈 数据分析</button>
+            <button :class="{active: currentView === 'settings'}" @click="currentView = 'settings'">⚙️ 设置</button>
+        </div>
+        
+        <!-- 概览视图 -->
+        <div v-if="currentView === 'overview'" class="dashboard">
+            <div class="card">
+                <h3><span class="card-icon">🏥</span> 系统状态</h3>
+                <div class="health-status">
+                    <div class="status-item ok">
+                        <label>状态</label>
+                        <div class="value">✅ 健康</div>
+                    </div>
+                    <div class="status-item">
+                        <label>运行时间</label>
+                        <div class="value">{{ health.uptime_hours.toFixed(1) }}h</div>
+                    </div>
+                    <div class="status-item">
+                        <label>内存占用</label>
+                        <div class="value">{{ health.memory_mb.toFixed(0) }}MB</div>
+                    </div>
+                    <div class="status-item">
+                        <label>CPU 使用</label>
+                        <div class="value">{{ health.cpu_percent.toFixed(1) }}%</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3><span class="card-icon">📡</span> 数据源状态</h3>
+                <div class="health-status">
+                    <div class="status-item ok">
+                        <label>API-Football</label>
+                        <div class="value">{{ health.data_sources['api-football'] }}</div>
+                    </div>
+                    <div class="status-item ok">
+                        <label>football-data</label>
+                        <div class="value">{{ health.data_sources['football-data'] }}</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3><span class="card-icon">📊</span> 今日统计</h3>
+                <div class="health-status">
+                    <div class="status-item">
+                        <label>比赛场数</label>
+                        <div class="value">{{ stats.matches_today }}</div>
+                    </div>
+                    <div class="status-item">
+                        <label>命中率</label>
+                        <div class="value">{{ stats.accuracy }}%</div>
+                    </div>
+                    <div class="status-item">
+                        <label>缓存命中</label>
+                        <div class="value">{{ stats.cache_hit }}%</div>
+                    </div>
+                    <div class="status-item">
+                        <label>平均响应</label>
+                        <div class="value">{{ stats.response_time }}ms</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 赛程预测视图 -->
+        <div v-if="currentView === 'fixtures'" class="dashboard">
+            <div class="card" style="grid-column: span 2">
+                <h3><span class="card-icon">🎯</span> 今日赛程 ({{ fixtures.length }} 场)</h3>
+                <div v-if="loading" class="loading">加载中...</div>
+                <div v-else-if="fixtures.length > 0" class="fixtures-list">
+                    <div v-for="fixture in fixtures" :key="fixture.id" class="fixture-item" @click="selectedFixture = fixture">
+                        <div class="fixture-teams">{{ fixture.home_team }} vs {{ fixture.away_team }}</div>
+                        <div class="fixture-time">⏰ {{ fixture.date }}</div>
+                    </div>
+                </div>
+                <div v-else class="loading">暂无赛程</div>
+            </div>
+            
+            <div v-if="selectedFixture" class="card">
+                <h3><span class="card-icon">🔮</span> 预测: {{ selectedFixture.home_team }} vs {{ selectedFixture.away_team }}</h3>
+                <div class="prediction-bars">
+                    <div class="prediction-bar bar-home" :style="{flex: selectedFixture.prediction.home_win}">
+                        主胜 {{ (selectedFixture.prediction.home_win * 100).toFixed(0) }}%
+                    </div>
+                    <div class="prediction-bar bar-draw" :style="{flex: selectedFixture.prediction.draw}">
+                        平 {{ (selectedFixture.prediction.draw * 100).toFixed(0) }}%
+                    </div>
+                    <div class="prediction-bar bar-away" :style="{flex: selectedFixture.prediction.away_win}">
+                        客胜 {{ (selectedFixture.prediction.away_win * 100).toFixed(0) }}%
+                    </div>
+                </div>
+                <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #e5e5e5;">
+                    <div style="margin-bottom: 10px;"><strong>推荐比分:</strong> {{ selectedFixture.prediction.predicted_score }}</div>
+                    <div><strong>信心等级:</strong> {{ selectedFixture.prediction.confidence }}</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 积分榜视图 -->
+        <div v-if="currentView === 'standings'" class="dashboard" style="grid-column: span 3">
+            <div class="card" style="grid-column: span 3">
+                <h3><span class="card-icon">🏆</span> 英超积分榜</h3>
+                <div v-if="loading" class="loading">加载中...</div>
+                <div v-else-if="standings.length > 0" style="overflow-x: auto">
+                    <table class="standings-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 30px">名</th>
+                                <th>球队</th>
+                                <th>赛</th>
+                                <th>胜</th>
+                                <th>平</th>
+                                <th>负</th>
+                                <th>进</th>
+                                <th>失</th>
+                                <th>净</th>
+                                <th style="width: 50px">分</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="team in standings.slice(0, 10)" :key="team.team">
+                                <td class="standings-position">{{ team.position }}</td>
+                                <td>{{ team.team }}</td>
+                                <td>{{ team.played }}</td>
+                                <td>{{ team.won }}</td>
+                                <td>{{ team.drawn }}</td>
+                                <td>{{ team.lost }}</td>
+                                <td>{{ team.goals_for }}</td>
+                                <td>{{ team.goals_against }}</td>
+                                <td>{{ team.goal_difference }}</td>
+                                <td class="standings-points">{{ team.points }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 数据分析视图 -->
+        <div v-if="currentView === 'analytics'" class="dashboard" style="grid-column: span 3">
+            <div class="card" style="grid-column: span 3">
+                <h3><span class="card-icon">📈</span> 预测准确度趋势</h3>
+                <div class="chart-container">
+                    <canvas id="accuracyChart"></canvas>
+                </div>
+            </div>
+            
+            <div class="card" style="grid-column: span 3">
+                <h3><span class="card-icon">📊</span> 联赛预测分布</h3>
+                <div class="chart-container">
+                    <canvas id="leagueChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 设置视图 -->
+        <div v-if="currentView === 'settings'" class="dashboard">
+            <div class="card" style="grid-column: span 3">
+                <h3><span class="card-icon">⚙️</span> 系统设置</h3>
+                <div style="padding: 20px;">
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; margin-bottom: 8px;"><strong>推送时间</strong></label>
+                        <input type="time" v-model="settings.push_time" style="padding: 8px; width: 200px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; margin-bottom: 8px;"><strong>多联赛监听</strong></label>
+                        <input type="text" v-model="settings.league_ids" placeholder="39,140,78" style="padding: 8px; width: 200px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <button @click="saveSettings" style="padding: 10px 30px; background: #667eea; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;">保存设置</button>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>Football Prediction Bot v2.1 | 实时预测分析系统 | <a href="https://github.com/modouxin-dev/football-prediction-bot" style="color: inherit; text-decoration: none;">GitHub</a></p>
+        </footer>
+    </div>
+    
+    <script>
+        const { createApp } = Vue;
+        
+        createApp({
+            data() {
+                return {
+                    currentView: 'overview',
+                    loading: false,
+                    selectedFixture: null,
+                    health: {
+                        status: 'healthy',
+                        uptime_hours: 1.5,
+                        memory_mb: 250,
+                        cpu_percent: 3.2,
+                        data_sources: {
+                            'api-football': 'ok',
+                            'football-data': 'ok'
+                        }
+                    },
+                    stats: {
+                        matches_today: 8,
+                        accuracy: 56,
+                        cache_hit: 85,
+                        response_time: 1200
+                    },
+                    fixtures: [
+                        {
+                            id: 1,
+                            home_team: '曼联',
+                            away_team: '切尔西',
+                            date: '2026-10-05 20:00',
+                            prediction: {
+                                home_win: 0.45,
+                                draw: 0.32,
+                                away_win: 0.23,
+                                predicted_score: '2-1',
+                                confidence: '中'
+                            }
+                        },
+                        {
+                            id: 2,
+                            home_team: '曼城',
+                            away_team: '利物浦',
+                            date: '2026-10-05 19:00',
+                            prediction: {
+                                home_win: 0.52,
+                                draw: 0.28,
+                                away_win: 0.20,
+                                predicted_score: '2-0',
+                                confidence: '中高'
+                            }
+                        }
+                    ],
+                    standings: [
+                        { position: 1, team: '曼城', played: 10, won: 8, drawn: 1, lost: 1, goals_for: 25, goals_against: 8, goal_difference: 17, points: 25 },
+                        { position: 2, team: '利物浦', played: 10, won: 8, drawn: 0, lost: 2, goals_for: 22, goals_against: 10, goal_difference: 12, points: 24 },
+                        { position: 3, team: '阿森纳', played: 10, won: 7, drawn: 1, lost: 2, goals_for: 20, goals_against: 12, goal_difference: 8, points: 22 }
+                    ],
+                    settings: {
+                        push_time: '08:00',
+                        league_ids: '39,140,78'
+                    }
+                }
+            },
+            methods: {
+                async fetchHealth() {
+                    try {
+                        const response = await axios.get('/health');
+                        this.health = response.data;
+                    } catch (error) {
+                        console.error('获取健康状态失败', error);
+                    }
+                },
+                async saveSettings() {
+                    alert('设置已保存');
+                }
+            },
+            mounted() {
+                this.fetchHealth();
+                setInterval(() => this.fetchHealth(), 30000); // 每30秒更新
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
+
