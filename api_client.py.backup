@@ -1,4 +1,4 @@
-"""API-Football 异步客户端：超时、重试、错误翻译、统一缓存。
+"""API-Football 异步客户端：超时、重试、错误翻译、内存缓存。
 
 支持两种订阅渠道（接口完全相同，只有地址和鉴权头不同）：
   - rapidapi ：RapidAPI 订阅，使用 RAPID_API_KEY
@@ -14,23 +14,6 @@ from typing import Any, Callable
 
 import httpx
 
-# 使用全局缓存管理器（防止内存泄漏）
-try:
-    from cache_manager import api_cache
-except ImportError:
-    # 如果 cache_manager 不可用，创建简单的本地缓存（向后兼容）
-    class SimpleCache:
-        def __init__(self):
-            self._cache = {}
-        
-        async def get(self, key):
-            return self._cache.get(key)
-        
-        async def set(self, key, value, ttl=None):
-            self._cache[key] = value
-    
-    api_cache = SimpleCache()
-
 log = logging.getLogger(__name__)
 
 RAPID_HOST = "api-football-v1.p.rapidapi.com"
@@ -45,17 +28,17 @@ PROVIDERS: dict[str, tuple[str, Callable[[str], dict[str, str]]]] = {
     ),
 }
 
-# 缓存时长（秒）
+# 缓存时长（秒）：尽量节省免费套餐很紧张的请求额度
 TTL_FIXTURES = 30 * 60
 TTL_STANDINGS = 6 * 3600
 TTL_ODDS = 15 * 60
 TTL_H2H = 12 * 3600
-TTL_FORM = 12 * 3600
-TTL_STATUS = 5 * 60
-TTL_SEASONS = 24 * 3600
-TTL_SEASON_FIXTURES = 6 * 3600
-TTL_INJURIES = 3 * 3600
-TTL_STATS = 24 * 3600
+TTL_FORM = 12 * 3600  # 球队近期战绩（深度分析用，变化慢）
+TTL_STATUS = 5 * 60  # /status 诊断用的账户额度查询
+TTL_SEASONS = 24 * 3600  # 账号可用赛季列表（几乎不变，缓存一天，省额度）
+TTL_SEASON_FIXTURES = 6 * 3600  # 整季赛程（历史赛季不会变，缓存 6 小时）
+TTL_INJURIES = 3 * 3600  # 伤停名单（一天内变化不大，缓存 3 小时）
+TTL_STATS = 24 * 3600  # 单场技术统计：已完场的比赛不会变，缓存一天省额度
 
 HTTP_HINTS = {
     401: "API Key 无效或缺失",
@@ -69,11 +52,17 @@ class APIError(RuntimeError):
     """数据源返回错误（额度用尽、订阅无效、参数错误等）。"""
 
 
+# 射正数在 API-Football 里的字段名随版本不同：官方 v3 用 "Shots on Goal"，
+# 部分文档/镜像写作 "Shots on Target"。两者都认，避免只认一个导致静默失效。
 SHOT_ON_TARGET_TYPES = ("Shots on Goal", "Shots on Target")
 
 
 def _stat_value(statistics: list[dict], types: tuple[str, ...]) -> int | None:
-    """在单队的 statistics 数组里取出计数值。"""
+    """在单队的 statistics 数组里取出计数值。
+
+    只接受可转成整数的计数：百分比字符串（"57%"）是比例而非次数，
+    拿它当计数会让强度量纲直接错掉，必须判为取不到。
+    """
     for item in statistics or []:
         if not isinstance(item, dict):
             continue
@@ -87,6 +76,8 @@ def _stat_value(statistics: list[dict], types: tuple[str, ...]) -> int | None:
         if isinstance(v, float):
             return int(v)
         if isinstance(v, str):
+            # 百分比（"57%"）等比例值会被 int() 拒绝，落入下面的 None，
+            # 不会误当次数 —— 无需额外判断，写了反而与此处重复。
             try:
                 return int(v.strip())
             except ValueError:
@@ -109,7 +100,15 @@ def stat_types_of(response: list[dict]) -> list[str]:
 
 def parse_shots_on_target(response: list[dict], *,
                           home_team_id=None, away_team_id=None) -> dict[str, int] | None:
-    """从 /fixtures/statistics 响应解析主客队射正数。"""
+    """从 /fixtures/statistics 响应解析主客队射正数。
+
+    返回 {"home": int, "away": int}；任一侧取不到就返回 None —— 
+    半份数据比没有更危险：一侧按射正算、另一侧按进球算，量纲不一致，
+    强度估计会静默出错。
+
+    home_team_id / away_team_id 给全时按球队 ID 匹配（响应顺序不可靠）；
+    给不全时退回「响应第一项为主队」的顺序约定。
+    """
     entries: list[tuple[str | None, int | None]] = []
     for item in response or []:
         if not isinstance(item, dict):
@@ -169,8 +168,8 @@ class FootballAPI:
         self._timeout = timeout
         self._retries = retries
         self._retry_delay = retry_delay
-        # ✅ 移除自制缓存，使用全局 api_cache
-        self.quota_remaining: str | None = None
+        self._cache: dict[tuple, tuple[float, Any]] = {}
+        self.quota_remaining: str | None = None  # 最近一次响应里的日额度剩余
 
     async def aclose(self) -> None:
         if self._client is not None and self._owns_client:
@@ -178,25 +177,20 @@ class FootballAPI:
 
     # ---- 底层请求 ---------------------------------------------------------
     async def _get(self, path: str, params: dict[str, Any], ttl: float = 0.0, fresh: bool = False) -> Any:
-        # ✅ 使用全局缓存 api_cache
         key = (path, tuple(sorted((k, str(v)) for k, v in params.items())))
-        
-        # 检查缓存
-        if ttl and not fresh:
-            cached = await api_cache.get(key)
-            if cached is not None:
-                log.debug(f"缓存命中: {path}")
-                return cached
-        
-        # 调用 API
+        now = time.monotonic()
+        hit = self._cache.get(key)
+        if ttl and not fresh and hit and hit[0] > now:
+            return hit[1]
         data = await self._request(path, params)
-        
-        # 存入缓存
         if ttl:
-            await api_cache.set(key, data, ttl)
-            log.debug(f"缓存存储: {path} (TTL: {ttl}s)")
-        
+            self._cache[key] = (now + ttl, data)
+            self._prune(now)
         return data
+
+    def _prune(self, now: float) -> None:
+        if len(self._cache) > 200:
+            self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
 
     async def _request(self, path: str, params: dict[str, Any]) -> Any:
         if self._client is None:
@@ -254,7 +248,7 @@ class FootballAPI:
     @staticmethod
     def _describe_http(resp: httpx.Response) -> str:
         code = resp.status_code
-        hint = HTTP_HINTS.get(code) or (("数据源服务端错误" if code >= 500 else ""))
+        hint = HTTP_HINTS.get(code) or ("数据源服务端错误" if code >= 500 else "")
         detail = ""
         try:
             body = resp.json()
@@ -281,17 +275,33 @@ class FootballAPI:
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
     async def get_fixtures_by_date(self, day: date) -> list[dict]:
-        """某一天的全部赛程（不按联赛过滤）。"""
+        """某一天的全部赛程（不按联赛过滤）。
+
+        只传 date、不传 league/season，API 会返回当天所有联赛的比赛，
+        国家队赛事（世预赛、欧国联、友谊赛等）也在其中。
+
+        这是「今日赛程」的主路径：一次请求拿全天比赛，既不用逐个联赛
+        轮询（17 个联赛 × 赛季降级会放大到上百次请求），也不会因为某个
+        联赛停摆（例如国际比赛日欧洲联赛集体休战）就整个空窗。
+        """
         params = {"date": day.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
     async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict]:
-        """整季赛程（只按赛季拉取，不带日期范围）。"""
+        """整季赛程（只按赛季拉取，不带日期范围）。
+
+        付费套餐解锁的历史赛季必须用这种方式请求：带 from/to 会被套餐限制拒绝。
+        一次请求约 380 场，缓存较久以节省额度。
+        """
         params = {"league": league_id, "season": season}
         return await self._get("fixtures", params, ttl=TTL_SEASON_FIXTURES)
 
     async def get_injuries(self, fixture_id: int) -> list[dict]:
-        """指定比赛的伤停名单。"""
+        """指定比赛的伤停名单（/injuries），按主客队分组返回。
+
+        取不到（套餐不支持 / 该场未收录）时返回空列表，不抛异常，
+        由上层按「暂无伤停信息」展示，不能中断预测主流程。
+        """
         try:
             return await self._get("injuries", {"fixture": fixture_id}, ttl=TTL_INJURIES)
         except APIError as exc:
@@ -299,7 +309,7 @@ class FootballAPI:
             return []
 
     async def get_standings(self, league_id: int, season: int) -> list[dict]:
-        """积分榜（含主客场进球/失球）。"""
+        """积分榜（含主客场进球/失球），一次请求即可算出全联赛球队强度。"""
         response = await self._get("standings", {"league": league_id, "season": season}, ttl=TTL_STANDINGS)
         return flatten_standings(response)
 
@@ -311,29 +321,37 @@ class FootballAPI:
         return await self._get("fixtures/headtohead", params, ttl=TTL_H2H)
 
     async def get_team_form(self, team_id: int, season: int, last: int = 5) -> list[dict]:
-        """某支球队最近 last 场已结束的比赛。"""
+        """某支球队最近 last 场已结束的比赛（用于深度分析的近期状态）。"""
         params = {"team": team_id, "season": season, "last": last}
         matches = await self._get("fixtures", params, ttl=TTL_FORM)
-        done = {"FT", "AET", "PEN"}
+        done = {"FT", "AET", "PEN"}  # 只统计已完场，未开赛的不算进状态
         return [m for m in matches or [] if ((m.get("fixture") or {}).get("status") or {}).get("short") in done]
 
     async def get_fixture_statistics(self, fixture_id: int) -> list[dict]:
-        """单场技术统计（/fixtures/statistics）。"""
-        return await self._get("fixtures/statistics", {"fixture": fixture_id}, ttl=TTL_STATS)
+        """单场技术统计（/fixtures/statistics），含射正数等场面数据。
+
+        套餐不含该端点、或该场未收录统计时，接口会直接报错/返回空。
+        这里原样抛出 APIError，由上层决定降级 —— 
+        对每日预测而言这不是故障，不该触发主源冷却。
+        """
+        return await self._get("fixtures/statistics",
+                               {"fixture": fixture_id}, ttl=TTL_STATS)
 
     async def get_available_seasons(self) -> list[int]:
-        """当前账号可访问的赛季列表。"""
+        """当前账号可访问的赛季列表（/leagues/seasons），升序去重。
+
+        取不到时抛出 APIError，由上层决定降级策略；不在这里猜测或硬编码年份。
+        """
         response = await self._get("leagues/seasons", {}, ttl=TTL_SEASONS)
         seasons: set[int] = set()
         for item in response or []:
             try:
                 seasons.add(int(item))
             except (TypeError, ValueError):
-                continue
+                continue  # 忽略非整数条目（如 "2024/2025" 这类格式）
         return sorted(seasons)
 
     async def get_account_status(self) -> dict:
-        """账户与额度（用于 /status 诊断）。"""
+        """账户与额度（用于 /status 诊断）。额度变化慢，缓存 5 分钟，避免反复排查时空耗额度。"""
         response = await self._get("status", {}, ttl=TTL_STATUS)
         return response if isinstance(response, dict) else {}
-
