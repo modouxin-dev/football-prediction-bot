@@ -49,6 +49,9 @@
   .lv>b{width:96px;text-align:right;font-variant-numeric:tabular-nums;font-weight:500}
   footer{color:var(--dim);font-size:12px;text-align:center;padding:14px 0 4px}
   .err{color:var(--bad);font-size:13px}
+  .debug{background:#1d1f26;border:1px dashed var(--line);padding:12px;border-radius:8px;font-family:monospace;font-size:12px;color:var(--dim);margin-bottom:14px;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+  .debug-btn{font-size:12px;padding:4px 8px;margin-top:8px;background:var(--accent);color:#000;border:none;cursor:pointer;border-radius:4px}
+  .debug-btn:hover{opacity:.8}
 </style>
 </head>
 <body>
@@ -58,7 +61,17 @@
   <span class="pill" id="ver">—</span>
   <span class="pill" id="health">加载中…</span>
   <button onclick="load()">刷新</button>
+  <button onclick="toggleDebug()">诊断</button>
 </header>
+
+<div id="debug-panel" style="display:none">
+  <div class="card">
+    <h2>🔧 诊断信息 <span>系统状态检查</span></h2>
+    <div id="debug-info" class="debug">加载诊断信息中...</div>
+    <button class="debug-btn" onclick="runDiagnostic()">运行诊断</button>
+    <button class="debug-btn" onclick="toggleDebug()">关闭</button>
+  </div>
+</div>
 
 <div id="root"><div class="empty">正在加载数据…</div></div>
 
@@ -66,15 +79,119 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const debugLog = [];
+
+function addDebugLog(msg) {
+  debugLog.push('[' + new Date().toLocaleTimeString() + '] ' + msg);
+  console.log(msg);
+}
+
+function toggleDebug() {
+  const panel = $('debug-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  if(panel.style.display === 'block') {
+    runDiagnostic();
+  }
+}
+
+async function runDiagnostic() {
+  debugLog.length = 0;
+  $('debug-info').textContent = '正在诊断...';
+  addDebugLog('=== 开始系统诊断 ===');
+  
+  // 检查基本连接
+  addDebugLog('1. 检查API服务连接...');
+  try {
+    const health = await fetch('/health', {cache:'no-store'});
+    addDebugLog(`   GET /health → ${health.status}`);
+    if(health.ok) {
+      const data = await health.json();
+      addDebugLog(`   响应: ${JSON.stringify(data)}`);
+    }
+  } catch(err) {
+    addDebugLog(`   ❌ 错误: ${err.message}`);
+  }
+  
+  // 检查fixtures端点
+  addDebugLog('\\n2. 检查赛程数据...');
+  try {
+    const fx = await fetch('/fixtures', {cache:'no-store'});
+    addDebugLog(`   GET /fixtures → ${fx.status}`);
+    if(fx.ok) {
+      const data = await fx.json();
+      addDebugLog(`   响应状态: ${data.status}`);
+      addDebugLog(`   数据量: ${data.total} 场比赛`);
+      addDebugLog(`   联赛数: ${(data.leagues||[]).length}`);
+    }
+  } catch(err) {
+    addDebugLog(`   ❌ 错误: ${err.message}`);
+  }
+  
+  // 检查health/model端点
+  addDebugLog('\\n3. 检查模型健康度...');
+  try {
+    const model = await fetch('/health/model', {cache:'no-store'});
+    addDebugLog(`   GET /health/model → ${model.status}`);
+    if(model.ok) {
+      const data = await model.json();
+      addDebugLog(`   状态: ${data.status}`);
+      addDebugLog(`   已结算: ${data.settled||0} 场`);
+      addDebugLog(`   命中率: ${data.accuracy ? (data.accuracy*100).toFixed(1)+'%' : '无'}`);
+    }
+  } catch(err) {
+    addDebugLog(`   ❌ 错误: ${err.message}`);
+  }
+  
+  // 检查audit端点
+  addDebugLog('\\n4. 检查预测审计...');
+  try {
+    const audit = await fetch('/audit?limit=5', {cache:'no-store'});
+    addDebugLog(`   GET /audit → ${audit.status}`);
+    if(audit.ok) {
+      const data = await audit.json();
+      addDebugLog(`   预测数: ${(data.items||[]).length}`);
+    }
+  } catch(err) {
+    addDebugLog(`   ❌ 错误: ${err.message}`);
+  }
+  
+  // 检查strength端点
+  addDebugLog('\\n5. 检查球队强度榜...');
+  try {
+    const st = await fetch('/strength', {cache:'no-store'});
+    addDebugLog(`   GET /strength → ${st.status}`);
+    if(st.ok) {
+      const data = await st.json();
+      addDebugLog(`   状态: ${data.status}`);
+      addDebugLog(`   球队数: ${(data.teams||[]).length}`);
+    }
+  } catch(err) {
+    addDebugLog(`   ❌ 错误: ${err.message}`);
+  }
+  
+  addDebugLog('\\n=== 诊断完成 ===');
+  $('debug-info').textContent = debugLog.join('\\n');
+}
+
+const $ = (id) => document.getElementById(id);
 
 async function get(url){
-  const r = await fetch(url, {cache:'no-store'});
-  if(!r.ok) throw new Error(url + ' → HTTP ' + r.status);
-  return r.json();
+  addDebugLog(`正在请求: ${url}`);
+  try {
+    const r = await fetch(url, {cache:'no-store'});
+    addDebugLog(`响应状态: ${url} → ${r.status}`);
+    if(!r.ok) throw new Error(url + ' → HTTP ' + r.status);
+    const data = await r.json();
+    addDebugLog(`获得数据: ${url} → ${JSON.stringify(data).substring(0,100)}`);
+    return data;
+  } catch(err) {
+    addDebugLog(`请求失败: ${url} → ${err.message}`);
+    throw err;
+  }
 }
 
 function esc(s){
-  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
 }
 
 /* ---------- SVG 折线图：Log Loss 趋势 ---------- */
@@ -261,6 +378,7 @@ function fixturesCard(fx){
 
 async function load(){
   $('root').innerHTML = '<div class="empty">正在加载数据…</div>';
+  addDebugLog('=== 开始加载页面数据 ===');
   try{
     const [h, health, audit, strength, fx] = await Promise.all([
       get('/health'), get('/health/model'), get('/audit?limit=50'), get('/strength'),
@@ -276,11 +394,14 @@ async function load(){
       fixturesCard(fx)
       + statCard(health) + trendCard(health) + calibCard(health) + levelCard(health)
       + strengthCard(strength) + auditCard(audit);
+    addDebugLog('✅ 页面加载成功');
   }catch(err){
     $('health').className = 'pill bad';
     $('health').textContent = '加载失败';
+    addDebugLog('❌ 加载失败: ' + err.message);
     $('root').innerHTML = `<div class="card"><div class="err">加载失败：${esc(err.message)}</div>
-      <div class="empty">请确认 API 服务在运行（python -m uvicorn api:app）。</div></div>`;
+      <div class="empty">请点击"诊断"按钮查看详细错误信息，或确认 API 服务在运行。</div>
+      <button class="debug-btn" onclick="toggleDebug()">打开诊断</button></div>`;
   }
 }
 
@@ -289,3 +410,4 @@ setInterval(load, 60000);   // 每分钟自动刷新
 </script>
 </body>
 </html>
+
