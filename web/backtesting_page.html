@@ -1,0 +1,165 @@
+<!-- 回测分析页面 - 添加到 frontend.html -->
+<!-- 在菜单中添加: <button>📊 回测分析</button> -->
+
+<div v-if="currentView === 'backtesting'" class="dashboard" style="grid-column: span 3">
+    <div class="card" style="grid-column: span 3">
+        <h3><span class="card-icon">📊</span> 历史回测分析</h3>
+        
+        <div style="margin-bottom: 20px;">
+            <label style="display: block; margin-bottom: 8px;"><strong>选择赛季</strong></label>
+            <select v-model="backtest.selectedSeason" style="padding: 8px; width: 150px;">
+                <option v-for="season in backtest.seasons" :key="season" :value="season">
+                    {{ season }} 赛季
+                </option>
+            </select>
+            <button @click="runBacktest" style="margin-left: 10px; padding: 8px 20px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                运行回测
+            </button>
+        </div>
+        
+        <div v-if="backtest.loading" class="loading">正在运行回测...</div>
+        <div v-else-if="backtest.results" class="backtest-results">
+            <!-- 总体指标 -->
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+                <div class="status-item ok">
+                    <label>总预测数</label>
+                    <div class="value">{{ backtest.results.total }}</div>
+                </div>
+                <div class="status-item ok">
+                    <label>正确预测</label>
+                    <div class="value">{{ backtest.results.correct }}</div>
+                </div>
+                <div class="status-item ok">
+                    <label>准确率</label>
+                    <div class="value">{{ backtest.results.accuracy }}</div>
+                </div>
+                <div class="status-item">
+                    <label>盈利情况</label>
+                    <div class="value" style="color: #10b981;">+{{ backtest.results.profit }}%</div>
+                </div>
+            </div>
+            
+            <!-- 按结果类型的准确率 -->
+            <div style="margin-bottom: 20px;">
+                <h4>按比分类型的准确率</h4>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">
+                    <div class="status-item" style="background: #fff0f5;">
+                        <label>主队胜</label>
+                        <div class="value" style="color: #e31837;">{{ backtest.results.home_accuracy }}</div>
+                    </div>
+                    <div class="status-item" style="background: #f0f5ff;">
+                        <label>平局</label>
+                        <div class="value" style="color: #667eea;">{{ backtest.results.draw_accuracy }}</div>
+                    </div>
+                    <div class="status-item" style="background: #e8f5e9;">
+                        <label>客队胜</label>
+                        <div class="value" style="color: #4facfe;">{{ backtest.results.away_accuracy }}</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 置信度分析 -->
+            <div style="margin-bottom: 20px;">
+                <h4>按置信度的准确率</h4>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">
+                    <div class="prediction-item">
+                        <div style="font-weight: bold;">高置信度 (>50%)</div>
+                        <div style="margin-top: 8px;">{{ backtest.results.high_confidence }} 场</div>
+                        <div style="color: #10b981; font-weight: bold;">{{ backtest.results.high_accuracy }}</div>
+                    </div>
+                    <div class="prediction-item">
+                        <div style="font-weight: bold;">中置信度 (33%-50%)</div>
+                        <div style="margin-top: 8px;">{{ backtest.results.medium_confidence }} 场</div>
+                        <div style="color: #f59e0b; font-weight: bold;">{{ backtest.results.medium_accuracy }}</div>
+                    </div>
+                    <div class="prediction-item">
+                        <div style="font-weight: bold;">低置信度 (<33%)</div>
+                        <div style="margin-top: 8px;">{{ backtest.results.low_confidence }} 场</div>
+                        <div style="color: #ef4444; font-weight: bold;">{{ backtest.results.low_accuracy }}</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 详细预测列表 -->
+            <div>
+                <h4>详细预测列表</h4>
+                <div style="max-height: 400px; overflow-y: auto;">
+                    <table class="standings-table" style="font-size: 0.85em;">
+                        <thead>
+                            <tr>
+                                <th style="width: 30px;">结果</th>
+                                <th>比赛</th>
+                                <th>预测比分</th>
+                                <th>实际比分</th>
+                                <th style="width: 60px;">置信度</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="pred in backtest.results.predictions.slice(0, 20)" :key="pred.id">
+                                <td style="text-align: center;">{{ pred.correct ? '✅' : '❌' }}</td>
+                                <td>{{ pred.match }}</td>
+                                <td>{{ pred.predicted }}</td>
+                                <td>{{ pred.actual }}</td>
+                                <td style="text-align: right;">{{ pred.confidence }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- 导出按钮 -->
+            <div style="margin-top: 20px; text-align: right;">
+                <button @click="exportBacktestResults" style="padding: 8px 20px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                    📥 导出 CSV
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Vue 数据和方法 -->
+<script>
+// 在 Vue app data 中添加:
+backtest: {
+    selectedSeason: 2024,
+    seasons: [2024, 2023, 2022, 2021],
+    loading: false,
+    results: null,
+},
+
+// 在 methods 中添加:
+async runBacktest() {
+    this.backtest.loading = true;
+    try {
+        const response = await axios.get(`/api/backtest`, {
+            params: { season: this.backtest.selectedSeason }
+        });
+        this.backtest.results = response.data;
+    } catch (error) {
+        console.error('回测失败', error);
+        alert('回测失败,请稍后重试');
+    } finally {
+        this.backtest.loading = false;
+    }
+},
+
+exportBacktestResults() {
+    if (!this.backtest.results) return;
+    
+    // 生成 CSV
+    let csv = '比赛,预测比分,实际比分,结果,置信度\n';
+    for (const pred of this.backtest.results.predictions) {
+        csv += `"${pred.match}",${pred.predicted},${pred.actual},"${pred.correct ? '正确' : '错误'}",${pred.confidence}\n`;
+    }
+    
+    // 下载
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `backtest-${this.backtest.selectedSeason}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+},
+</script>
+
