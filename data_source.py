@@ -12,6 +12,7 @@ Telegram Handler 和业务代码只依赖本模块暴露的方法，不直接调
 
 主源连续失败会进入冷却（默认 10 分钟），冷却期内直接走备用源，
 避免浪费 API-Football 免费层宝贵的 100 次/天额度。
+多联赛场景: 冷却按联赛独立隔离，单个联赛失败不影响其他联赛的主源请求。
 """
 from __future__ import annotations
 
@@ -62,7 +63,8 @@ class DataSourceRouter:
         # 默认 None，便于单测与纯内存使用场景不受影响。
         self.quota_sink = quota_sink
         self._source = "api-football"  # 当前实际使用的数据源
-        self._primary_down_until = 0.0
+        # 按联赛隔离的冷却: league_id -> 冷却截止时间 (多联赛时单个联赛失败不影响其他)
+        self._primary_cooldown_by_league: dict[int, float] = {}
         self._last_errors: dict[str, str] = {}  # 各源最近一次失败原因（用于提示）
         self.last_switch: dict | None = None     # 最近一次降级：源/方法/原因/时间
 
@@ -90,7 +92,13 @@ class DataSourceRouter:
     def _fallback_blocked(self) -> bool:
         return not self.fallback_available
 
-    def _mark_primary_down(self, reason: str, method: str = "", *, cooldown: bool = True) -> None:
+    def _primary_cooling(self, league_id: int | None = None) -> bool:
+        """检查主源是否冷却中 (按联赛隔离)"""
+        if league_id is None:
+            return False
+        return time.monotonic() < self._primary_cooldown_by_league.get(league_id, 0.0)
+
+    def _mark_primary_down(self, reason: str, method: str = "", league_id: int | None = None, *, cooldown: bool = True) -> None:
         # 可选数据（赔率/交锋/近期战绩/伤停）失败不进冷却：
         # 未开盘的比赛本来就没有赔率，接口会直接拒绝（实测 164ms 快速失败），
         # 这是常态而非故障。若因此把主源冷却 10 分钟，冷却期内连赛程、
@@ -98,8 +106,8 @@ class DataSourceRouter:
         # 「备用源生效中」+「套餐 Free」，而主源其实是健康的。
         # 关键方法（get_fixtures/get_standings）失败照常冷却，它们才是
         # 主源健康的判据：主源真挂了，赛程会失败并触发冷却，逻辑自洽。
-        if cooldown:
-            self._primary_down_until = time.monotonic() + PRIMARY_COOLDOWN
+        if cooldown and league_id is not None:
+            self._primary_cooldown_by_league[league_id] = time.monotonic() + PRIMARY_COOLDOWN
         self._last_errors["api-football"] = str(reason)[:200]
         # 记录降级事件：为什么切、什么时候切的。
         # 只有真正切走（进冷却）才算降级；否则 last_switch 会指向一次
@@ -109,12 +117,10 @@ class DataSourceRouter:
                 "from": "api-football",
                 "to": "football-data",
                 "method": method,
+                "league": league_id,
                 "reason": str(reason)[:200],
                 "at": time.time(),
             }
-
-    def _primary_cooling(self) -> bool:
-        return time.monotonic() < self._primary_down_until
 
     # ---- 请求日志 ------------------------------------------------------------
     def _log_request(self, source: str, method: str, outcome: str,
@@ -159,13 +165,23 @@ class DataSourceRouter:
         optional = method in OPTIONAL_METHODS
         tried_primary = False
         ctx = self._context_kwargs(method, args)
+        # 从参数提取 league_id (用于冷却隔离)
+        league_id = None
+        if method in ("get_fixtures", "get_standings") and args:
+            try:
+                league_id = int(args[0])
+            except (TypeError, ValueError):
+                pass
+        
         # ID 归属路由：ID 来自备用源时只能问备用源，别拿去污染主源的健康判定。
         uses_fallback_id = (
             method in FIXTURE_ID_METHODS and bool(args) and is_fallback_id(args[0])
         )
         if uses_fallback_id:
             log.debug("%s：ID 来自备用源（%s），跳过主源", method, args[0])
-        if not uses_fallback_id and self.mode in ("auto", "api-football") and not self._primary_cooling():
+        
+        # 按联赛隔离的冷却检查
+        if not uses_fallback_id and self.mode in ("auto", "api-football") and not self._primary_cooling(league_id):
             tried_primary = True
             started = time.monotonic()
             try:
@@ -174,7 +190,7 @@ class DataSourceRouter:
                 self._log_request("api-football", method, "failed", elapsed=time.monotonic() - started,
                                   status=type(exc).__name__, **ctx)
                 log.warning("主数据源 %s 失败（%s），准备切换备用源", method, type(exc).__name__)
-                self._mark_primary_down(exc, method, cooldown=not optional)
+                self._mark_primary_down(exc, method, league_id=league_id, cooldown=not optional)
             else:
                 if result:  # 有数据才认为主源可用
                     self._source = "api-football"
@@ -243,11 +259,12 @@ class DataSourceRouter:
             self._last_errors["football-data"] = str(exc)[:200]
             primary_reason = self.last_error("api-football")
             if not primary_reason:
-                # 明确区分两种「没有具体错误」的情形，避免一律显示成"未尝试"，
+                # 明确区分两种「没有具体错误」的情形，避免一律显示成\"未尝试\"，
                 # 让人误以为主源压根没被调用过。
+                cooling_left = self._primary_cooldown_by_league.get(league_id, 0.0) - time.monotonic() if league_id else 0
                 primary_reason = (
-                    f"冷却中未发起请求（剩余 {int(self._primary_down_until - time.monotonic())} 秒）"
-                    if self._primary_cooling() else "已尝试但无具体错误"
+                    f"冷却中未发起请求（联赛{league_id}剩余 {int(max(cooling_left, 0))} 秒）"
+                    if cooling_left > 0 else "已尝试但无具体错误"
                 )
             raise DataSourceError(
                 "主数据源与备用数据源均不可用。\n"
@@ -319,3 +336,4 @@ class DataSourceRouter:
                     await close()
                 except Exception:  # noqa: BLE001 - 关闭失败不影响退出
                     pass
+
