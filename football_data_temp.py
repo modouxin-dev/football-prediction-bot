@@ -190,14 +190,6 @@ class FootballDataAPI:
     async def _get(self, path: str, params: dict[str, Any], ttl: float = 0.0) -> Any:
         key = (path, tuple(sorted((k, str(v)) for k, v in params.items())))
         now = time.monotonic()
-        hit = self._cache.get(key)
-        if ttl and hit and hit[0] > now:
-            return hit[1]
-        data = await self._request(path, params)
-        if ttl:
-            self._cache[key] = (now + ttl, data)
-        return data
-
     # ---- 协议转换 -------------------------------------------------------------
     @staticmethod
     def _to_fixture(match: dict, league_id: int, season: int) -> dict:

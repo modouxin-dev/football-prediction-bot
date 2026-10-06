@@ -5,6 +5,7 @@
 - 推送消息下方的按钮（预测 / 深度分析 / 历史交锋 / 赔率对比 / 刷新）在原消息上就地切换
 """
 from __future__ import annotations
+import asyncio
 
 import logging
 import os
@@ -127,6 +128,29 @@ def setup_logging(settings: Settings) -> None:
 
 
 # ---- 工具 -------------------------------------------------------------------
+
+class CacheManager:
+    """线程安全的缓存管理器"""
+    def __init__(self):
+        self._cache = {}
+        self._lock = asyncio.Lock()
+    
+    async def get(self, key):
+        async with self._lock:
+            return self._cache.get(key)
+    
+    async def set(self, key, value):
+        async with self._lock:
+            self._cache[key] = value
+    
+    async def clear(self, key=None):
+        async with self._lock:
+            if key is None:
+                self._cache.clear()
+            elif key in self._cache:
+                del self._cache[key]
+
+
 async def _dispatch_menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str) -> None:
     """直接命令 → 菜单分发（与按钮共用 on_menu_key）。
 
@@ -152,7 +176,7 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
         label = datetime.now(tz).strftime("%Y-%m-%d")
         mode = context.user_data.get("fx_mode") or MODE_TODAY
         target = context.user_data.get("fx_date")
-        cache = app.bot_data.get("fx_cache")
+        cache = await app.bot_data["cache_manager"].get("fx_cache")
         ck = f"{label}|{mode}|{target}"
         if cache is None or cache.get("date") != ck:
             # 统一查询入口：区分「接口无数据」与「窗口内无比赛」
@@ -162,7 +186,7 @@ async def show_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, page
                      "note": res["note"], "season_range": res["season_range"],
                      "error": res.get("error"),
                      "day_label": res["day_label"], "mode": mode}
-            app.bot_data["fx_cache"] = cache
+            await app.bot_data["cache_manager"].set("fx_cache", cache)
         items = cache["items"]
     except APIError as exc:
         text = f"❌ <b>获取今日赛程失败</b>\n{esc(exc)}\n\n{ui.error_hint(exc)}"
@@ -243,7 +267,7 @@ async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: s
     elif key == "fixtures":
         await show_fixtures(update, context, page=0)
     elif key == "refresh":
-        context.application.bot_data["fx_cache"] = None
+        await context.application.bot_data["cache_manager"].clear("fx_cache")
         await show_fixtures(update, context, page=0)
     elif key == "help":
         await edit_view(query, ui.format_help(), ui.menu_keyboard())
@@ -363,7 +387,7 @@ async def on_fixtures_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["fx_mode"] = raw
     context.user_data["fx_page"] = 0
     # 清空缓存，强制按新模式重新查询（不同模式查询区间不同，不能复用）
-    context.application.bot_data["fx_cache"] = None
+    await context.application.bot_data["cache_manager"].clear("fx_cache")
     await show_fixtures(update, context, page=0)
 
 
@@ -386,7 +410,7 @@ async def on_fixtures_day(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data["fx_mode"] = MODE_DATE
     context.user_data["fx_date"] = day
     context.user_data["fx_page"] = 0
-    context.application.bot_data["fx_cache"] = None
+    await context.application.bot_data["cache_manager"].clear("fx_cache")
     await show_fixtures(update, context, page=0)
 
 
@@ -477,7 +501,7 @@ async def on_analysis_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        cache = app.bot_data.get("fx_cache")
+        cache = await app.bot_data["cache_manager"].get("fx_cache")
         fixtures = cache["items"] if cache else None
         try:
             report = await service.analyze_fixture(fixture_id, fixtures)
@@ -524,7 +548,7 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if chart is None:  # matplotlib 未安装时优雅降级，不崩机器人
             await query.answer("图表功能不可用：缺少绘图依赖", show_alert=True)
             return
-        cache = app.bot_data.get("fx_cache")
+        cache = await app.bot_data["cache_manager"].get("fx_cache")
         fixtures = cache["items"] if cache else None
         if kind == "schedule":
             # 赛程总览图：用当前缓存的赛程，不针对单场比赛
@@ -711,7 +735,7 @@ async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        cache = app.bot_data.get("fx_cache")
+        cache = await app.bot_data["cache_manager"].get("fx_cache")
         fixtures = cache["items"] if cache else None
         try:
             prediction = await service.predict_fixture(fixture_id, fixtures)
@@ -842,7 +866,7 @@ async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif key == "web":
         await reply_html(update.effective_message, ui.web_text(settings.web_url), None)
     elif key == "refresh":
-        context.application.bot_data["fx_cache"] = None
+        await context.application.bot_data["cache_manager"].clear("fx_cache")
         await show_fixtures(update, context, page=0)
     elif key == "digest":
         await reply_digest(message, context)

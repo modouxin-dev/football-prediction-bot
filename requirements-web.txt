@@ -1,5 +1,36 @@
-# Web 看板可选依赖 —— 机器人本体不需要，只在跑 api.py 时安装
-# 用法：pip install -r requirements-web.txt
--r requirements.txt
-fastapi>=0.110
-uvicorn>=0.27
+# Web 看板和监控系统依赖
+
+# 已有依赖 (来自 requirements.txt)
+# python-telegram-bot>=20.0
+# httpx>=0.24.0
+# pydantic>=2.0.0
+# python-dateutil>=2.8.0
+
+# 新增: Web 框架
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic-settings>=2.0.0
+
+# 新增: 数据库 ORM
+sqlalchemy>=2.0.0
+alembic>=1.12.0  # 数据库迁移
+
+# 新增: 监控和日志
+prometheus-client>=0.17.0  # Prometheus 指标
+python-json-logger>=2.0.0  # JSON 日志
+structlog>=23.1.0  # 结构化日志
+
+# 新增: 性能分析
+psutil>=5.9.0  # 系统资源监控
+memory-profiler>=0.61.0  # 内存分析
+
+# 可选: 仪表板前端
+aiofiles>=23.0.0  # 异步文件操作
+
+# 开发工具
+pytest-asyncio>=0.21.0  # 异步测试
+pytest-cov>=4.1.0  # 覆盖率
+black>=23.0.0  # 代码格式
+mypy>=1.0.0  # 类型检查
+pylint>=2.17.0  # 代码质量
+
