@@ -58,8 +58,15 @@ jobs:
         # 那样会漏掉真正的报错，所以整体回传尾部输出。
         run: |
           set -o pipefail
+          # 本步骤的 shell 由 Actions 以 `bash -e` 启动：pytest 一旦失败，
+          # 开启 errexit 的 shell 会立刻退出，code=$? 及其后面的 summary /
+          # tail / ::error:: 全部不执行 —— 日志只留一个红色退出码，拿不到
+          # 具体失败用例。故在捕获退出码前后临时关掉 errexit。
+          # 仅在 pytest 这一句上关，取到 code 后立刻恢复，避免掩盖其它命令的失败。
+          set +e
           python -m pytest -q --tb=line -rf > /tmp/pytest.txt 2>&1
           code=$?
+          set -e
           if [ "$code" -ne 0 ]; then
             echo "### ❌ pytest 失败（退出码 $code）" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
