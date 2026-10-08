@@ -126,6 +126,42 @@ def test_cache_hit_skips_network_and_fresh_bypasses_it():
     assert run(api.get_odds(2)) == [3]  # 不同参数不共用缓存
 
 
+def test_cache_is_not_shared_between_client_instances():
+    """两个 FootballAPI 实例不得共享同一份响应缓存。
+
+    缓存键只有 (path, params)，不含 provider / base_url / 凭据。若缓存是
+    进程级共享的，不同渠道（rapidapi 与 apisports）或不同账号的响应会互相串。
+
+    全程在**同一个事件循环**内验证：不据此断言任何跨 asyncio.run 的行为
+    （asyncio.Lock 不保证跨循环安全，那不是本模块要提供的契约）。
+    """
+    calls_a, calls_b = [], []
+
+    def make_handler(calls, payload):
+        def handler(request):
+            calls.append(1)
+            return httpx.Response(200, json={"errors": [], "response": [payload]})
+        return handler
+
+    a = make_api(make_handler(calls_a, "A"))
+    b = make_api(make_handler(calls_b, "B"))
+
+    async def scenario():
+        # A、B 请求完全相同的路径与参数
+        first_a = await a.get_odds(1)
+        first_b = await b.get_odds(1)
+        second_a = await a.get_odds(1)   # 应命中 A 自己的缓存
+        return first_a, first_b, second_a
+
+    first_a, first_b, second_a = run(scenario())
+
+    assert first_a == ["A"]
+    assert first_b == ["B"], "若共享缓存，B 会命中 A 的结果"
+    assert second_a == ["A"], "A 的第二次请求应命中自己的缓存"
+    assert len(calls_a) == 1, "A 只应发一次请求"
+    assert len(calls_b) == 1, "B 只应发一次请求"
+
+
 def test_standings_are_flattened_across_groups():
     payload = {"errors": [], "response": [{"league": {"standings": [[{"team": {"id": 1}}], [{"team": {"id": 2}}]]}}]}
     api = make_api(lambda request: httpx.Response(200, json=payload))

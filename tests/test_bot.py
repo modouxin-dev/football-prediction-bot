@@ -274,6 +274,31 @@ def test_clicking_the_current_tab_again_is_ignored_but_other_errors_propagate():
 
 
 # ---- 应用装配 / 日志 ------------------------------------------------------------
+def test_application_wires_up_cache_manager():
+    """启动装配必须挂上 cache_manager 容器。
+
+    取缓存的调用点（show_fixtures / on_menu_key / on_chart / on_predict_fixture /
+    on_analysis_fixture 等）都以 bot_data["cache_manager"] 直接取用，装配时漏挂
+    就会 KeyError；其中刷新分支未包裹异常，会直接向上传播导致崩溃。
+    这里走真实的 build_application，不用手工捏 bot_data 的处理器测试代替。
+    """
+    app = main.build_application(load_settings(ENV))
+
+    cache_manager = app.bot_data.get("cache_manager")
+    assert cache_manager is not None, "build_application 必须挂上 cache_manager"
+    assert isinstance(cache_manager, main.CacheManager)
+
+    async def check():
+        await cache_manager.set("fx_cache", {"items": [1]})
+        got = await cache_manager.get("fx_cache")
+        await cache_manager.clear("fx_cache")
+        return got, await cache_manager.get("fx_cache")
+
+    got, after_clear = run(check())
+    assert got == {"items": [1]}
+    assert after_clear is None
+
+
 def test_application_registers_handlers_and_schedules_daily_job_in_local_time():
     s = load_settings({**ENV, "PUSH_TIME": "07:30", "TIMEZONE": "Asia/Shanghai"})
     app = main.build_application(s)

@@ -1039,6 +1039,11 @@ def build_application(settings: Settings) -> Application:
         .build()
     )
     app.bot_data["settings"] = settings
+    # 赛程缓存（fx_cache）的容器。9 处调用点都以 bot_data["cache_manager"]
+    # 直接取用，缺了就会 KeyError，必须在这里挂上。
+    # CacheManager 内部是 asyncio.Lock，Python 3.10 起在首次 await 时才绑定
+    # 事件循环，因此在同步的 build_application 里构造是安全的。
+    app.bot_data["cache_manager"] = CacheManager()
 
     register_commands(app)
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^menu:[a-z]+$"))

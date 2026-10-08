@@ -14,22 +14,40 @@ from typing import Any, Callable
 
 import httpx
 
-# 使用全局缓存管理器（防止内存泄漏）
+# 缓存后端：优先用 cache_manager 的 TTL + LRU 实现（有容量上限，不会无界增长），
+# 取不到时退回简单字典。
+#
+# 注意：这里只导入「类」，不导入模块级的全局实例 api_cache。全局实例在进程内
+# 单例，多个 FootballAPI 实例会共用同一份缓存，而缓存键只有 (path, params)，
+# 不含 provider / base_url / 凭据 —— 不同渠道（rapidapi 与 apisports）、
+# 不同账号的响应会互相串；测试里每个用例新建一个客户端，前一个用例写进去的
+# 结果会被后一个用例命中，表现为「该报错的没报错、该发请求的没发请求」。
+# 缓存改为按客户端实例独占即可解决，且生产只有一个实例（main.py:956），
+# 跨调用复用与容量上限都保留。
 try:
-    from cache_manager import api_cache
+    from cache_manager import AsyncTTLCache
 except ImportError:
-    # 如果 cache_manager 不可用，创建简单的本地缓存（向后兼容）
-    class SimpleCache:
-        def __init__(self):
-            self._cache = {}
-        
-        async def get(self, key):
-            return self._cache.get(key)
-        
-        async def set(self, key, value, ttl=None):
-            self._cache[key] = value
-    
-    api_cache = SimpleCache()
+    AsyncTTLCache = None
+
+
+class SimpleCache:
+    """cache_manager 不可用时的退路：无容量上限的字典缓存（向后兼容）。"""
+
+    def __init__(self):
+        self._cache = {}
+
+    async def get(self, key):
+        return self._cache.get(key)
+
+    async def set(self, key, value, ttl=None):
+        self._cache[key] = value
+
+
+def _new_response_cache():
+    """新建一个客户端实例独占的响应缓存。"""
+    if AsyncTTLCache is not None:
+        return AsyncTTLCache(max_size=500, default_ttl=3600)
+    return SimpleCache()
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +187,9 @@ class FootballAPI:
         self._timeout = timeout
         self._retries = retries
         self._retry_delay = retry_delay
-        # ✅ 移除自制缓存，使用全局 api_cache
+        # 响应缓存按实例独占（见文件头说明）；仍走 cache_manager 的 TTL+LRU
+        # 实现，容量上限与过期淘汰都保留。
+        self._cache = _new_response_cache()
         self.quota_remaining: str | None = None
 
     async def aclose(self) -> None:
@@ -178,24 +198,23 @@ class FootballAPI:
 
     # ---- 底层请求 ---------------------------------------------------------
     async def _get(self, path: str, params: dict[str, Any], ttl: float = 0.0, fresh: bool = False) -> Any:
-        # ✅ 使用全局缓存 api_cache
         key = (path, tuple(sorted((k, str(v)) for k, v in params.items())))
-        
+
         # 检查缓存
         if ttl and not fresh:
-            cached = await api_cache.get(key)
+            cached = await self._cache.get(key)
             if cached is not None:
                 log.debug(f"缓存命中: {path}")
                 return cached
-        
+
         # 调用 API
         data = await self._request(path, params)
-        
+
         # 存入缓存
         if ttl:
-            await api_cache.set(key, data, ttl)
+            await self._cache.set(key, data, ttl)
             log.debug(f"缓存存储: {path} (TTL: {ttl}s)")
-        
+
         return data
 
     async def _request(self, path: str, params: dict[str, Any]) -> Any:
