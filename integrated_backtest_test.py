@@ -25,9 +25,6 @@ import asyncio
 import sys
 
 from backtester_with_db import BacktesterWithDB
-from data_analysis import DataAnalyzer
-from feature_extractor import FeatureExtractor
-from realtime_api_fixed import RealtimeAPIFixed
 
 MIN_SAMPLES = 200          # 少于此样本量不具统计意义
 ACC_RANGE = (0.35, 0.65)   # 英超胜平负三选一，真实模型落在这个区间
@@ -83,32 +80,12 @@ async def run_integrated_test() -> dict:
     for r in reasons:
         print(f"     - {r}")
 
-    # 2. 数据分析
-    print("\n2️⃣ 阶段2: 数据分析")
-    print("-" * 60)
-    analyzer = DataAnalyzer()
-    fixtures = [
-        {"home_team": "A", "away_team": "B", "home_goals": 2, "away_goals": 1, "status": "FINISHED"},
-        {"home_team": "C", "away_team": "D", "home_goals": 1, "away_goals": 1, "status": "FINISHED"},
-    ]
-    team_analysis = await analyzer.analyze_team_form(fixtures)
-    print(f"✅ 分析完成: {len(team_analysis)} 支球队")
-
-    # 3. 特征提取
-    print("\n3️⃣ 阶段3: 特征提取")
-    print("-" * 60)
-    extractor = FeatureExtractor()
-    features = extractor.extract_features("Team A", "Team B")
-    print(f"✅ 特征提取: {len(features)} 维向量")
-
-    # 4. 实时数据
-    print("\n4️⃣ 阶段4: 实时数据")
-    print("-" * 60)
-    realtime = RealtimeAPIFixed()
-    odds = await realtime.fetch_odds(1)
-    injuries = await realtime.fetch_injuries(1)
-    update = await realtime.update_prediction(1, odds, injuries)
-    print(f"✅ 实时数据: 赔率={odds['home_odds']}, 调整={update['adjustment']:.4f}")
+    # 原阶段 2（数据分析）、3（特征提取）、4（实时数据）已删除：
+    # 它们用 2 场硬编码比赛（A/B、C/D）、假队名 "Team A"/"Team B"、
+    # 以及返回写死赔率 2.10/3.40/3.50 的 RealtimeAPIFixed 跑一遍就无条件打印 ✅，
+    # 与阶段 1 修掉的那颗「假绿灯」是同一类问题——跑完就算过，与真假无关。
+    # 这三个模块（data_analysis / feature_extractor / realtime_api_fixed）
+    # 除本脚本外全仓零引用，随本次一并删除。
 
     all_ok = ok
 
@@ -120,11 +97,8 @@ async def run_integrated_test() -> dict:
 (准确率 {backtest_results['accuracy']:.2%}, \
 {backtest_results['total_predictions']} 场, \
 log_loss {backtest_results['log_loss']:.4f})
-    ✅ 数据分析: 通过 ({len(team_analysis)} 支球队)
-    ✅ 特征工程: 通过 ({len(features)} 维向量)
-    ✅ 实时API: 通过 (赔率 + 伤停 + 预测)
 
-    整体状态: {'✅ 所有组件正常工作' if all_ok else '❌ 回测未通过，见上方原因'}
+    整体状态: {'✅ 回测通过' if all_ok else '❌ 回测未通过，见上方原因'}
     """)
     print("=" * 60 + "\n")
 
@@ -132,9 +106,6 @@ log_loss {backtest_results['log_loss']:.4f})
         "backtest": backtest_results["accuracy"],
         "backtest_ok": ok,
         "samples": backtest_results["total_predictions"],
-        "analysis": len(team_analysis),
-        "features": len(features),
-        "realtime": update["adjustment"],
     }
 
 

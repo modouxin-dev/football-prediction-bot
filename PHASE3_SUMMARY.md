@@ -155,14 +155,12 @@ WS   /ws/predictions      - WebSocket 推送
 # 安装依赖
 pip install -r requirements-web.txt
 
-# 初始化数据库
-python -c "from models import init_db; init_db()"
+# 初始化数据库（建表由 PredictionRepository 在首次使用时自动完成，无需手动 init_db）
 
 # 启动 API 服务器
-uvicorn web.api:app --host 0.0.0.0 --port 8000
-
-# 启动监控服务 (后台)
-python -c "import asyncio; from monitoring import start_monitoring_service; asyncio.run(start_monitoring_service())"
+# 注意：看板入口是仓库根目录的 api.py，不是 web/api.py。
+# start.sh 里跑的就是这条命令；web/api.py 从未被挂载且返回硬编码假数据，已删除。
+uvicorn api:app --host 0.0.0.0 --port 8000
 
 # 打开浏览器访问看板
 # http://localhost:8000/frontend.html

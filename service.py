@@ -174,14 +174,18 @@ def h2h_stats(matches: list[dict], home_id: int) -> dict:
 
 @dataclass
 class Prediction:
-    fixture_id: int
+    # 主源 API-Football 是数字 ID；备用源 football-data.org 一律加 "fd-" 前缀
+    # （football_data.py:217/229/230），所以这三类 ID 实际都可能是字符串。
+    # 此前注解写死 int，与 _predict_one 里「保持数据源原类型」的注释自相矛盾，
+    # 会误导维护者写出对 str ID 不成立的代码。
+    fixture_id: int | str
     league: str
     round_label: str
     venue: str
     home: str
     away: str
-    home_id: int
-    away_id: int
+    home_id: int | str
+    away_id: int | str
     kickoff: datetime
     analysis: dict
     home_strength: TeamStrength
@@ -274,7 +278,10 @@ class PredictionService:
         self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
         self.truncated_count: int = 0  # 最近一次预测被上限砍掉的场数（0 表示未截断）
-        self._store: OrderedDict[int, Prediction] = OrderedDict()
+        # 键统一为 str：主源是数字 ID、备用源 football-data.org 是 'fd-123'
+        # （见 football_data.py:217），两边都必须能用同一个 key 查到。
+        # 此前注解写成 OrderedDict[int, ...] 与实际不符，会误导维护者去传 int。
+        self._store: OrderedDict[str, Prediction] = OrderedDict()
         # 预测落盘到机器人自身存储（SQLite），重启不丢，支撑命中率统计
         self.repo: PredictionRepository = PredictionRepository(getattr(settings, "db_path", None))
         # 历史库的 result 字段可能是 'pending'/NULL（旧版遗留），命中判定永远不相等，
