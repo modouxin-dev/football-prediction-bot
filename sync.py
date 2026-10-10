@@ -247,11 +247,55 @@ class MatchSync:
         return await self.sync_window(today - timedelta(days=days), today, kind="recent")
 
     async def sync_full_season(self) -> dict:
-        """整季历史：一次拉全量赛季赛程并落盘（不要每次查询都请求 380 场）。"""
-        today = datetime.now(timezone.utc).date()
-        return await self.sync_window(
-            today - timedelta(days=365), today + timedelta(days=365), kind="full-season"
-        )
+        """当前赛季整季回填（约 380 场）。
+
+        原实现走的是 ``sync_window(today-365, today+365)`` —— 带日期范围。
+        问题：主源对历史赛季的套餐限制正是按"是否带日期范围"判定的，
+        带日期请求会被拒（见 ``sync_season`` 的注释）。名字叫"整季"却
+        走窗口，导致 `/backfill` 不带参数时常常一场都拿不到。
+        改为委托 ``sync_season``，只按 league+season 请求。
+        """
+        return await self.sync_season(self.service.season_in_use)
+
+    async def sync_history(self, seasons: list[int] | None = None) -> dict:
+        """回填历史赛季（付费套餐解锁）。
+
+        :param seasons: 显式指定赛季列表；None = 向主源查询账号可用赛季。
+        返回汇总结果，逐赛季明细在 ``per_season`` 里。
+        """
+        if seasons is None:
+            try:
+                seasons = list(await self.service.api.get_available_seasons())
+            except Exception as exc:  # noqa: BLE001
+                log.warning("查询可用赛季失败：%s", exc)
+                seasons = []
+        result = {
+            "kind": "history", "season": "-", "seasons": 0,
+            "received": 0, "saved": 0, "per_season": [], "ok": False,
+            "message": "" if seasons else "未能获取可用赛季（可能套餐不支持历史赛季）",
+        }
+        for season in seasons:
+            try:
+                r = await self.sync_season(int(season))
+                result["per_season"].append({
+                    "season": int(season),
+                    "received": r.get("received", 0),
+                    "saved": r.get("saved", 0),
+                    "ok": bool(r.get("ok")),
+                    "message": r.get("message", ""),
+                })
+                result["received"] += int(r.get("received", 0))
+                result["saved"] += int(r.get("saved", 0))
+            except Exception as exc:  # noqa: BLE001 - 单季失败不影响其余
+                log.warning("赛季 %s 回填失败：%s", season, exc)
+                result["per_season"].append({
+                    "season": int(season), "received": 0, "saved": 0,
+                    "ok": False, "message": str(exc)[:200],
+                })
+        result["seasons"] = len(result["per_season"])
+        result["ok"] = result["saved"] > 0
+        self.last_result = result
+        return result
 
     async def run_startup(self) -> dict:
         """启动同步：先拉未来赛程，保证机器人起来就有数据可展示。"""
