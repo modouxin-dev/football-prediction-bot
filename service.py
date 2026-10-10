@@ -13,6 +13,7 @@ from analyzer import (
     LeagueModel,
     MatchAnalyzer,
     TeamStrength,
+    apply_market_adjustment,
     build_league_model,
     calculate_prediction_level,
     collect_1x2_odds,
@@ -460,7 +461,13 @@ class PredictionService:
             odds_response = []
         bookmakers = collect_1x2_odds(odds_response)
         odds = consensus_odds(bookmakers)
+        # edge 由泊松口径计算：它是「模型 vs 市场」的差异，若先换成市场口径
+        # 则 edge 恒为 -抽水，失去信息量。故两者的先后顺序不能颠倒。
         outcomes = self.analyzer.evaluate_outcomes(analysis, odds)
+        # 展示概率换成市场口径（实测优于泊松：准确率 53.96% vs 50.99%，
+        # log_loss 0.9698 vs 1.0053，McNemar p=0.0037，见 docs/MARKET_FUSION_EVAL.md）。
+        # 无赔率时 apply_market_adjustment 原样返回，行为不变。
+        analysis = apply_market_adjustment(analysis, odds)
         best = max(outcomes.items(), key=lambda kv: kv[1]["edge"]) if outcomes else None
         league = fx.get("league") or {}
 

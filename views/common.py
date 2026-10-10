@@ -22,7 +22,6 @@ from templates import (
     STATUS_TEXT,
     TABS,
     THIN_SEP,
-    VALUE_FLAG,
     VALUE_HIGH,
     VALUE_LOW,
 )

@@ -712,6 +712,88 @@ def market_gap(model_probs: dict, odds: dict | None) -> dict[str, float]:
     }
 
 
+def apply_market_adjustment(analysis: dict, odds: dict | None) -> dict:
+    """用去水市场概率替换胜平负，并按结果块等比缩放比分矩阵。
+
+    为什么必须同步缩放矩阵，而不只替换三项概率：
+    最可能比分、大小球、双方进球都由矩阵推出。只换三项概率会出现
+    「最可能比分 1-0（主胜）」与「客胜 55%」并存的矛盾展示。
+    按主胜/平/客三个结果块分别等比缩放，块内相对形状仍来自泊松
+    （比分的细粒度信息保留），块和恰等于市场概率，两者因此自洽。
+
+    泊松结果原样保留在 poisson_probs 中作为内部基准；
+    无赔率或去水失败时 market_used=False，行为与改造前完全一致。
+    """
+    result = dict(analysis)
+    result["poisson_probs"] = {
+        "home": analysis.get("win_prob", 0.0),
+        "draw": analysis.get("draw_prob", 0.0),
+        "away": analysis.get("loss_prob", 0.0),
+    }
+    market = implied_probabilities(odds)
+    if not market:
+        result["market_used"] = False
+        result["market_probs"] = None
+        return result
+
+    lh = float(analysis.get("lambda_home", 0.0) or 0.0)
+    la = float(analysis.get("lambda_away", 0.0) or 0.0)
+    rho = clamp_rho(analysis.get("rho"), lh, la)
+    n = MAX_GOALS + 1
+    try:
+        matrix = dc_score_matrix(lh, la, max_goals=MAX_GOALS, rho=rho)
+    except Exception:
+        result["market_used"] = False
+        result["market_probs"] = None
+        return result
+
+    blocks: dict[str, list[tuple[int, int]]] = {"home": [], "draw": [], "away": []}
+    for h in range(n):
+        for a in range(n):
+            key = "home" if h > a else ("draw" if h == a else "away")
+            blocks[key].append((h, a))
+
+    sums = {k: sum(matrix[h][a] for h, a in cells) for k, cells in blocks.items()}
+    # 任一块为 0 说明该结果在泊松下不可能，无法按比例放大，保持原样
+    if min(sums.values()) <= 0:
+        result["market_used"] = False
+        result["market_probs"] = None
+        return result
+
+    scaled = [[0.0] * n for _ in range(n)]
+    for key, cells in blocks.items():
+        factor = market[key] / sums[key]
+        for h, a in cells:
+            scaled[h][a] = matrix[h][a] * factor
+    total = sum(sum(row) for row in scaled)
+    if not (total > 0):
+        result["market_used"] = False
+        result["market_probs"] = None
+        return result
+    scaled = [[v / total for v in row] for row in scaled]
+
+    win = sum(scaled[h][a] for h in range(n) for a in range(h))
+    draw = sum(scaled[i][i] for i in range(n))
+    loss = sum(scaled[h][a] for h in range(n) for a in range(h + 1, n))
+    scores = sorted(
+        ((f"{h}-{a}", scaled[h][a]) for h in range(n) for a in range(n)),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    result.update({
+        "win_prob": win,
+        "draw_prob": draw,
+        "loss_prob": loss,
+        "best_score": scores[0][0],
+        "top_scores": scores[:5],
+        "over_2_5": sum(scaled[h][a] for h in range(n) for a in range(n) if h + a >= 3),
+        "btts": sum(scaled[h][a] for h in range(1, n) for a in range(1, n)),
+        "market_used": True,
+        "market_probs": market,
+    })
+    return result
+
+
 # ---- 模型信心等级 -------------------------------------------------------------
 # 说明：这里评的是「模型对自己结论的把握程度」，不是实际命中率。
 # 概率高 ≠ 一定赢，因此命名为「模型信心等级」而非「准确率等级」。

@@ -55,7 +55,10 @@ def test_stale_season_variable_falls_back_to_the_current_season():
 def test_predictions_use_real_team_strength():
     preds = build(FakeAPI({2026: [fixture(1, 1, "Alpha FC", 4, "Delta", NOW + timedelta(hours=2)), fixture(2, 4, "Delta", 1, "Alpha FC", NOW + timedelta(hours=3))]}))[2]
     strong_home, weak_home = preds
-    assert strong_home.analysis["win_prob"] > 0.6 > weak_home.analysis["win_prob"]
+    # 展示概率已换成市场口径（见 apply_market_adjustment），不再直接反映球队强度；
+    # 「模型确实用了真实球队强度」这一性质由 poisson_probs（内部基准）继续守。
+    assert strong_home.analysis["poisson_probs"]["home"] > 0.6 > weak_home.analysis["poisson_probs"]["home"]
+    assert strong_home.analysis["market_used"] is True
     assert strong_home.odds["n"] == 2 and strong_home.best is not None
 
 
@@ -91,7 +94,7 @@ def test_main_message_is_beautified_escaped_and_uses_local_time():
     assert "Beta &amp; Sons" in text and "Beta & Sons" not in text  # HTML 转义，否则 Telegram 会拒绝发送
     assert "▰" in text and "▱" in text and "第 6 轮" in text and "Main Ground" in text
     assert "09-24 17:00" in text and "UTC+8" in text  # 09:00 UTC 开球 → UTC+8 显示 17:00
-    assert "Value Bet" in text or "价值偏差" in text
+    assert "模型差异" in text and "Value Bet" not in text  # Value Bet 已按实测移除
     assert DISCLAIMER in text and "重仓" not in text
 
 
@@ -133,8 +136,8 @@ def test_keyboard_marks_active_tab_and_carries_fixture_id():
 def test_strategy_thresholds():
     p = build()[2][0]
     p.best = ("home", {"edge": 0.10, "prob": 0.5, "odds": 2.0, "ev": 0.1})
-    assert "价值较高" in ui.get_strategy(p)
+    assert "模型高于市场" in ui.get_strategy(p) and "价值" not in ui.get_strategy(p)
     p.best = ("away", {"edge": 0.04, "prob": 0.3, "odds": 3.0, "ev": 0.1})
-    assert "小幅价值" in ui.get_strategy(p)
+    assert "略高于市场" in ui.get_strategy(p)
     p.best = ("draw", {"edge": -0.02, "prob": 0.2, "odds": 3.0, "ev": -0.1})
     assert "观望" in ui.get_strategy(p)

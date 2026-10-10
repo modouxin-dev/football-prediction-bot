@@ -29,7 +29,6 @@ from templates import (
     STATUS_TEXT,
     TABS,
     THIN_SEP,
-    VALUE_FLAG,
     VALUE_HIGH,
     VALUE_LOW,
 )
@@ -142,7 +141,9 @@ class PredictionView:
             # 任一缺失都走「赔率暂无」，而不是让整条消息崩掉。
             if p.best and p.odds:
                 key, o = p.best
-                flag = " 🚀 <b>Value Bet</b>" if o["edge"] > VALUE_FLAG else ""
+                # 不打 🚀 Value Bet 标记：1110 场实测按 edge 阈值下注的 ROI 恒为负
+                # （>0% -11.94%、>5% -16.26%、>10% -17.85%、>15% -20.61%），
+                # 标记只会暗示「有便宜可捡」，与实测结论相反。
                 # 赔率与偏差也进核心数据的标签列：与主卡不同，这里两者都是
                 # 同一节内的补充指标，列宽对齐后才不会比上面的行突出一格。
                 lines.append(
@@ -154,8 +155,8 @@ class PredictionView:
                 # 价值偏差的值含 <b> 与 🚀，不能整行进 <code>（不支持嵌套），
                 # 因此标签沿用等宽块、值留在外层，两侧标签同宽故起点一致
                 lines.append(
-                    f"🔎 <code>{pad_cjk('价值偏差', CORE_LABEL_WIDTH)}</code>"
-                    f"<b>{OUTCOME_LABEL[key]}</b> <code>{o['edge']:+.2%}</code>{flag}"
+                    f"🔎 <code>{pad_cjk('模型差异', CORE_LABEL_WIDTH)}</code>"
+                    f"<b>{OUTCOME_LABEL[key]}</b> <code>{o['edge']:+.2%}</code>"
                 )
             else:
                 lines.append(kv_line("💰", "赔率", "暂无（本场仅提供模型概率）", CORE_LABEL_WIDTH))
@@ -193,11 +194,13 @@ class PredictionView:
             if not p.best:
                 return "仅供参考（暂无赔率）"
             key, o = p.best
+            # 措辞不再暗示「值得下注」：edge 是模型与市场的差异，
+            # 实测该差异越大模型反而越不准（见 docs/MARKET_FUSION_EVAL.md）。
             if o["edge"] >= VALUE_HIGH:
-                return f"{OUTCOME_LABEL[key]}（价值较高）"
+                return f"{OUTCOME_LABEL[key]}（模型高于市场 {o['edge']:.0%}）"
             if o["edge"] >= VALUE_LOW:
-                return f"{OUTCOME_LABEL[key]}（小幅价值）"
-            return "无明显价值，观望"
+                return f"{OUTCOME_LABEL[key]}（模型略高于市场）"
+            return "与市场基本一致，观望"
     
         @staticmethod
         def get_confidence(p) -> str:

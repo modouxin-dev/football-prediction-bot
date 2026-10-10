@@ -53,7 +53,6 @@ from templates import (
     TABS,
     TEAM_NAMES,
     THIN_SEP,
-    VALUE_FLAG,
     VALUE_HIGH,
     VALUE_LOW,
 )

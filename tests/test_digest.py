@@ -140,8 +140,8 @@ def test_league_sort_key_unregistered_goes_last():
     assert _league_sort_key(88888) < _league_sort_key(99999)
 
 
-def test_value_flag_shown_when_edge_high():
-    """价值偏差足够大时打 🚀，让用户一眼看到值得关注的场次。"""
+def test_warning_flag_shown_when_edge_high():
+    """分歧大时打 ⚠️：实测 edge 越大 ROI 越差，这里提示的是「模型不可信」而非机会。"""
 
     class _P:
         pass
@@ -149,7 +149,7 @@ def test_value_flag_shown_when_edge_high():
     p = _mk(1, 39, "Arsenal FC", "Liverpool FC", 30)
     p.best = ("home", {"edge": 0.12})
     text = DigestView.format_daily_digest([p], None, TZ)
-    assert "🚀" in text
+    assert "⚠️" in text and "🚀" not in text
 
 
 def test_single_page_has_no_page_number():
