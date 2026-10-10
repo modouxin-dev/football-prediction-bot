@@ -1,0 +1,27 @@
+name: Railway Config Check
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-config:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Run Railway Config Validator
+        run: python scripts/validate_railway_config.py
+      
+      - name: Report Results
+        if: always()
+        run: |
+          echo "✅ 检测完成！查看上面的日志" || echo "❌ 检测失败"
