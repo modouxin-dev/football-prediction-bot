@@ -114,6 +114,11 @@ def fixture_to_match(fx: dict) -> dict | None:
         # 缺失时建模层自动退回用进球算强度，行为与改造前一致。
         "home_sot": sot.get("home") if sot else None,
         "away_sot": sot.get("away") if sot else None,
+        # 赛前 1X2 赔率（football-data.co.uk 自带，Pinnacle > B365 > 均值）。
+        # 回测的市场口径要用它：生产展示口径已是去水市场概率，
+        # 回测若只跑泊松就与生产不一致，验证的就不是真实上线行为。
+        # 赔率是**赛前**记录的，属于当场可得信息，不构成前视偏差。
+        "odds": fx.get("odds") or None,
         "source": "history",
     }
 

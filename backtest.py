@@ -27,6 +27,7 @@ from analyzer import (
     DEFAULT_AVG_AWAY_GOALS, DEFAULT_AVG_HOME_GOALS, DEFAULT_RHO,
     MatchAnalyzer, build_league_model,
     apply_temperature, calculate_prediction_level, fit_rho, fit_temperature,
+    implied_probabilities,
 )
 from elo import DEFAULT_RATING, elo_multiplier
 
@@ -254,7 +255,8 @@ class WalkForwardBacktester:
                  use_elo: bool = True, use_dc: bool = False,
                  competition: str = "BT", prior_games: int | None = None,
                  use_dsa: bool = False, use_dsa_clamp: bool = False,
-                 use_sot: bool = False, use_calib: bool = False) -> None:
+                 use_sot: bool = False, use_calib: bool = False,
+                 use_market: bool = False) -> None:
         self.min_history = max(0, int(min_history))
         # 概率温度校准：修正泊松模型系统性过度自信（见 analyzer.fit_temperature）。
         # 默认关闭以保持历史口径；开启后温度只用**截至当时**的已评估样本滚动
@@ -264,6 +266,10 @@ class WalkForwardBacktester:
         # 默认 False —— 未拿到射正数的数据源必须保持原有进球口径，
         # 否则两侧量纲不一致会静默算错。
         self.use_sot = bool(use_sot)
+        # 展示口径：赔率可用时用去水市场概率，否则回落泊松。
+        # 生产已按此口径输出（service.apply_market_adjustment），
+        # 回测必须同口径，否则验证的不是真实上线行为。
+        self.use_market = bool(use_market)
         self.use_elo = bool(use_elo)
         self.use_dc = bool(use_dc)
         # DSA：需要 history 里累积逐场日志（见 _observe）
@@ -432,6 +438,8 @@ class WalkForwardBacktester:
             label = "dc" if not self.use_elo else "elo+dc"
         elif self.use_elo:
             label = "elo"
+        if self.use_market:
+            label = "market"
         report = BacktestReport(label=label)
         for m in matches:
             try:
@@ -473,6 +481,13 @@ class WalkForwardBacktester:
                     probs = self._predict(hid, aid)
                     if self.use_calib and self.temperature != 1.0:
                         probs = apply_temperature(probs, self.temperature)
+                    if self.use_market:
+                        # 市场口径：与生产 apply_market_adjustment 同逻辑。
+                        # 赔率是赛前记录，当场可得，不引入前视偏差；
+                        # 无赔率时回落泊松，与生产回落行为一致。
+                        mk = implied_probabilities(m.get("odds"))
+                        if mk:
+                            probs = (mk["home"], mk["draw"], mk["away"])
                     actual = outcome_index(hs, as_)
                     pred = favorite_index(probs)
                     hit = accuracy(pred, actual)
@@ -576,20 +591,22 @@ def run_backtest(matches: list[dict], *, min_history: int = DEFAULT_MIN_HISTORY,
     """一键跑双路回测：纯泊松（基线） vs 指定变体（挑战者）。
 
     variant:
-        "poisson" —— 纯 Maher/Poisson，与线上 /predict 口径一致（默认）
+        "poisson" —— 纯 Maher/Poisson，模型内部基准（默认）
         "elo"     —— 泊松 + Elo 融合
         "dc"      —— 泊松 + Dixon-Coles 低比分修正
+        "market"  —— 赛前赔率去水概率（无赔率的场次回落泊松）
 
-    默认取 "poisson"：线上 service.py 调用 predict_match() 时不传
-    elo_home_advantage，即线上跑的就是纯泊松。回测默认必须与之对齐，
-    否则报出来的数字描述的不是线上模型。
+    默认取 "poisson"：它是模型的内部基准，泊松 vs 变体的对比才有意义。
+    但要注意**线上展示口径已改为 "market"**（service.apply_market_adjustment），
+    所以评估线上真实表现时应显式传 variant="market"。
     """
     use_dc = (variant == "dc")
     use_elo = (variant == "elo")
+    use_market = (variant == "market")
     base = WalkForwardBacktester(min_history=min_history, use_elo=False,
                                  use_dc=False).run(matches)
     chal_tester = WalkForwardBacktester(min_history=min_history, use_elo=use_elo,
-                                        use_dc=use_dc)
+                                        use_dc=use_dc, use_market=use_market)
     chal = chal_tester.run(matches)
     return {
         "comparison": compare(base, chal),
