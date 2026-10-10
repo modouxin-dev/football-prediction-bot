@@ -626,6 +626,36 @@ class PredictionRepository:
             return []
 
     # ---- 统计 ---------------------------------------------------------------
+    def settled_samples(self, limit: int = 2000) -> list[tuple]:
+        """已结算且三项概率齐全的样本，供温度校准拟合。
+
+        返回 [(probs, actual_index), ...]，actual_index 为 0/1/2（主胜/平局/客胜）。
+        任何异常都退化为空列表——拟合不出来就保持不校准，绝不猜测。
+        """
+        try:
+            conn = self._connect()
+            rows = list(conn.execute(
+                "SELECT home_prob, draw_prob, away_prob, actual_home, actual_away "
+                "FROM predictions WHERE actual_home IS NOT NULL AND actual_away IS NOT NULL "
+                "AND home_prob IS NOT NULL AND draw_prob IS NOT NULL AND away_prob IS NOT NULL "
+                "ORDER BY kickoff DESC LIMIT ?",
+                (int(limit),),
+            ))
+        except Exception as exc:
+            log.warning("读取已结算样本失败：%s", exc)
+            return []
+        out: list[tuple] = []
+        for r in rows:
+            try:
+                probs = [float(r["home_prob"]), float(r["draw_prob"]), float(r["away_prob"])]
+                hs, as_ = int(r["actual_home"]), int(r["actual_away"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if sum(probs) <= 0:
+                continue
+            out.append((probs, 0 if hs > as_ else (1 if hs == as_ else 2)))
+        return out
+
     def stats(self) -> dict:
         """命中率统计：总命中、连胜/连败、各信心等级命中率。"""
         try:
