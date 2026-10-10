@@ -465,7 +465,7 @@ def brand_banner(title: str = BRAND_EN,
         ax.text(0.06, 0.62, title, fontsize=27, fontweight="bold",
                 color=FG, va="center", ha="left")
         ax.text(0.06, 0.38, subtitle, fontsize=12.5, color=ACCENT, va="center", ha="left")
-        ax.text(0.06, 0.17, tagline, fontsize=9.5, color=GRID if False else "#8A9AA8",
+        ax.text(0.06, 0.17, tagline, fontsize=9.5, color="#8A9AA8",
                 va="center", ha="left", family="monospace")
 
         # 右侧装饰：同心圆靶心（外→内：蓝 黄 绿，中心红点，与顶部四色呼应）
