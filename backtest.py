@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from analyzer import (
     DEFAULT_AVG_AWAY_GOALS, DEFAULT_AVG_HOME_GOALS, DEFAULT_RHO,
     MatchAnalyzer, build_league_model,
-    calculate_prediction_level, fit_rho,
+    apply_temperature, calculate_prediction_level, fit_rho, fit_temperature,
 )
 from elo import DEFAULT_RATING, elo_multiplier
 
@@ -254,8 +254,12 @@ class WalkForwardBacktester:
                  use_elo: bool = True, use_dc: bool = False,
                  competition: str = "BT", prior_games: int | None = None,
                  use_dsa: bool = False, use_dsa_clamp: bool = False,
-                 use_sot: bool = False) -> None:
+                 use_sot: bool = False, use_calib: bool = False) -> None:
         self.min_history = max(0, int(min_history))
+        # 概率温度校准：修正泊松模型系统性过度自信（见 analyzer.fit_temperature）。
+        # 默认关闭以保持历史口径；开启后温度只用**截至当时**的已评估样本滚动
+        # 拟合，绝不引入未来信息。
+        self.use_calib = bool(use_calib)
         # 射正数口径：一场射正 4~6 次 vs 进球 1~2 个，样本量大、噪声小。
         # 默认 False —— 未拿到射正数的数据源必须保持原有进球口径，
         # 否则两侧量纲不一致会静默算错。
@@ -274,6 +278,9 @@ class WalkForwardBacktester:
         self.rho: float = DEFAULT_RHO if use_dc else 0.0
         self._rho_fitted: bool = (not use_dc)
         self.refit_every: int = 100
+        self.temperature: float = 1.0
+        self._temp_fitted: bool = False
+        self._calib_observations: list[tuple] = []
         self.min_fit_samples: int = 200
         self._dc_observations: list[tuple] = []
         # 累积状态
@@ -453,7 +460,19 @@ class WalkForwardBacktester:
                     ):
                         self.rho = fit_rho(self._dc_observations)
                         self._rho_fitted = True
+                    # 温度校准同样滚动拟合：只在评估完本场并记入观测之后才重拟合，
+                    # 因此拟合所用的永远是**过去**的样本，不含本场及之后的赛果。
+                    if self.use_calib and (
+                        not self._temp_fitted
+                        or (self.refit_every > 0
+                            and self._seen % self.refit_every == 0
+                            and len(self._calib_observations) >= self.min_fit_samples)
+                    ):
+                        self.temperature = fit_temperature(self._calib_observations)
+                        self._temp_fitted = True
                     probs = self._predict(hid, aid)
+                    if self.use_calib and self.temperature != 1.0:
+                        probs = apply_temperature(probs, self.temperature)
                     actual = outcome_index(hs, as_)
                     pred = favorite_index(probs)
                     hit = accuracy(pred, actual)
@@ -462,6 +481,9 @@ class WalkForwardBacktester:
                     report.log_loss_sum += log_loss(probs, actual)
                     report.rps_sum += rps(probs, actual)
                     report.brier_sum += brier(probs, actual)
+
+                    if self.use_calib:
+                        self._calib_observations.append((probs, actual))
 
                     # 信心等级：用于检验「高信心是否真的更准」
                     level = calculate_prediction_level({

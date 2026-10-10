@@ -280,6 +280,12 @@ class PredictionService:
         # 历史库的 result 字段可能是 'pending'/NULL（旧版遗留），命中判定永远不相等，
         # 命中率会被压成 0。启动时自愈一次；幂等，正常库零改动。
         self.repo.backfill_results()
+        # 概率温度校准：泊松模型系统性过度自信（高概率档实测虚高 7~11pt），
+        # 会让「模型概率 − 1/赔率」被高估，把并非价值注的比赛误标成 Value Bet。
+        # 温度用库内已结算样本拟合；样本不足时 fit_temperature 返回 1.0（不校准）。
+        # 每次预测前刷新：随赛果积累逐步收敛，且始终只用过去的数据。
+        self.temperature: float = 1.0
+        self.refresh_calibration()
         # 赛程本地缓存：外部 API 只负责拉取，查询优先读本地库
         from sync import MatchSync
 
@@ -437,7 +443,9 @@ class PredictionService:
         home, away = teams.get("home") or {}, teams.get("away") or {}
         fixture_id = fx["fixture"]["id"]  # 保持数据源原类型；_store 内部统一用 str key 查找
 
-        analysis = self.analyzer.predict_match(model, home["id"], away["id"])
+        analysis = self.analyzer.predict_match(
+            model, home["id"], away["id"], temperature=self.temperature,
+        )
         try:
             odds_response = await self.api.get_odds(fixture_id, fresh=fresh)
         except (APIError, DataSourceError) as exc:  # 赔率缺失不应阻断整条预测
@@ -1051,7 +1059,9 @@ class PredictionService:
             "model": {
                 "home_strength": model.strength(home_id),
                 "away_strength": model.strength(away_id),
-                "analysis": self.analyzer.predict_match(model, home_id, away_id),
+                "analysis": self.analyzer.predict_match(
+                model, home_id, away_id, temperature=self.temperature,
+            ),
                 "avg_home_goals": model.avg_home_goals,
                 "avg_away_goals": model.avg_away_goals,
             },
@@ -1069,6 +1079,25 @@ class PredictionService:
     def settle_result(self, fixture_id, home_score: int | None, away_score: int | None) -> bool:
         """回写真实赛果，供命中率统计使用。"""
         return self.repo.settle(fixture_id, home_score, away_score)
+
+    def refresh_calibration(self) -> float:
+        """用已结算样本重拟合概率温度，返回当前生效的 T。
+
+        拟合不出来的情况（样本不足、数据异常）一律退回 1.0 —— 不校准只是
+        维持现状，用错误的 T 反而会把概率推得更偏。
+        """
+        try:
+            samples = self.repo.settled_samples()
+        except Exception as exc:  # pragma: no cover - 库不可用时保持不校准
+            log.warning("读取校准样本失败，保持不校准：%s", exc)
+            self.temperature = 1.0
+            return self.temperature
+        from analyzer import fit_temperature
+
+        self.temperature = fit_temperature(samples)
+        if self.temperature != 1.0:
+            log.info("概率温度校准已生效：T=%.4f（样本 %d 场）", self.temperature, len(samples))
+        return self.temperature
 
     async def sync_results(self, fixtures: list[dict] | None = None) -> int:
         """把已完场比赛的真实比分回写到数据库。返回本次结算条数。
@@ -1104,6 +1133,8 @@ class PredictionService:
                 self._sync_elo(fx, int(home), int(away))
         if done:
             log.info("已回写 %d 场赛果", done)
+            # 赛果多了，温度该重新拟合——否则校准一直停在启动时的样本上。
+            self.refresh_calibration()
         return done
 
     def _sync_elo(self, fixture: dict, home_score: int, away_score: int) -> None:
