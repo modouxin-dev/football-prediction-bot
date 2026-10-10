@@ -2,7 +2,7 @@
 >
 > 本文提到的 models.py、monitoring.py、data_analysis.py、feature_extractor.py、multi_model_ensemble.py 等文件**已从仓库删除**（零引用且/或含硬编码假数据，见 PR #44 / #45）。
 > 涉及的「准确率 55%+ / 主胜 58% / 平局 35% / 高置信 62%」等数字**未经实测**，
-> 实测结果为：泊松 50.99%、市场 53.96%、平局 0%（模型与市场均不预测平局）。
+> 实测结果为：泊松 50.99%、市场 53.78%、平局 0%（模型与市场均不预测平局）。
 >
 > 现状请以 `README.md` 与 `docs/MARKET_FUSION_EVAL.md` 为准。
 

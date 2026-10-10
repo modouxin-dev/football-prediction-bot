@@ -2,7 +2,7 @@
 
 实测依据（1110 场英超，语料带 B365 赔率，walk-forward）：
     纯泊松   准确率 50.99%  log_loss 1.0053
-    纯市场   准确率 53.96%  log_loss 0.9698   McNemar p=0.0037
+    纯市场   准确率 53.78%  log_loss 0.9692   McNemar p=0.007047
     分赛季/前后半段市场均不劣于泊松
     Value Bet 各阈值 ROI 全负：>0% -11.94% >5% -16.26% >10% -17.85% >15% -20.61%
 详见 docs/MARKET_FUSION_EVAL.md。
