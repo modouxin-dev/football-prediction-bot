@@ -159,6 +159,33 @@ CREATE TABLE IF NOT EXISTS api_quota (
     n        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, source)
 );
+
+-- 回测结果留档：每次回测都落盘，重启可查、跨部署保留。
+-- 没有它，回测结论只活在进程内存里，容器一重启就丢失，
+-- 也就无从判断"模型是在变好还是在变差"。
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    competition   TEXT NOT NULL,
+    season        TEXT,             -- NULL = 全部赛季
+    variant       TEXT NOT NULL,
+    min_history   INTEGER NOT NULL,
+    n             INTEGER NOT NULL, -- 评估场次
+    hits          INTEGER NOT NULL,
+    accuracy      REAL,
+    log_loss      REAL,
+    rps           REAL,
+    brier         REAL,
+    ece           REAL,
+    rho           REAL,
+    corpus_db     INTEGER,          -- 语料中来自数据库的场数
+    corpus_csv    INTEGER,          -- 语料中来自内置 CSV 的场数
+    verdict       TEXT,
+    by_level      TEXT,             -- JSON：各信心等级的命中率
+    calibration   TEXT,             -- JSON：分档校准
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bt_comp_created
+    ON backtest_runs(competition, created_at);
 """
 
 QUOTA_SCHEMA = """
@@ -168,6 +195,33 @@ CREATE TABLE IF NOT EXISTS api_quota (
     n        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, source)
 );
+
+-- 回测结果留档：每次回测都落盘，重启可查、跨部署保留。
+-- 没有它，回测结论只活在进程内存里，容器一重启就丢失，
+-- 也就无从判断"模型是在变好还是在变差"。
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    competition   TEXT NOT NULL,
+    season        TEXT,             -- NULL = 全部赛季
+    variant       TEXT NOT NULL,
+    min_history   INTEGER NOT NULL,
+    n             INTEGER NOT NULL, -- 评估场次
+    hits          INTEGER NOT NULL,
+    accuracy      REAL,
+    log_loss      REAL,
+    rps           REAL,
+    brier         REAL,
+    ece           REAL,
+    rho           REAL,
+    corpus_db     INTEGER,          -- 语料中来自数据库的场数
+    corpus_csv    INTEGER,          -- 语料中来自内置 CSV 的场数
+    verdict       TEXT,
+    by_level      TEXT,             -- JSON：各信心等级的命中率
+    calibration   TEXT,             -- JSON：分档校准
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bt_comp_created
+    ON backtest_runs(competition, created_at);
 """
 
 _local = threading.local()
@@ -655,6 +709,89 @@ class PredictionRepository:
                 continue
             out.append((probs, 0 if hs > as_ else (1 if hs == as_ else 2)))
         return out
+
+    # ---- 回测留档 ----------------------------------------------------------
+    def save_backtest_run(self, *, competition: str, variant: str,
+                          min_history: int, result: dict,
+                          season: int | None = None) -> int | None:
+        """把一次回测的结论落盘。返回新记录 id，失败返回 None。
+
+        回测很贵（1110 场要跑几十秒），结果只放内存等于白跑——
+        容器重启、重新部署都会让它消失。落盘后才能回答"模型是否在变好"。
+        """
+        import json
+        from datetime import datetime, timezone
+
+        corpus = result.get("corpus") or {}
+        try:
+            conn = self._connect()
+            cur = conn.execute(
+                "INSERT INTO backtest_runs (competition, season, variant, min_history, "
+                "n, hits, accuracy, log_loss, rps, brier, ece, rho, "
+                "corpus_db, corpus_csv, verdict, by_level, calibration, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(competition), season, str(variant), int(min_history),
+                    int(result.get("total_predictions") or 0),
+                    int(result.get("correct_predictions") or 0),
+                    result.get("accuracy"), result.get("log_loss"),
+                    result.get("rps"), result.get("brier"), result.get("ece"),
+                    result.get("rho"),
+                    corpus.get("db"), corpus.get("history"),
+                    result.get("verdict"),
+                    json.dumps(result.get("by_level") or {}, ensure_ascii=False),
+                    json.dumps(result.get("calibration") or {}, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+        except Exception as exc:
+            log.warning("回测结果落盘失败：%s", exc)
+            return None
+
+    def latest_backtest(self, competition: str,
+                        variant: str | None = None) -> dict | None:
+        """取最近一次回测结论。没有就返回 None（调用方自行判断）。"""
+        import json
+
+        try:
+            conn = self._connect()
+            if variant is None:
+                row = conn.execute(
+                    "SELECT * FROM backtest_runs WHERE competition=? "
+                    "ORDER BY id DESC LIMIT 1", (str(competition),)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM backtest_runs WHERE competition=? AND variant=? "
+                    "ORDER BY id DESC LIMIT 1", (str(competition), str(variant),
+                                                 )).fetchone()
+        except Exception as exc:
+            log.warning("读取回测结论失败：%s", exc)
+            return None
+        if row is None:
+            return None
+        d = dict(row)
+        for k in ("by_level", "calibration"):
+            try:
+                d[k] = json.loads(d[k]) if d.get(k) else {}
+            except (TypeError, ValueError):
+                d[k] = {}
+        return d
+
+    def backtest_history(self, competition: str, limit: int = 20) -> list[dict]:
+        """历史回测记录（新→旧），用于观察指标随时间的变化。"""
+        try:
+            conn = self._connect()
+            rows = list(conn.execute(
+                "SELECT id, competition, season, variant, n, accuracy, log_loss, "
+                "rps, corpus_db, corpus_csv, verdict, created_at "
+                "FROM backtest_runs WHERE competition=? ORDER BY id DESC LIMIT ?",
+                (str(competition), int(limit))))
+        except Exception as exc:
+            log.warning("读取回测历史失败：%s", exc)
+            return []
+        return [dict(r) for r in rows]
 
     def stats(self) -> dict:
         """命中率统计：总命中、连胜/连败、各信心等级命中率。"""

@@ -25,6 +25,7 @@ from telegram.ext import ContextTypes
 
 from bot_handler import BotUI
 from keyboards import nav_row
+from backtester_fixed import BacktesterFixed
 from config import Settings
 from service import PredictionService
 from tghtml import normalize
@@ -41,6 +42,14 @@ WIDE_HOURS = 24 * 14
 DAILY_JOB = "daily_push"
 SETTLE_JOB = "settle_results"
 SYNC_JOB = "sync_matches"
+BACKTEST_JOB = "backtest_run"
+HISTORY_JOB = "sync_history"
+
+# 历史赛季回填与回测都是重活：前者要拉整季（数百场，吃 API 额度），
+# 后者要逐场滚动预测（1100 场约数十秒）。默认每天各一次即可，
+# 太频繁只会白烧额度，且结论不会变得更有用。
+HISTORY_INTERVAL_HOURS = 24
+BACKTEST_INTERVAL_HOURS = 24
 
 
 @dataclass
@@ -170,6 +179,60 @@ async def sync_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("赛程同步失败：%s", exc)
 
 
+async def history_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """回填历史赛季（付费套餐解锁），让库里真正积累起赛果。
+
+    只补赛程与赛果，不伪造预测记录——回填时用现在的积分榜去算过去的比赛
+    会引入前视偏差，得出的命中率是假象。
+    """
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    try:
+        r = await service.sync.sync_history()
+        log.info("历史赛季回填完成：赛季 %d 个，收到 %d 保存 %d",
+                 r.get("seasons", 0), r.get("received", 0), r.get("saved", 0))
+    except Exception as exc:  # 回填失败不能影响主流程
+        log.warning("历史赛季回填失败：%s", exc)
+
+
+async def backtest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """跑一次全量回测并把结论落盘。
+
+    回测是"模型自我体检"：用滚动前进的方式对历史比赛逐场预测，
+    再把准确率 / 对数损失 / 校准度存进 SQLite。
+    结果必须落盘——只放内存的话，容器一重启就消失，
+    也就无从回答"模型是在变好还是在变差"。
+    """
+    from datetime import datetime, timezone
+
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    try:
+        bt = BacktesterFixed(
+            league_id=service.settings.league_id,
+            db_path=getattr(service.settings, "db_path", None),
+        )
+        result = await bt.backtest()
+        run_id = service.repo.save_backtest_run(
+            competition=bt.competition_code,
+            variant=bt.variant,
+            min_history=bt.min_history,
+            result=result,
+        )
+        log.info(
+            "回测完成并落盘(id=%s)：%d 场 准确率 %.2f%% log_loss %.4f "
+            "（语料 db=%s csv=%s）",
+            run_id, result["total_predictions"], result["accuracy"] * 100,
+            result["log_loss"],
+            (result.get("corpus") or {}).get("db"),
+            (result.get("corpus") or {}).get("history"),
+        )
+        app.bot_data.setdefault("last_backtest_at",
+                                datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    except Exception as exc:  # 回测失败绝不能影响推送主流程
+        log.warning("回测失败（不影响主流程）：%s", exc)
+
+
 def setup_scheduler(app, settings: Settings) -> int:
     """注册全部定时任务。返回注册的任务数。
 
@@ -187,7 +250,19 @@ def setup_scheduler(app, settings: Settings) -> int:
     app.job_queue.run_repeating(
         sync_job, interval=SYNC_INTERVAL_HOURS * 3600, first=10, name=SYNC_JOB,
     )
-    registered = 1
+    # 历史回填与回测**不依赖 CHAT_ID**：它们是数据积累与模型体检，
+    # 属于"程序自己该做的事"，不该因为没配推送群就整个停掉。
+    # （此前的 settle_job 就被误放进 chat_id 分支，导致没配群号时
+    #  赛果一条都不结算——那个问题单独修，这里先保证不再重演。）
+    app.job_queue.run_repeating(
+        history_job, interval=HISTORY_INTERVAL_HOURS * 3600, first=600,
+        name=HISTORY_JOB,
+    )
+    app.job_queue.run_repeating(
+        backtest_job, interval=BACKTEST_INTERVAL_HOURS * 3600, first=1800,
+        name=BACKTEST_JOB,
+    )
+    registered = 3
     if settings.chat_id:
         app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
         # 每 6 小时同步一次赛果，保证命中率统计能及时更新
