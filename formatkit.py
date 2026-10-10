@@ -24,7 +24,6 @@ from templates import (
     STATUS_TEXT,
     TABS,
     THIN_SEP,
-    VALUE_FLAG,
 )
 
 def team_name(raw: str | None, bilingual: bool = True) -> str:

@@ -111,7 +111,11 @@ def _headline(p, tz) -> str:
 
 
 def _verdict_line(p) -> str:
-    """一行结论：「▸ 主胜 52% · 🟢 高信心」（超过 3% 偏差加 🚀 价值标记）。"""
+    """一行结论：「▸ 主胜 52% · 🟢 高信心」。
+
+    不再加 🚀：实测 edge 越大 ROI 越差，🚀 会把「模型与市场分歧大」
+    误示成「值得关注的机会」。
+    """
     a = p.analysis or {}
     probs = {
         "home_win": float(a.get("win_prob", 0) or 0),
@@ -137,7 +141,7 @@ def _verdict_line(p) -> str:
         except (TypeError, ValueError, IndexError, AttributeError):
             best_edge = None
     if best_edge is not None and best_edge >= 0.07:
-        flag = " 🚀"
+        flag = " ⚠️"  # 分歧大 = 模型更不可信，不是机会
     # LEVEL_META 里的 name 是单字（高/中/低），单独挂在句尾语义不完整，
     # 这里补成「高信心」——单字「中」容易被误读成「中场」之类。
     return (
