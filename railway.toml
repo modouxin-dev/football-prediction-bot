@@ -1,0 +1,25 @@
+[build]
+builder = "dockerfile"
+dockerfile = "./Dockerfile"
+
+[deploy]
+startCommand = "python main.py"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+[environments.production]
+healthCheck = {
+  path = "/health",
+  port = 8000,
+  timeout = 10,
+  interval = 10
+}
+
+[volumes]
+volumes = [
+  { mount = "/data", size = "5GB" }
+]
+
+[variables]
+DATABASE_PATH = "/data/football.db"
+LOG_LEVEL = "INFO"
