@@ -108,7 +108,10 @@ def test_odds_failure_does_not_cooldown_primary():
 
     run(router.get_odds(1001))
 
-    assert not router._primary_cooling(), "赔率失败不应把主源拖进冷却"
+    # get_odds 是可选方法，不携带联赛上下文（league_id 恒为 None），
+    # 所以不能按联赛查询 _primary_cooling(39) —— 那会恒为真、永远通过。
+    # 直接断言冷却字典为空，语义是「没有任何联赛被误冷却」，能捕获误写入。
+    assert not router._primary_cooldown_by_league, "赔率失败不应把主源拖进冷却"
 
 
 def test_key_data_still_uses_primary_after_odds_failure():
@@ -130,7 +133,8 @@ def test_critical_method_failure_still_cooldowns():
 
     run(router.get_fixtures(39, 2026, DAY, DAY))
 
-    assert router._primary_cooling(), "关键方法失败必须进冷却"
+    # 冷却按联赛隔离，必须指定联赛查询；无参调用在新签名下恒为 False。
+    assert router._primary_cooling(39), "关键方法失败必须进冷却"
 
 
 def test_optional_failure_does_not_record_switch():
@@ -164,7 +168,8 @@ def test_optional_failure_still_records_error_for_diag():
     run(router.get_odds(1001))
 
     assert "api-football" in router._last_errors
-    assert not router._primary_cooling()
+    # 同上：可选方法无联赛上下文，按联赛查询会恒为真，改为断言字典为空。
+    assert not router._primary_cooldown_by_league
 
 
 def test_success_clears_error():

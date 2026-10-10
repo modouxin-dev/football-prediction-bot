@@ -340,7 +340,12 @@ def make_ctx(api, user_data=None):
     service.local_first = False
     app = SimpleNamespace(
         bot=SimpleNamespace(send_message=AsyncMock()),
-        bot_data={"settings": SETTINGS, "service": service, "api": api},
+        # cache_manager 必须与 main.build_application 保持一致：生产在那里
+        # 挂上 CacheManager 实例，这里绕过 build_application 直接捏 app，
+        # 就得自己补上，否则刷新/取缓存的调用链会 KeyError。
+        # 每个用例各自 new 一个，避免跨用例共享缓存状态。
+        bot_data={"settings": SETTINGS, "service": service, "api": api,
+                  "cache_manager": main.CacheManager()},
         job_queue=SimpleNamespace(get_jobs_by_name=lambda n: []),
     )
     # bot 一并挂上：汇总分页时除就地编辑外还要追加新消息

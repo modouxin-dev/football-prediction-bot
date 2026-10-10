@@ -178,9 +178,16 @@ class FakeQuery:
 
 def make_ctx(api, fx_cache=None):
     service = PredictionService(SETTINGS, api)
-    bot_data = {"settings": SETTINGS, "service": service, "api": api}
+    # 与 main.build_application 保持一致：生产把赛程缓存放在 cache_manager
+    # 容器里，on_chart 也只从该容器读。这里绕过 build_application 直接捏 app，
+    # 就必须自己挂上实例，否则取值时 KeyError。
+    cache_manager = main.CacheManager()
+    bot_data = {"settings": SETTINGS, "service": service, "api": api,
+                "cache_manager": cache_manager}
     if fx_cache is not None:
-        bot_data["fx_cache"] = fx_cache
+        # 预置进 cache_manager 而非直接塞 bot_data：on_chart 只认前者，
+        # 塞错位置会让它拿到 None 而误判成「不在今日赛程」。
+        run(cache_manager.set("fx_cache", fx_cache))
     app = SimpleNamespace(
         bot=SimpleNamespace(send_message=AsyncMock()),
         bot_data=bot_data,

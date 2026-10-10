@@ -28,7 +28,21 @@ class BacktesterFixed:
             #     season=self.season,
             #     status="FINISHED"
             # ).all()
-            
+            #
+            # 上面这行是原作者留下的意图，但本仓库里它跑不通：
+            # models.Fixture 用的是 SQLAlchemy 的 declarative_base()，
+            # 没有 Flask-SQLAlchemy 才有的 .query；models.py 目前无人 import，
+            # sqlalchemy 也只写在 requirements-web.txt、不在生产 requirements.txt。
+            #
+            # 注意：改动前这里直接引用未定义的 fixtures，实际会抛
+            # NameError —— 并不是「取不到数据」。本次只做最小修复：把它定义
+            # 为空列表，让后续逻辑按「无数据」路径走（告警并返回空列表，
+            # backtest() 随之抛 ValueError）。
+            # 这**没有实现历史赛事数据加载**，仅避免未定义变量异常。
+            # 数据源接入（接 repository 的 SQLite / 读 data-history CSV /
+            # 删除这个无调用方无测试的孤儿文件）仍是后续事项，待确认后再做。
+            fixtures: list[dict] = []
+
             # 验证数据完整性
             if not fixtures:
                 log.warning(f"未找到 {self.season} 赛季的比赛数据")

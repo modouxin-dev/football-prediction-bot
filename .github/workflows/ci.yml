@@ -43,32 +43,55 @@ jobs:
           cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
-        run: python -m pytest -v --tb=short
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Install CJK fonts (chart tests require them)
+        # chart.py 的 _setup_font() 需要中文字体，找不到时 FONT_IN_USE 为空串，
+        # tests/test_chart.py:126 会断言失败，渲染时还会刷屏
+        # "Glyph xxxxx missing from current font"。
+        # Dockerfile 已在 PR #36 加了 CJK 字体支持，CI 必须保持一致。
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+          fc-cache -f > /dev/null 2>&1 || true
 
       - name: Run tests
         # pytest.ini 已配置 pythonpath = . 与 testpaths = tests
         # 测试不联网，使用 tests/sample_data.py 的仿真响应
-        #
-        # 失败时把输出尾部同时写进 job summary 与 ::error:: 注解：
-        # Actions 的日志 zip 走 results-receiver 域名，部分网络环境取不到，
-        # 而注解可通过 api.github.com 的 check-runs 接口读取。
-        # 注：不只抓 FAILED 行——集合错误 / 启动失败时没有 FAILED 行，
-        # 那样会漏掉真正的报错，所以整体回传尾部输出。
         run: |
           set -o pipefail
-          python -m pytest -q --tb=line -rf > /tmp/pytest.txt 2>&1
-          code=$?
+          # 两个坑，改回任一个都会让失败详情再次消失：
+          # 1) 本步骤 shell 是 `bash -e`，pytest 一返回非零就当场中止脚本，
+          #    下面所有回传逻辑永远不执行——只能看到「exit code 1」。
+          #    所以这里临时关掉 -e，拿到退出码后再恢复。
+          # 2) 不能把 pytest 输出重定向进文件，否则 job 日志里只剩脚本回声。
+          #    用 tee 让输出实时打到日志上，手机端展开即可看到。
+          set +e
+          python -m pytest -q --tb=line -rf 2>&1 | tee /tmp/pytest.txt
+          code=${PIPESTATUS[0]}
+          set -e
           if [ "$code" -ne 0 ]; then
             echo "### ❌ pytest 失败（退出码 $code）" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             tail -60 /tmp/pytest.txt >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
-            tail -40 /tmp/pytest.txt | while IFS= read -r line; do
+            # 每步注解上限 10 条，GitHub 自动生成的已占 3 条；写多了会被整体
+            # 丢弃（此前写 40 条，外部一条都看不到）。这里只发 5 条。
+            grep -E "^(FAILED|ERROR)" /tmp/pytest.txt | head -5 | while IFS= read -r line; do
               echo "::error::$line"
             done
           fi
-          tail -60 /tmp/pytest.txt
           exit $code
+
+      - name: Upload pytest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-py${{ matrix.python-version }}
+          path: /tmp/pytest.txt
+          if-no-files-found: warn
 
       - name: Static check (undefined name)
         # 独立步骤而非塞进 pytest：这类问题（NameError）此前靠测试完全拦不住

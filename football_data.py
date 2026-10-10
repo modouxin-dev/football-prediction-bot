@@ -115,6 +115,11 @@ class FootballDataAPI:
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
+        # _get() 的响应缓存：(截止时间, 数据)。本类未接入 cache_manager，
+        # 缓存实现就是这里的实例字典；此前本行被误删，_get() 仍在读写
+        # self._cache，导致 AttributeError: 'FootballDataAPI' object has no
+        # attribute '_cache'。恢复最小可用实现，不改动缓存策略本身。
+        self._cache: dict[tuple, tuple[float, Any]] = {}
         self.last_note: str | None = None           # 数据被回退展示时的说明 / note when shifted
         self.last_shifted_date: date | None = None  # 实际展示的比赛日 / actually shown matchday
         self.season_range: tuple[date, date] | None = None  # 赛季最早/最晚比赛日 / season span

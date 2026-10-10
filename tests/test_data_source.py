@@ -840,7 +840,9 @@ def test_primary_empty_fixtures_keeps_empty_trace():
 def test_cooling_primary_reports_remaining_seconds():
     """主源处于冷却期、备用源也失败时，提示要说明是冷却导致未发起请求。"""
     router = _router_both_fail(StubPrimary())
-    router._primary_down_until = time.monotonic() + 300
+    # 冷却态按联赛隔离（_primary_cooldown_by_league），旧的单值属性
+    # _primary_down_until 已在重构中移除，设它不会让主源进入冷却。
+    router._primary_cooldown_by_league[39] = time.monotonic() + 300
     with pytest.raises(DataSourceError) as exc:
         run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     text = str(exc.value)
