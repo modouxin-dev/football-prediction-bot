@@ -5,6 +5,7 @@ Quack! 🦆 小鸭子自动诊断系统
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -87,15 +88,56 @@ class RailwayValidator:
                 "必需环境变量"
             )
         
-        # 检测 4: requirements.txt
+        # 检测 4: Python 依赖
+        # 依赖分两个文件：requirements.txt 是机器人本体，requirements-web.txt 是
+        # Web 看板（PR #36 起分离）。此前这里要求 requirements.txt 同时含
+        # fastapi / sqlalchemy / pandas，与实际结构不符：
+        #   fastapi    → 属于 Web 看板，已在 requirements-web.txt
+        #   sqlalchemy → 只被 models.py 使用，而该文件是无引用的死代码
+        #   pandas     → 全仓无任何 import
+        # 照旧规则只能通过往 requirements.txt 里塞无用包来"骗过"检查，
+        # 所以改为按真实结构分别校验。
         print("📋 检测 4: Python 依赖")
-        if self.check_file_exists("requirements.txt", "依赖文件"):
+        if self.check_file_exists("requirements.txt", "机器人本体依赖"):
             self.check_file_contains(
                 "requirements.txt",
-                ["fastapi", "sqlalchemy", "pandas"],
-                "核心库"
+                ["python-telegram-bot", "httpx", "matplotlib"],
+                "机器人核心库"
             )
-        
+        if self.check_file_exists("requirements-web.txt", "Web 看板依赖"):
+            self.check_file_contains(
+                "requirements-web.txt",
+                ["fastapi", "uvicorn"],
+                "Web 核心库"
+            )
+
+        # 检测 4b: Dockerfile 必须装全两份依赖。
+        # 这是真 bug 的回归防护：早期 Dockerfile 只写
+        # `pip install -r requirements-web.txt`，机器人本体依赖没装，
+        # 镜像能构建但进程起不来（PR #36 修过）。
+        if (self.root / "Dockerfile").exists():
+            dockerfile = (self.root / "Dockerfile").read_text()
+            # 只看 pip install 行：Dockerfile 里的 `COPY requirements.txt ...`
+            # 同样含这些文件名，按整文件匹配会把"只 COPY 没安装"误判为已装。
+            pip_lines = [line for line in dockerfile.splitlines()
+                         if "pip install" in line]
+
+            def _installed(name: str) -> bool:
+                # requirements-web.txt 不是 requirements.txt 的子串，
+                # 但反向不成立，所以锚定 `-r <name>` 后接空白/行尾。
+                return any(re.search(rf"-r\s+{re.escape(name)}(\s|$)", line)
+                           for line in pip_lines)
+
+            installed = {name for name in ("requirements.txt", "requirements-web.txt")
+                         if _installed(name)}
+            if installed == {"requirements.txt", "requirements-web.txt"}:
+                self.success.append("✅ Dockerfile 同时安装本体与 Web 依赖")
+            else:
+                missing = {"requirements.txt", "requirements-web.txt"} - installed
+                self.issues.append(
+                    f"❌ Dockerfile 未安装: {', '.join(sorted(missing))}"
+                )
+
         # 检测 5: main.py
         print("📋 检测 5: 启动脚本")
         self.check_file_exists("main.py", "应用入口")
@@ -115,7 +157,9 @@ class RailwayValidator:
             self.issues.append("❌ scripts/ 目录缺失")
         
         # 打印结果
-        self.print_results()
+        # 必须 return：此前这里只是调用而没返回，validate_all() 恒为 None，
+        # 于是 sys.exit(0 if None else 1) 恒为 1 —— 配置全部正确也会判红。
+        return self.print_results()
     
     def print_results(self):
         """打印检测结果"""

@@ -19,9 +19,17 @@ jobs:
           python-version: '3.10'
       
       - name: Run Railway Config Validator
+        id: validate
         run: python scripts/validate_railway_config.py
-      
+
       - name: Report Results
         if: always()
+        # 原写法是 `echo "✅..." || echo "❌..."`：echo 永远成功，所以无论
+        # 上一步是红是绿这里都打印 ✅，容易误判成"检测已通过"。
+        # 改为按上一步真实结果分支输出。
         run: |
-          echo "✅ 检测完成！查看上面的日志" || echo "❌ 检测失败"
+          if [ "${{ steps.validate.outcome }}" = "success" ]; then
+            echo "✅ 配置检测通过"
+          else
+            echo "❌ 配置检测失败，请查看上方日志中的 ❌ 条目"
+          fi
