@@ -14,9 +14,16 @@ import repository  # noqa: E402
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    """把 API 指向临时库，避免污染真实数据。"""
+    """把 API 指向临时库，避免污染真实数据。
+
+    用 ``with`` 而非 ``return TestClient(app)``：后者不会触发 lifespan，
+    测到的是冷启动耗时（/commands 约 800ms，超 200ms 预算 5.7 倍），
+    导致延迟断言在共享 runner 上随机变红。线上 uvicorn 会执行 lifespan，
+    测试必须与之对齐。
+    """
     monkeypatch.setattr(api, "_DB_PATH", str(tmp_path / "api.db"))
-    return TestClient(api.app)
+    with TestClient(api.app) as c:
+        yield c
 
 
 def test_health_ok(client):
@@ -223,7 +230,17 @@ def test_commands_endpoint_is_fast(client):
 
 
 def test_all_endpoints_within_latency_budget(client):
-    """每个端点都要满足 200ms 预算。"""
+    """每个端点都要满足 200ms 预算。
+
+    夹具必须用 ``with TestClient(...)`` 触发 lifespan：api.py 在启动时预热了
+    重量级导入（commands → bot_handler → chart → matplotlib），而
+    ``TestClient(app)`` 作为普通对象构造时**不会**执行 lifespan，测到的永远是
+    冷启动耗时——/commands 实测 1151ms，超预算 5.7 倍，于是这条断言在共享
+    runner 上随机变红，此前一直被误判为"环境抖动"。
+
+    预热生效后全体端点实测最大 1.4ms，距 200ms 有 139 倍裕度，严格预算因此
+    得以保留：不必放宽到 500ms，也不必标记 flaky。
+    """
     import time
 
     for path in ("/health", "/stats", "/health/model", "/audit", "/strength", "/commands"):
@@ -232,3 +249,18 @@ def test_all_endpoints_within_latency_budget(client):
         elapsed = (time.perf_counter() - t0) * 1000
         assert r.status_code == 200, path
         assert elapsed < 200, f"{path} 耗时 {elapsed:.0f}ms，超出 200ms 预算"
+
+
+def test_lifespan_warms_up_commands_cache():
+    """预热必须真的执行：进入 lifespan 后指令清单已被缓存。
+
+    这条锁住 api.py 的 lifespan 行为。若有人删掉预热，首请求会把约 800ms 的
+    导入开销转嫁给用户——线上表现为第一个用户撞上明显卡顿，而不是 CI 变红。
+    """
+    import api as api_module
+
+    api_module._COMMAND_CACHE = None       # 复位，确保观测到的是本次预热的结果
+    with TestClient(api_module.app):
+        pass                                # 进出上下文即完成 startup/shutdown
+    assert api_module._COMMAND_CACHE, "lifespan 未预热指令清单，首请求会承担导入开销"
+
