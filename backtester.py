@@ -1,24 +1,61 @@
-"""回测系统 - 验证预测模型的历史准确率
-加载历史赛事数据,重新计算预测,对比实际结果,生成详细报告
+"""回测兼容层 —— 委托到真实链路。
+
+历史遗留风险（本次修正的原因）
+------------------------------
+本文件原本是**假数据回测**，两个致命问题叠加：
+
+  1. ``load_historical_fixtures()`` 返回 1 场硬编码比赛（"Team A" vs "Team B"）；
+  2. ``predict_fixture()`` 返回硬编码概率 ``0.45 / 0.32 / 0.23``，与比赛无关。
+
+后果是它能跑通、还能打印出"回测完成: 100.00%"。这比直接报错危险得多——
+**看起来像成功的假数字，会被当成模型有效的证据**。
+
+现改为委托 ``BacktesterFixed``（真实数据源 + 滚动前进评估）：
+保留 ``Backtester`` 类名、async 接口与返回结构，历史调用方无需改动即可
+拿到真实数字。
+
+关于被删除的 ``predict_fixture()``：
+    单场预测在滚动前进里无法独立成立——第 i 场的强度必须来自第 i 场
+    **之前**的数据，脱离上下文单算一场就是前视偏差。因此该接口不再提供，
+    评估统一走 ``BacktesterFixed.backtest()``。留着它只会重新引入假数字。
 """
+
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import date, datetime, timedelta
 from typing import Any
 
-import httpx
+import paths
+from backtest import WalkForwardBacktester, compare
+from backtester_fixed import BacktesterFixed
+from football_data import LEAGUE_ID_TO_CODE
 
 log = logging.getLogger(__name__)
 
 
 class Backtester:
-    """回测引擎"""
+    """回测器（兼容层）：数据源与评估均委托真实链路。"""
 
-    def __init__(self, league_id: int = 39, season: int = 2024):
-        self.league_id = league_id
+    def __init__(
+        self,
+        league_id: int = 39,
+        season: int | None = None,
+        db_path: str | None = None,
+        variant: str = "poisson",
+    ) -> None:
+        """
+        :param season: None（默认）= 全部可用赛季。滚动前进依赖历史积累，
+            只取单赛季会让预热期占比上升、结论变不稳；明确只想看单赛季时才传。
+        """
+        self.league_id = int(league_id)
         self.season = season
+        self.db_path = db_path or str(paths.DB_PATH)
+        self.variant = variant
+        # 复用已接好数据源的实现，避免两套逻辑各自漂移
+        self._impl = BacktesterFixed(
+            league_id=self.league_id, season=self.season,
+            db_path=self.db_path, variant=self.variant,
+        )
         self.results: dict[str, Any] = {
             "total_predictions": 0,
             "correct_predictions": 0,
@@ -27,211 +64,109 @@ class Backtester:
             "accuracy_by_result_type": {},
         }
 
+    # ---- 数据源 ------------------------------------------------------------
     async def load_historical_fixtures(self) -> list[dict]:
-        """加载历史赛事数据"""
-        log.info(f"加载 {self.season} 赛季历史赛事数据...")
-        
-        try:
-            # TODO: 从数据库或 API 加载历史数据
-            fixtures = [
-                {
-                    "id": 1,
-                    "date": "2024-01-01",
-                    "home_team": "Team A",
-                    "away_team": "Team B",
-                    "home_goals": 2,
-                    "away_goals": 1,
-                    "status": "FINISHED"
-                }
-            ]
-            
-            log.info(f"已加载 {len(fixtures)} 场赛事")
-            return fixtures
-        except Exception as exc:
-            log.error(f"加载历史数据失败: {exc}")
-            return []
+        """加载真实历史赛事（库内赛果 ∪ 内置 CSV 语料）。"""
+        matches = await self._impl.load_historical_fixtures()
+        if not matches:
+            log.warning("无历史数据，回测无法进行")
+        return matches
 
-    def predict_fixture(self, fixture: dict) -> dict:
-        """预测单场赛事"""
-        # TODO: 实现预测逻辑
-        return {
-            "fixture_id": fixture["id"],
-            "home_win_prob": 0.45,
-            "draw_prob": 0.32,
-            "away_win_prob": 0.23,
-            "predicted_score": "2-1",
-        }
-
-    def get_actual_result(self, fixture: dict) -> str:
-        """获取实际比分结果"""
-        home_goals = fixture.get("home_goals", 0)
-        away_goals = fixture.get("away_goals", 0)
-        
-        if home_goals > away_goals:
-            return "home"
-        elif home_goals < away_goals:
-            return "away"
-        else:
-            return "draw"
-
-    def get_predicted_result(self, prediction: dict) -> str:
-        """获取预测结果"""
-        probs = {
-            "home": prediction["home_win_prob"],
-            "draw": prediction["draw_prob"],
-            "away": prediction["away_win_prob"],
-        }
-        return max(probs, key=probs.get)
-
-    def evaluate_prediction(self, fixture: dict, prediction: dict) -> bool:
-        """评估单个预测是否正确"""
-        actual = self.get_actual_result(fixture)
-        predicted = self.get_predicted_result(prediction)
-        is_correct = actual == predicted
-        
-        return is_correct
-
-    async def backtest(self) -> dict:
-        """运行完整回测"""
-        log.info(f"开始回测: {self.season} 赛季")
-        
-        fixtures = await self.load_historical_fixtures()
-        if not fixtures:
+    # ---- 回测 --------------------------------------------------------------
+    async def backtest(self) -> dict[str, Any]:
+        """运行回测，返回结构与改造前一致，但数字是真实计算出来的。"""
+        matches = await self.load_historical_fixtures()
+        if not matches:
             log.warning("无历史数据,回测失败")
             return self.results
-        
-        for fixture in fixtures:
-            try:
-                # 预测
-                prediction = self.predict_fixture(fixture)
-                
-                # 评估
-                is_correct = self.evaluate_prediction(fixture, prediction)
-                
-                # 记录
-                self.results["predictions"].append({
-                    "fixture_id": fixture["id"],
-                    "date": fixture["date"],
-                    "match": f"{fixture['home_team']} vs {fixture['away_team']}",
-                    "actual_score": f"{fixture.get('home_goals', 0)}-{fixture.get('away_goals', 0)}",
-                    "predicted_score": prediction["predicted_score"],
-                    "predicted_result": self.get_predicted_result(prediction),
-                    "actual_result": self.get_actual_result(fixture),
-                    "is_correct": is_correct,
-                    "confidence": max(
-                        prediction["home_win_prob"],
-                        prediction["draw_prob"],
-                        prediction["away_win_prob"],
-                    ),
-                })
-                
-                # 统计
-                self.results["total_predictions"] += 1
-                if is_correct:
-                    self.results["correct_predictions"] += 1
-                
-            except Exception as exc:
-                log.error(f"预测失败 (fixture={fixture['id']}): {exc}")
-        
-        # 计算准确率
-        if self.results["total_predictions"] > 0:
-            self.results["accuracy"] = (
-                self.results["correct_predictions"] / self.results["total_predictions"]
-            )
-        
-        # 按结果类型计算准确率
-        self._calculate_accuracy_by_type()
-        
-        log.info(f"回测完成: {self.results['correct_predictions']}/{self.results['total_predictions']} " 
-                f"({self.results['accuracy']:.2%})")
-        
+
+        result = await self._impl.backtest()
+
+        # fixture_id → 队名/比分，用于还原逐场明细的可读字段
+        index = {str(m.get("fixture_id")): m for m in matches}
+
+        predictions = []
+        for rec in result["predictions"]:
+            m = index.get(str(rec.get("fixture_id")), {})
+            predictions.append({
+                "fixture_id": rec.get("fixture_id"),
+                "date": (m.get("utc_date") or "")[:10],
+                "match": f"{m.get('home_team_name', '?')} vs {m.get('away_team_name', '?')}",
+                "actual_score": f"{m.get('home_score')}-{m.get('away_score')}",
+                "predicted_result": rec.get("predicted"),
+                "actual_result": rec.get("actual"),
+                "is_correct": bool(rec.get("hit")),
+                "confidence": rec.get("prob"),
+                "level": rec.get("level"),
+            })
+
+        self.results = {
+            "total_predictions": result["total_predictions"],
+            "correct_predictions": result["correct_predictions"],
+            "predictions": predictions,
+            "accuracy": result["accuracy"],
+            "accuracy_by_result_type": self._accuracy_by_type(predictions),
+            # 主判据：准确率太粗，以对数损失 / RPS 为准
+            "log_loss": result["log_loss"],
+            "rps": result["rps"],
+            "brier": result["brier"],
+            "ece": result["ece"],
+            "verdict": result["verdict"],
+        }
+
+        log.info("回测完成: %d/%d (%.2f%%)，log_loss=%.4f",
+                 self.results["correct_predictions"],
+                 self.results["total_predictions"],
+                 self.results["accuracy"] * 100,
+                 self.results["log_loss"] or 0.0)
         return self.results
 
-    def _calculate_accuracy_by_type(self) -> None:
-        """按结果类型计算准确率"""
-        by_type = {}
-        
-        for result_type in ["home", "draw", "away"]:
-            predictions = [p for p in self.results["predictions"] 
-                          if p["actual_result"] == result_type]
-            
-            if predictions:
-                correct = sum(1 for p in predictions if p["is_correct"])
-                accuracy = correct / len(predictions)
-                by_type[result_type] = {
-                    "total": len(predictions),
-                    "correct": correct,
-                    "accuracy": accuracy,
-                }
-        
-        self.results["accuracy_by_result_type"] = by_type
+    @staticmethod
+    def _accuracy_by_type(predictions: list[dict]) -> dict[str, dict]:
+        """按真实结果类型（home/draw/away）统计准确率。"""
+        by_type: dict[str, dict] = {}
+        for result_type in ("home", "draw", "away"):
+            rows = [p for p in predictions if p["actual_result"] == result_type]
+            if not rows:
+                continue
+            correct = sum(1 for p in rows if p["is_correct"])
+            by_type[result_type] = {
+                "total": len(rows),
+                "correct": correct,
+                "accuracy": correct / len(rows),
+            }
+        return by_type
 
+    # ---- 汇总 --------------------------------------------------------------
     def get_summary(self) -> dict:
-        """获取回测总结"""
+        """获取回测总结。"""
         return {
             "season": self.season,
             "league_id": self.league_id,
             "total_predictions": self.results["total_predictions"],
             "correct_predictions": self.results["correct_predictions"],
             "accuracy": f"{self.results['accuracy']:.2%}",
+            "log_loss": self.results.get("log_loss"),
+            "verdict": self.results.get("verdict"),
             "accuracy_by_result_type": {
-                k: f"{v['accuracy']:.2%}" 
+                k: f"{v['accuracy']:.2%}"
                 for k, v in self.results["accuracy_by_result_type"].items()
             },
         }
 
     def get_confidence_analysis(self) -> dict:
-        """按置信度分析准确率"""
-        # 按置信度等级分组
-        confidence_groups = {
-            "high": [p for p in self.results["predictions"] if p["confidence"] >= 0.5],
-            "medium": [p for p in self.results["predictions"] 
-                      if 0.33 <= p["confidence"] < 0.5],
-            "low": [p for p in self.results["predictions"] if p["confidence"] < 0.33],
+        """按信心等级统计命中率——等级若无效，'高信心'就只是随机标签。"""
+        buckets: dict[str, dict] = {}
+        for p in self.results["predictions"]:
+            key = p.get("level") or "unknown"
+            slot = buckets.setdefault(key, {"n": 0, "hit": 0})
+            slot["n"] += 1
+            slot["hit"] += 1 if p["is_correct"] else 0
+        return {
+            k: {"total": v["n"], "correct": v["hit"],
+                "accuracy": v["hit"] / v["n"] if v["n"] else None}
+            for k, v in buckets.items()
         }
-        
-        analysis = {}
-        for group_name, predictions in confidence_groups.items():
-            if predictions:
-                correct = sum(1 for p in predictions if p["is_correct"])
-                accuracy = correct / len(predictions)
-                analysis[group_name] = {
-                    "count": len(predictions),
-                    "correct": correct,
-                    "accuracy": f"{accuracy:.2%}",
-                }
-        
-        return analysis
 
 
-async def run_backtest() -> None:
-    """运行回测示例"""
-    backtester = Backtester(league_id=39, season=2024)
-    
-    results = await backtester.backtest()
-    
-    print("\n" + "="*80)
-    print("📊 回测结果总结")
-    print("="*80)
-    
-    summary = backtester.get_summary()
-    for key, value in summary.items():
-        print(f"{key}: {value}")
-    
-    print("\n📈 按结果类型的准确率")
-    print("-"*80)
-    by_type = backtester.get_confidence_analysis()
-    for group, data in by_type.items():
-        print(f"{group.upper()}: {data['correct']}/{data['count']} ({data['accuracy']})")
-    
-    print("\n💾 前 10 个预测详情")
-    print("-"*80)
-    for pred in results["predictions"][:10]:
-        status = "✅" if pred["is_correct"] else "❌"
-        print(f"{status} {pred['match']}: 预测 {pred['predicted_score']}, "
-              f"实际 {pred['actual_score']}")
-
-
-if __name__ == "__main__":
-    asyncio.run(run_backtest())
-
+__all__ = ["Backtester", "WalkForwardBacktester", "compare", "LEAGUE_ID_TO_CODE"]
