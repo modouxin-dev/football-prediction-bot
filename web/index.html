@@ -73,9 +73,9 @@
   </div>
 </div>
 
-<div id="root"><div class="empty">正在加载数据…</div></div>
+<div id="root"><div class="empty">初始化中…（若持续超过 10 秒无变化，说明页面脚本未运行）</div></div>
 
-<footer>数据来自本地 SQLite · 只读，不消耗 API 额度</footer>
+<footer>数据来自本地 SQLite · 只读，不消耗 API 额度 · <b id="build">BUILD-2026-10-11-B</b></footer>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -173,18 +173,23 @@ async function runDiagnostic() {
   $('debug-info').textContent = debugLog.join('\\n');
 }
 
-async function get(url){
+async function get(url, timeoutMs){
   addDebugLog(`正在请求: ${url}`);
+  const ac = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const timer = ac ? setTimeout(() => ac.abort(), timeoutMs || 8000) : null;
   try {
-    const r = await fetch(url, {cache:'no-store'});
+    const r = await fetch(url, {cache:'no-store', signal: ac ? ac.signal : undefined});
     addDebugLog(`响应状态: ${url} → ${r.status}`);
     if(!r.ok) throw new Error(url + ' → HTTP ' + r.status);
     const data = await r.json();
     addDebugLog(`获得数据: ${url} → ${JSON.stringify(data).substring(0,100)}`);
     return data;
   } catch(err) {
-    addDebugLog(`请求失败: ${url} → ${err.message}`);
-    throw err;
+    const msg = (err && err.name === 'AbortError') ? (url + ' → 超时(' + (timeoutMs||8000) + 'ms)') : (url + ' → ' + err.message);
+    addDebugLog(`请求失败: ${msg}`);
+    throw new Error(msg);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -402,7 +407,10 @@ async function load(){
   addDebugLog('=== 开始加载页面数据 ===');
   try{
     const [h, health, audit, strength, fx, bt] = await Promise.all([
-      get('/health'), get('/health/model'), get('/audit?limit=50'), get('/strength'),
+      get('/health').catch(() => ({status:'error', version:'?', persistent:false})),
+      get('/health/model').catch(() => ({status:'empty'})),
+      get('/audit?limit=50').catch(() => ({status:'empty', items:[]})),
+      get('/strength').catch(() => ({status:'empty', items:[]})),
       get('/fixtures').catch(() => ({status:'empty', date:'', total:0, leagues:[]})),
       get('/backtest').catch(() => ({status:'empty', count:0, items:[]}))
     ]);
@@ -443,12 +451,12 @@ setTimeout(function () {
   var html = root.innerHTML;
   // 已渲染出卡片 = 加载成功，不干预
   if (html.indexOf('class="card"') !== -1) return;
-  if (html.indexOf('正在加载数据') === -1) return;
+  if (html.indexOf('初始化中') === -1 && html.indexOf('正在加载数据') === -1) return;
   root.innerHTML = '<div class="card"><div class="err">页面脚本未执行或加载超时</div>'
     + '<div class="empty">主脚本可能被语法错误中断，或接口 15 秒内未返回。'
     + '请先点右上角「诊断」：若诊断区也无任何输出，说明脚本未运行；'
     + '若有输出，按其中的失败端点排查。</div></div>';
-}, 15000);
+}, 8000);
 </script>
 </body>
 </html>
