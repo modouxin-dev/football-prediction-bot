@@ -2,8 +2,11 @@
 
 核心：数据必须落到挂载卷（/data），不能留在容器临时目录。
 """
+import os
 import sqlite3
 from pathlib import Path
+
+import pytest
 
 import paths
 from repository import PredictionRepository
@@ -91,3 +94,60 @@ def test_probe_survives_unwritable_dir():
         assert r["write"] is False
     finally:
         p.DATA_DIR = orig
+
+
+# ---------------------------------------------------------------------------
+# 看板与机器人必须读写同一个 SQLite 文件。
+#
+# 真实事故：Railway 变量里只设了 DB_PATH=/tmp/football.db，而 paths.DB_PATH
+# 原先只认 DATABASE_PATH。结果机器人（config.Settings.db_path）写 /tmp，
+# 看板（api.py → paths.DB_PATH）读 /data —— 两个不同的文件，看板永远是空的，
+# 且没有任何报错，只能看到「正在加载数据」。
+# ---------------------------------------------------------------------------
+
+def _reload_paths(monkeypatch, env: dict):
+    """在给定环境变量下重新加载 paths 与 config，返回 (paths.DB_PATH, Settings.db_path)。"""
+    for key in ("DATABASE_PATH", "DB_PATH", "DATA_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    # config.load_settings 的必填项，与本用例无关，补上以便构造 Settings
+    monkeypatch.setenv("TELEGRAM_TOKEN", "1:test-token")
+    monkeypatch.setenv("RAPID_API_KEY", "test-key")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    import importlib
+
+    import config
+    import paths
+
+    importlib.reload(paths)
+    importlib.reload(config)
+    settings = config.load_settings()
+    return str(paths.DB_PATH), str(settings.db_path)
+
+
+@pytest.mark.parametrize(
+    "env,label",
+    [
+        ({"DB_PATH": "/tmp/only_db_path.db"}, "只设 DB_PATH"),
+        ({"DATABASE_PATH": "/tmp/only_database_path.db"}, "只设 DATABASE_PATH"),
+        (
+            {"DATABASE_PATH": "/tmp/prio_a.db", "DB_PATH": "/tmp/prio_b.db"},
+            "两者都设（DATABASE_PATH 优先）",
+        ),
+        ({}, "都不设（走默认）"),
+    ],
+)
+def test_db_path_matches_settings(monkeypatch, env, label):
+    """paths.DB_PATH 与 config 解析出的 db_path 必须完全相等。"""
+    db_path, settings_db = _reload_paths(monkeypatch, env)
+    assert db_path == settings_db, (
+        f"{label}：路径分裂 —— 看板读 {db_path}，机器人写 {settings_db}"
+    )
+
+
+def test_db_path_honours_db_path_env(monkeypatch):
+    """只设 DB_PATH 时，看板也必须跟着走，不能偷偷读 /data。"""
+    db_path, settings_db = _reload_paths(monkeypatch, {"DB_PATH": "/tmp/x.db"})
+    assert db_path == "/tmp/x.db", f"看板忽略了 DB_PATH，仍读 {db_path}"
+    assert settings_db == "/tmp/x.db"

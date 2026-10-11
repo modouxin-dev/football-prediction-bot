@@ -1,5 +1,5 @@
-import logging
 import os
+import logging
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -10,15 +10,13 @@ log = logging.getLogger(__name__)
 # Render Persistent Disk 默认挂载点
 _DEFAULT_DATA_DIR = Path("/data")
 
-
 def _resolve(env_key, default, fallback_root):
     raw = (os.getenv(env_key) or "").strip()
     path = Path(raw) if raw else default
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".write_test"
-        probe.touch()
-        probe.unlink()
+        probe.touch(); probe.unlink()
         return path
     except Exception as exc:
         fb = fallback_root / path.name
@@ -29,10 +27,14 @@ def _resolve(env_key, default, fallback_root):
             fb = Path(tempfile.gettempdir()) / path.name
         return fb
 
-
 # 核心路径定义
 DATA_DIR = _resolve("DATA_DIR", _DEFAULT_DATA_DIR, Path("/tmp"))
-DB_PATH = Path(os.getenv("DATABASE_PATH") or (DATA_DIR / "football.db"))
+# DB_PATH 与 config.Settings.db_path 必须解析到同一个文件，否则机器人写入的
+# 赛果/预测看板读不到（看板走 paths.DB_PATH，机器人走 Settings）。
+# 优先级与 config.py 保持一致：DATABASE_PATH > DB_PATH > 默认。
+DB_PATH = Path(
+    os.getenv("DATABASE_PATH") or os.getenv("DB_PATH") or (DATA_DIR / "football.db")
+)
 CACHE_DIR = _resolve("CACHE_DIR", DATA_DIR / "cache", DATA_DIR)
 CHART_DIR = _resolve("CHART_DIR", DATA_DIR / "charts", DATA_DIR)
 EXPORT_DIR = _resolve("EXPORT_DIR", DATA_DIR / "exports", DATA_DIR)
