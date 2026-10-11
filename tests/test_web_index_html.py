@@ -111,3 +111,54 @@ def test_has_watchdog_block() -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# 防「静默卡死」加固（真实事故续集）
+#
+# 事故升级：即使修好了重复声明，页面仍可能因**接口永久挂起**而停在
+# 「正在加载数据…」——Promise.all 既不 resolve 也不 reject，
+# catch 分支永远不会执行，用户看不到任何错误。
+# 本组测试锁死三件事：
+#   1. 每个接口都有超时（AbortController），挂起会转成可捕获的错误
+#   2. load() 的六个接口全部带 .catch 兜底，任一失败都降级渲染而非整体失败
+#   3. 页面带静态构建标记，无需 JS 即可判断线上是否是新版本
+# ---------------------------------------------------------------------------
+
+def test_fetch_has_timeout() -> None:
+    """接口必须有超时，否则挂起会让页面永久停在加载中。"""
+    html = INDEX.read_text(encoding="utf-8")
+    assert "AbortController" in html, "缺少 AbortController：接口挂起时页面会永久卡住"
+    assert "ac.abort()" in html, "创建了 AbortController 却没有 abort，超时不会触发"
+
+
+def test_all_endpoints_have_fallback() -> None:
+    """load() 里每个接口都必须带 .catch，任一失败都要降级渲染。"""
+    html = INDEX.read_text(encoding="utf-8")
+    for ep in ("/health", "/health/model", "/audit", "/strength", "/fixtures", "/backtest"):
+        i = html.find("get('%s" % ep)
+        assert i != -1, f"load() 未请求 {ep}"
+        tail = html[i : i + 260]
+        assert ".catch(" in tail, f"{ep} 缺少 .catch 兜底：该接口失败会导致整页加载失败"
+
+
+def test_build_marker_is_static() -> None:
+    """页面须含不依赖 JS 的构建标记，便于一眼判断线上版本。"""
+    html = INDEX.read_text(encoding="utf-8")
+    m = re.search(r'id="build"[^>]*>([^<]+)<', html)
+    assert m, "缺少静态构建标记 id=\"build\"：无法判断 Railway 是否部署了新版本"
+    assert m.group(1).startswith("BUILD-"), f"构建标记格式异常：{m.group(1)!r}"
+
+
+def test_watchdog_fires_fast_enough() -> None:
+    """看门狗需在 10 秒内给出可见提示，不能让用户无限等待。"""
+    html = INDEX.read_text(encoding="utf-8")
+    m = re.search(r"\}\s*,\s*(\d+)\)\s*;", html)
+    assert m, "未找到看门狗 setTimeout"
+    assert int(m.group(1)) <= 10000, f"看门狗 {m.group(1)}ms 太久，用户会以为页面坏了"
+
+
+def test_static_placeholder_is_distinguishable() -> None:
+    """静态占位文案须与「脚本已运行」时的文案不同，否则无法区分卡死与加载中。"""
+    html = INDEX.read_text(encoding="utf-8")
+    assert "初始化中" in html, "静态占位未改文案：卡死与加载中在视觉上无法区分"
