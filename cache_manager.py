@@ -5,6 +5,7 @@
 - LRU 淘汰(防止无限增长)
 - 线程安全(用 asyncio.Lock)
 - 支持手工清除
+- 惰性清扫:静默期(只有 get、没有 set)也会按时间间隔回收过期条目
 """
 from __future__ import annotations
 
@@ -34,7 +35,8 @@ class CacheEntry:
 class AsyncTTLCache:
     """异步 TTL 缓存(带 LRU 淘汰和并发安全)"""
 
-    def __init__(self, max_size: int = 1000, default_ttl: float = 3600.0):
+    def __init__(self, max_size: int = 1000, default_ttl: float = 3600.0,
+                 cleanup_interval: float = 60.0):
         self._cache: dict[tuple, CacheEntry] = {}
         self._access_order: list[tuple] = []  # 访问顺序(用于 LRU)
         self._max_size = max_size
@@ -42,10 +44,15 @@ class AsyncTTLCache:
         self._lock = asyncio.Lock()  # 并发保护
         self._hits = 0
         self._misses = 0
+        # 惰性清扫的最小间隔(秒)。过期清理是全表 O(n) 扫描,不能每次读都跑;
+        # 但只挂在 set() 上又会导致静默期(只读不写)的过期条目一直占着内存。
+        self._cleanup_interval = cleanup_interval
+        self._last_cleanup = time.monotonic()
 
     async def get(self, key: tuple, default: Any = None) -> Any:
         """获取缓存值(线程安全)"""
         async with self._lock:
+            await self._maybe_sweep()
             entry = self._cache.get(key)
             if entry is None:
                 self._misses += 1
@@ -105,8 +112,21 @@ class AsyncTTLCache:
                         self._access_order.remove(k)
                 log.info(f"清除缓存: {len(to_delete)} 条 (模式: {pattern})")
 
+    async def _maybe_sweep(self) -> None:
+        """按时间间隔摊还地清扫过期条目(读路径调用)。
+
+        _cleanup_expired() 是全表扫描 O(n),若每次 get 都执行会把读路径拖慢;
+        但只挂在 set() 上,静默期(只有读、没有写)的过期条目会一直占着内存。
+        这里折中:距离上次清扫不足 cleanup_interval 就直接返回,否则扫一次。
+        n<=500 时单次扫描成本可忽略。
+        """
+        if time.monotonic() - self._last_cleanup < self._cleanup_interval:
+            return
+        await self._cleanup_expired()
+
     async def _cleanup_expired(self) -> None:
-        """清理过期条目(内部使用)"""
+        """清理过期条目(内部使用),并记录本次清扫时刻"""
+        self._last_cleanup = time.monotonic()
         expired_keys = [
             k for k, v in self._cache.items()
             if v.is_expired()
@@ -119,8 +139,13 @@ class AsyncTTLCache:
             log.debug(f"清理过期缓存: {len(expired_keys)} 条")
 
     async def stats(self) -> dict:
-        """获取缓存统计"""
+        """获取缓存统计。
+
+        size 只统计未过期条目:先清扫再计数。否则统计会把已经过期、但还没被
+        get 命中的条目算进 size,监控看到的容量与命中率都会失真。
+        """
         async with self._lock:
+            await self._cleanup_expired()
             total = self._hits + self._misses
             hit_rate = (self._hits / total * 100) if total > 0 else 0
             return {
