@@ -313,6 +313,29 @@ function strengthCard(st){
   </div>`;
 }
 
+function backtestCard(bt){
+  const head = `<div class="card"><h2>历史回测结论 <span>Walk-Forward · 只用赛前数据，无前视偏差</span></h2>`;
+  if(!bt || bt.status === 'empty' || !bt.count){
+    return head + `<div class="empty">${esc(bt && bt.message ? bt.message : '尚无回测记录。')}</div></div>`;
+  }
+  const rows = (bt.items||[]).map(r => {
+    const acc  = r.accuracy  == null ? '—' : (r.accuracy*100).toFixed(2)+'%';
+    const ll   = r.log_loss  == null ? '—' : Number(r.log_loss).toFixed(4);
+    const rps  = r.rps       == null ? '—' : Number(r.rps).toFixed(4);
+    const dbc  = r.corpus_db ?? 0, cvc = r.corpus_csv ?? 0;
+    return `<tr><td>${esc(String(r.created_at||'').slice(0,16).replace('T',' '))}</td>`
+      + `<td>${esc(r.variant||'')}</td><td class="num">${r.n ?? 0}</td>`
+      + `<td class="num">${acc}</td><td class="num">${ll}</td><td class="num">${rps}</td>`
+      + `<td class="num">${dbc}/${cvc}</td><td>${esc(r.verdict||'')}</td></tr>`;
+  }).join('');
+  return head + `<table><thead><tr><th>时间</th><th>口径</th><th class="num">场次</th>`
+    + `<th class="num">命中率</th><th class="num">Log Loss</th><th class="num">RPS</th>`
+    + `<th class="num">库内/语料</th><th>判定</th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<div style="font-size:12px;color:var(--dim);margin-top:8px">`
+    + `共 ${bt.count} 条记录 · 「库内/语料」说明结论基于多少真实赛果，库内越多越贴近线上`
+    + `</div></div>`;
+}
+
 function auditCard(a){
   const head = `<div class="card"><h2>预测审计 <span>预测 vs 实际</span></h2>`;
   const items = a.items || [];
@@ -378,9 +401,10 @@ async function load(){
   $('root').innerHTML = '<div class="empty">正在加载数据…</div>';
   addDebugLog('=== 开始加载页面数据 ===');
   try{
-    const [h, health, audit, strength, fx] = await Promise.all([
+    const [h, health, audit, strength, fx, bt] = await Promise.all([
       get('/health'), get('/health/model'), get('/audit?limit=50'), get('/strength'),
-      get('/fixtures').catch(() => ({status:'empty', date:'', total:0, leagues:[]}))
+      get('/fixtures').catch(() => ({status:'empty', date:'', total:0, leagues:[]})),
+      get('/backtest').catch(() => ({status:'empty', count:0, items:[]}))
     ]);
     $('ver').textContent = 'v' + (h.version || '?');
     const ok = h.status === 'ok';
@@ -389,7 +413,8 @@ async function load(){
     if(h.warning) console.warn(h.warning);
 
     $('root').innerHTML =
-      fixturesCard(fx)
+      backtestCard(bt)
+      + fixturesCard(fx)
       + statCard(health) + trendCard(health) + calibCard(health) + levelCard(health)
       + strengthCard(strength) + auditCard(audit);
     addDebugLog('✅ 页面加载成功');
