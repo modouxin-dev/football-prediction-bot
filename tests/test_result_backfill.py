@@ -8,7 +8,6 @@
 1. 非法 result 能被按概率确定性恢复（概率没丢，方向可还原）
 2. 恢复是幂等的，且不碰 actual_* / settled_at / 概率本身
 """
-import sqlite3
 
 import pytest
 

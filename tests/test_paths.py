@@ -2,7 +2,6 @@
 
 核心：数据必须落到挂载卷（/data），不能留在容器临时目录。
 """
-import os
 import sqlite3
 from pathlib import Path
 

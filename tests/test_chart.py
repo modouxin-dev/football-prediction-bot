@@ -15,7 +15,8 @@ from tests.sample_data import fixture
 
 chart = pytest.importorskip("chart", reason="matplotlib 未安装时跳过图表用例")
 
-ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k", "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
+    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 
@@ -40,11 +41,11 @@ def fm(tid, oid, our, their, home=True, days=3):
     }
 
 
-def row(tid, rank, pts, w, d, l, gf, ga):
+def row(tid, rank, pts, w, d, losses, gf, ga):
     return {"rank": rank, "team": {"id": tid, "name": f"T{tid}"}, "points": pts,
-            "all": {"played": w + d + l, "win": w, "draw": d, "lose": l, "goals": {"for": gf, "against": ga}},
+            "all": {"played": w + d + losses, "win": w, "draw": d, "lose": losses, "goals": {"for": gf, "against": ga}},
             "home": {"played": w, "goals": {"for": gf // 2, "against": ga // 2}},
-            "away": {"played": d + l, "goals": {"for": gf // 2, "against": ga // 2}}}
+            "away": {"played": d + losses, "goals": {"for": gf // 2, "against": ga // 2}}}
 
 
 class ChartAPI:

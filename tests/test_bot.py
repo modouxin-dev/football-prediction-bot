@@ -17,7 +17,8 @@ from data_source import DataSourceError
 from service import PredictionService
 from tests.sample_data import NOW, FakeAPI, default_fixtures
 
-ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k", "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
+    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 
@@ -77,7 +78,8 @@ def live_fixtures(*hours):
     now = datetime.now(timezone.utc)
     teams = [(1, "Alpha FC"), (2, "Beta & Sons"), (3, "Gamma"), (4, "Delta")]
     return [
-        fixture(200 + i, teams[i % 4][0], teams[i % 4][1], teams[(i + 1) % 4][0], teams[(i + 1) % 4][1], now + timedelta(hours=h))
+        fixture(200 + i, teams[i % 4][0], teams[i % 4][1], teams[(i + 1) %
+                4][0], teams[(i + 1) % 4][1], now + timedelta(hours=h))
         for i, h in enumerate(hours)
     ]
 

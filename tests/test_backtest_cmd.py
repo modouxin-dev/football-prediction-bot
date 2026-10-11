@@ -7,7 +7,6 @@
 """
 import asyncio
 
-import pytest
 
 from commands.admin import BACKTEST_MIN_TOTAL, backtest_cmd
 from repository import PredictionRepository

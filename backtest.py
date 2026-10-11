@@ -313,14 +313,20 @@ class WalkForwardBacktester:
         只给一边会让同一队的攻防用不同口径累积，量纲就乱了。
         """
         h, a = self._ensure(home_id), self._ensure(away_id)
-        h["home_played"] += 1; h["home_for"] += hs; h["home_against"] += as_
-        a["away_played"] += 1; a["away_for"] += as_; a["away_against"] += hs
+        h["home_played"] += 1
+        h["home_for"] += hs
+        h["home_against"] += as_
+        a["away_played"] += 1
+        a["away_for"] += as_
+        a["away_against"] += hs
 
         if home_sot is not None and away_sot is not None:
             h["home_sot_played"] += 1
-            h["home_sot_for"] += home_sot; h["home_sot_against"] += away_sot
+            h["home_sot_for"] += home_sot
+            h["home_sot_against"] += away_sot
             a["away_sot_played"] += 1
-            a["away_sot_for"] += away_sot; a["away_sot_against"] += home_sot
+            a["away_sot_for"] += away_sot
+            a["away_sot_against"] += home_sot
 
         # DSA 逐场日志：用处理序号充当时间轴（run() 要求 matches 按时间正序），
         # 序号越大 = 越近。不依赖真实日期字段，故对任何数据源都成立。
@@ -410,7 +416,9 @@ class WalkForwardBacktester:
         """
         gp = gf = ga_ = 0.0
         for s in self._team_stats.values():
-            gp += s["home_played"]; gf += s["home_for"]; ga_ += s["home_against"]
+            gp += s["home_played"]
+            gf += s["home_for"]
+            ga_ += s["home_against"]
         if gp <= 0:
             return DEFAULT_AVG_HOME_GOALS, DEFAULT_AVG_AWAY_GOALS
         # 主场进球 / 主场失球 == 客队在该场的进球

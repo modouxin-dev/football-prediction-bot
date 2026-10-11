@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from backtest import WalkForwardBacktester, _blank_stats, _standings_row_from_history
 from backtest_corpus import fixture_to_match
@@ -110,7 +109,9 @@ def test_standings_row_switches_metric():
 def test_standings_row_falls_back_without_sot():
     """没有射正累积的球队，即使 use_sot=True 也必须用进球口径。"""
     st = _blank_stats("t2")
-    st["home_played"] = 3; st["home_for"] = 5; st["home_against"] = 2
+    st["home_played"] = 3
+    st["home_for"] = 5
+    st["home_against"] = 2
     row = _standings_row_from_history(st, True)
     assert row["home"]["goals"]["for"] == 5
 

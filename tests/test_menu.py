@@ -10,13 +10,14 @@ from telegram import InlineKeyboardButton, KeyboardButton
 import main
 from api_client import APIError
 from bot_handler import BotUI, STATUS_TEXT
-from templates import PANEL_CLOSE_LABEL, PANEL_OPEN_LABEL
+from templates import PANEL_CLOSE_LABEL
 from config import load_settings
 from repository import PredictionRepository
 from service import PredictionService
 from tests.sample_data import FakeAPI, fixture
 
-ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k", "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
+    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 

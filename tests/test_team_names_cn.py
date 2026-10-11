@@ -2,7 +2,6 @@
 """中文队名映射与归一化匹配的回归测试。"""
 from __future__ import annotations
 
-import pytest
 
 from formatkit import display_width, team_name, team_short_name, team_mobile
 from templates import TEAM_NAMES
@@ -94,7 +93,6 @@ def test_mobile_truncation_only_for_unknown():
 
 
 def _mk(lid, name, home, away, hour):
-    from datetime import datetime, timedelta, timezone as _tz
     from views.fixtures import FixturesView
     return FixturesView  # noqa: 仅保持导入路径一致
 

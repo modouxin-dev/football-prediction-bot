@@ -123,7 +123,6 @@ def test_model_health_endpoint(client):
 
 def test_model_health_reports_insufficient_samples(client, tmp_path, monkeypatch):
     """样本不足时必须明确标记，不能让看板画出看似可信的曲线。"""
-    import analytics
 
     db = tmp_path / "few.db"
     from repository import PredictionRepository
@@ -263,4 +262,3 @@ def test_lifespan_warms_up_commands_cache():
     with TestClient(api_module.app):
         pass                                # 进出上下文即完成 startup/shutdown
     assert api_module._COMMAND_CACHE, "lifespan 未预热指令清单，首请求会承担导入开销"
-

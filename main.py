@@ -44,9 +44,9 @@ from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
 from keyboards import nav_row
 from views.digest import DigestView
 from tghtml import normalize
-from support import (back_to_menu_markup, begin_task, deny, describe_error,
-                     edit_view, end_task, is_admin,
-                     panel_state, reply_html, set_panel_state)
+from support import (back_to_menu_markup, begin_task, describe_error, edit_view,
+                     end_task, is_admin, reply_html,
+                     set_panel_state)
 from templates import (PANEL_CLOSE_LABEL, PANEL_COLLAPSED, PANEL_EXPANDED,
                        PANEL_HINTS, PANEL_OPEN_LABEL)
 from commands.adapters import FakeUpdate
@@ -132,18 +132,19 @@ def setup_logging(settings: Settings) -> None:
 
 class CacheManager:
     """线程安全的缓存管理器"""
+
     def __init__(self):
         self._cache = {}
         self._lock = asyncio.Lock()
-    
+
     async def get(self, key):
         async with self._lock:
             return self._cache.get(key)
-    
+
     async def set(self, key, value):
         async with self._lock:
             self._cache[key] = value
-    
+
     async def clear(self, key=None):
         async with self._lock:
             if key is None:
@@ -963,7 +964,6 @@ async def post_init(app: Application) -> None:
     else:
         log.info("备用数据源 football-data.org 未配置或未启用，仅使用主数据源")
     # 免费层额度（100 次/天）在备用源侧没有查询端点，改为本地记录实际请求次数。
-    api_router: FootballAPI | DataSourceRouter  # 两种构造都会赋给 api
     try:
         from repository import bump_quota as _bump_quota
         api = DataSourceRouter(api, fallback, mode=settings.data_source_mode,

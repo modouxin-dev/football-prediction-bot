@@ -31,6 +31,7 @@ def resolve_base_url() -> str:
 
     return (os.getenv("FOOTBALL_DATA_BASE_URL") or BASE_URL).strip().rstrip("/") or BASE_URL
 
+
 # 缓存时长（秒）：免费层 10 次/分钟，必须缓存
 TTL_MATCHES = 10 * 60  # 今日赛程
 TTL_STANDINGS = 30 * 60  # 联赛排名
@@ -319,6 +320,7 @@ class FootballDataAPI:
         except ValueError:
             return False
         return date_from <= dt.date() <= date_to
+
     async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict]:
         code = _code_for(league_id)
         params = {"dateFrom": date_from.isoformat(), "dateTo": date_to.isoformat()}

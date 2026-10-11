@@ -5,42 +5,21 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 
-from analyzer import OUTCOMES, calculate_prediction_level, overround
-from service import MODEL_VERSION, parse_kickoff
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from views.common import CommonView
 from templates import (
-    BRAND_CN,
-    BRAND_EN,
-    BULLET,
     DISCLAIMER,
-    MENU_ITEMS,
     NO_DATA,
-    OUTCOME_LABEL,
     SEP,
-    STATUS_TEXT,
-    TABS,
     THIN_SEP,
-    VALUE_HIGH,
-    VALUE_LOW,
 )
 from formatkit import (
     BLANK,
-    _factors,
-    _form_line,
-    _is_fallback,
-    _is_fallback_source,
-    _num,
-    _row_line,
     _row_summary,
-    bar,
     esc,
-    league_label,
     team_name,
-    web_entry_text,
 )
+
 
 class StandingsView:
         @staticmethod
@@ -63,7 +42,7 @@ class StandingsView:
                 lines.append(NO_DATA)
                 lines += [SEP, DISCLAIMER]
                 return "\n".join(lines)
-    
+
             shown = rows[:limit]
             medals = {1: "🥇", 2: "🥈", 3: "🥉"}
             for i, row in enumerate(shown, start=1):

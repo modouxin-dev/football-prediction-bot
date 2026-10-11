@@ -8,10 +8,6 @@
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
-
-import pytest
 
 from backtest import run_backtest
 from backtest_corpus import fixture_to_match, known_team_ids, load_corpus

@@ -12,7 +12,7 @@ import unicodedata
 
 import pytz
 
-from views.fixtures import FixturesView, WEEKDAY_CN
+from views.fixtures import FixturesView
 
 TZ = pytz.timezone("Asia/Shanghai")
 

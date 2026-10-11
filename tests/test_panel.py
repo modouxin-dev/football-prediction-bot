@@ -9,11 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 import main
 from bot_handler import BotUI
-from commands.basic import panel_cmd, toggle_panel_message
+from commands.basic import panel_cmd
 from config import load_settings
 from support import panel_expanded, panel_state, set_panel_state
 from templates import (PANEL_CLOSE_LABEL, PANEL_COLLAPSED, PANEL_EXPANDED,

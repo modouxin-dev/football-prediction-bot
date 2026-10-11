@@ -11,9 +11,8 @@
 """
 import asyncio
 
-import pytest
 
-from data_source import DataSourceError, DataSourceRouter
+from data_source import DataSourceRouter
 
 FALLBACK_FIXTURE_ID = "fd-5001"
 PRIMARY_FIXTURE_ID = 1234567

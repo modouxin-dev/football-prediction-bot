@@ -8,7 +8,6 @@ Inefficiencies in the Football Betting Market", Applied Statistics.
 """
 import math
 
-import pytest
 
 from analyzer import (
     MAX_GOALS, RHO_MIN_SAMPLES, dc_rho_bounds, dc_score_matrix, dc_tau,

@@ -4,17 +4,17 @@ Railway 配置智能检测脚本
 Quack! 🦆 小鸭子自动诊断系统
 """
 
-import os
 import re
 import sys
 from pathlib import Path
+
 
 class RailwayValidator:
     def __init__(self):
         self.root = Path(".")
         self.issues = []
         self.success = []
-    
+
     def check_file_exists(self, filename, description):
         """检查文件是否存在"""
         filepath = self.root / filename
@@ -24,16 +24,16 @@ class RailwayValidator:
         else:
             self.issues.append(f"❌ {filename} 缺失 ({description})")
             return False
-    
+
     def check_file_contains(self, filename, keywords, description):
         """检查文件是否包含关键内容"""
         filepath = self.root / filename
         if not filepath.exists():
             return False
-        
+
         content = filepath.read_text()
         missing = [kw for kw in keywords if kw not in content]
-        
+
         if not missing:
             self.success.append(f"✅ {filename} 包含必要配置")
             return True
@@ -42,17 +42,17 @@ class RailwayValidator:
                 f"❌ {filename} 缺少: {', '.join(missing)}"
             )
             return False
-    
+
     def validate_all(self):
         """运行所有检测"""
         print("\n" + "="*60)
         print("🦆 Railway 配置智能检测系统")
         print("="*60 + "\n")
-        
+
         # 检测 1: railway.toml
         print("📋 检测 1: railway.toml 配置")
         self.check_file_exists(
-            "railway.toml", 
+            "railway.toml",
             "Railway 部署配置文件"
         )
         if (self.root / "railway.toml").exists():
@@ -61,7 +61,7 @@ class RailwayValidator:
                 ["[build]", "[deploy]", "builder", "startCommand"],
                 "Railway 核心配置"
             )
-        
+
         # 检测 2: Dockerfile
         print("📋 检测 2: Dockerfile 配置")
         self.check_file_exists(
@@ -74,7 +74,7 @@ class RailwayValidator:
                 ["FROM python", "COPY", "pip install", "CMD"],
                 "Docker 基础镜像和启动命令"
             )
-        
+
         # 检测 3: .env.example
         print("📋 检测 3: 环境变量配置")
         self.check_file_exists(
@@ -87,7 +87,7 @@ class RailwayValidator:
                 ["DATABASE_PATH", "API_KEY", "LOG_LEVEL"],
                 "必需环境变量"
             )
-        
+
         # 检测 4: Python 依赖
         # 依赖分两个文件：requirements.txt 是机器人本体，requirements-web.txt 是
         # Web 看板（PR #36 起分离）。此前这里要求 requirements.txt 同时含
@@ -147,7 +147,7 @@ class RailwayValidator:
                 ["app", "run"],
                 "应用启动逻辑"
             )
-        
+
         # 检测 6: scripts 目录
         print("📋 检测 6: 脚本工具目录")
         scripts_dir = self.root / "scripts"
@@ -155,23 +155,23 @@ class RailwayValidator:
             self.success.append("✅ scripts/ 目录存在")
         else:
             self.issues.append("❌ scripts/ 目录缺失")
-        
+
         # 打印结果
         # 必须 return：此前这里只是调用而没返回，validate_all() 恒为 None，
         # 于是 sys.exit(0 if None else 1) 恒为 1 —— 配置全部正确也会判红。
         return self.print_results()
-    
+
     def print_results(self):
         """打印检测结果"""
         print("\n" + "="*60)
         print("📊 检测结果汇总")
         print("="*60 + "\n")
-        
+
         for msg in self.success:
             print(msg)
-        
+
         print()
-        
+
         if self.issues:
             print("⚠️  发现问题:")
             for msg in self.issues:
@@ -186,6 +186,7 @@ class RailwayValidator:
             print("🎉 所有配置完整！")
             print("✅ 可以部署到 Railway")
             return True
+
 
 if __name__ == "__main__":
     validator = RailwayValidator()

@@ -47,7 +47,6 @@ def judge_backtest(result: dict) -> tuple[bool, list[str]]:
     if abs(acc - 1.0) < 1e-9 or abs(acc) < 1e-9:
         reasons.append(f"准确率恒定为 {acc:.2%}，预测逻辑可能仍是占位符")
 
-    levels = result.get("accuracy_by_type") or {}
     preds = result.get("predictions") or []
     by_level: dict[str, list[int]] = {}
     for p in preds:

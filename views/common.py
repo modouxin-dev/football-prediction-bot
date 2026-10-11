@@ -7,59 +7,31 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from analyzer import OUTCOMES, calculate_prediction_level, overround
-from service import MODEL_VERSION, parse_kickoff
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
-from templates import (
-    BRAND_CN,
-    BRAND_EN,
-    BULLET,
-    DISCLAIMER,
-    MENU_ITEMS,
-    NO_DATA,
-    OUTCOME_LABEL,
-    SEP,
-    STATUS_TEXT,
-    TABS,
-    THIN_SEP,
-    VALUE_HIGH,
-    VALUE_LOW,
-)
 from formatkit import (
-    _factors,
-    _form_line,
-    _is_fallback,
-    _is_fallback_source,
-    _num,
-    _row_line,
-    _row_summary,
-    bar,
     esc,
-    fmt_time as _fmt_time,
     hbar,
-    league_label,
     team_mobile,
-    team_name,
     web_entry_text,
 )
+
 
 class CommonView:
         @staticmethod
         def web_text(web_url: str = "") -> str:
             """/web 入口文案：按是否配置了 WEB_URL 动态生成。"""
             return web_entry_text(web_url)
-    
+
         @staticmethod
         def tz_label(tz, when: datetime | None = None) -> str:
             when = (when or datetime.now(tz)).astimezone(tz)
             offset = when.utcoffset() or timedelta(0)  # aware 时间必有 offset，兜底仅为类型收窄
             hours = offset.total_seconds() / 3600
             return f"UTC{hours:+g}"
-    
+
         @staticmethod
         def fmt_time(dt: datetime, tz, pattern: str = "%m-%d %H:%M") -> str:
             return dt.astimezone(tz).strftime(pattern)
-    
+
         @staticmethod
         def matchup(p, tz) -> str:
             """详情页顶部的一行比赛信息。"""
@@ -69,7 +41,7 @@ class CommonView:
                 f"🏠 <b>{esc(team_mobile(p.home))}</b> 🆚 <b>{esc(team_mobile(p.away))}</b> ✈️\n"
                 f"🕐 <code>{CommonView.fmt_time(p.kickoff, tz)}</code> ({CommonView.tz_label(tz, p.kickoff)})"
             )
-    
+
         @staticmethod
         def _hbar(prob: float, width: int = 10) -> str:
             """概率条（方块）。

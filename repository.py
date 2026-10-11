@@ -57,6 +57,7 @@ def _sleep_backoff(attempt: int, reason: str = "") -> None:
                 reason or "locked", attempt + 1, delay * 1000)
     time.sleep(delay)
 
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS matches (
     id               INTEGER PRIMARY KEY,
@@ -896,8 +897,8 @@ class PredictionRepository:
             log.warning("查询最近预测失败：%s", exc)
             return []
 
-
     # ---- 比赛本地缓存（外部 API 拉取，SQLite 保存） ---------------------------
+
     def save_matches(self, competition: str, matches: list[dict[str, Any]],
                      source: str = "football-data.org",
                      http_status: str = "200", message: str = "") -> int:

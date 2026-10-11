@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import date
 from typing import Any, Callable
 
@@ -48,6 +47,7 @@ def _new_response_cache():
     if AsyncTTLCache is not None:
         return AsyncTTLCache(max_size=500, default_ttl=3600)
     return SimpleCache()
+
 
 log = logging.getLogger(__name__)
 
@@ -355,4 +355,3 @@ class FootballAPI:
         """账户与额度（用于 /status 诊断）。"""
         response = await self._get("status", {}, ttl=TTL_STATUS)
         return response if isinstance(response, dict) else {}
-

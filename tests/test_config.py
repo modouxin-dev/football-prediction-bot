@@ -9,7 +9,8 @@ BASE = {"TELEGRAM_TOKEN": "123:abc", "RAPID_API_KEY": "key", "CHAT_ID": "555"}
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [("08:00", time(8, 0)), ("8:30", time(8, 30)), ("9", time(9, 0)), ("0745", time(7, 45)), ("21：15", time(21, 15)), ("07:05:00", time(7, 5))],
+    [("08:00", time(8, 0)), ("8:30", time(8, 30)), ("9", time(9, 0)),
+      ("0745", time(7, 45)), ("21：15", time(21, 15)), ("07:05:00", time(7, 5))],
 )
 def test_parse_push_time_accepts_common_formats(raw, expected):
     assert parse_push_time(raw) == expected

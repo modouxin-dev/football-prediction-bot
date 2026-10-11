@@ -11,7 +11,6 @@ def test_today_uses_project_timezone(monkeypatch):
     from datetime import datetime, timezone as _tz
 
     monkeypatch.setattr(api, "_TZ_NAME", "Asia/Shanghai")
-    real = datetime
 
     class FrozenDT(datetime):
         @classmethod

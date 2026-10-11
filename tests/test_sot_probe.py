@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import pytest
 
 from commands.admin import (
     SOT_PROBE_DEFAULT,

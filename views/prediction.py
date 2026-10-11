@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 
 from analyzer import (
     OUTCOMES,
@@ -14,46 +13,27 @@ from analyzer import (
     market_gap,
     overround,
 )
-from service import MODEL_VERSION, parse_kickoff
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from service import MODEL_VERSION
 from views.common import CommonView
 from templates import (
-    BRAND_CN,
-    BRAND_EN,
-    BULLET,
     DISCLAIMER,
-    MENU_ITEMS,
-    NO_DATA,
     OUTCOME_LABEL,
     SEP,
-    STATUS_TEXT,
-    TABS,
-    THIN_SEP,
     VALUE_HIGH,
     VALUE_LOW,
 )
 from formatkit import (
     kv_line,
-    _factors,
-    _form_line,
     _is_fallback,
-    _is_fallback_source,
-    _num,
-    _row_line,
-    _row_summary,
     align_cjk,
     bar,
     esc,
     BLANK,
     hbar,
-    league_label,
     pad_cjk,
     section,
     section_join,
-    fit_cols,
     team_mobile,
-    team_name,
-    web_entry_text,
 )
 
 # 三种结果对应的图标。键是视图内部使用的中文标签，与 OUTCOME_LABEL 的值一致。
@@ -65,18 +45,19 @@ OUTCOME_ICON = {"主胜": "🏠", "平局": "🤝", "客胜": "✈️"}
 # 与数值贴死，看上去像没分隔。
 CORE_LABEL_WIDTH = 12
 
+
 class PredictionView:
         @staticmethod
         def format_prediction(p, tz) -> str:
             a = p.analysis
             probs = (("主胜", a["win_prob"]), ("平局", a["draw_prob"]), ("客胜", a["loss_prob"]))
-    
+
             title = f"🏆 <b>{esc(p.league)}</b>" + (f" · {esc(p.round_label)}" if p.round_label else "")
             when = f"🕐 <code>{CommonView.fmt_time(p.kickoff, tz)}</code> ({CommonView.tz_label(tz, p.kickoff)})"
             # 场馆独占一行：与「时间 + 时区」挤在一行实测 38 列，手机上必折行；
             # 分成两行各约 24 列，且不再需要截断场馆名（信息完整保留）。
             venue_line = f"🏟 <code>{esc(p.venue)}</code>" if p.venue else None
-    
+
             top_label, top_prob = max(probs, key=lambda kv: kv[1])
 
             lines = [
@@ -188,7 +169,7 @@ class PredictionView:
                 DISCLAIMER,
             ]
             return "\n".join(lines)
-    
+
         @staticmethod
         def get_strategy(p) -> str:
             if not p.best:
@@ -201,14 +182,14 @@ class PredictionView:
             if o["edge"] >= VALUE_LOW:
                 return f"{OUTCOME_LABEL[key]}（模型略高于市场）"
             return "与市场基本一致，观望"
-    
+
         @staticmethod
         def get_confidence(p) -> str:
             a = p.analysis
             top = max(a["win_prob"], a["draw_prob"], a["loss_prob"])
             stars = "⭐⭐⭐⭐⭐" if top > 0.7 else "⭐⭐⭐" if top > 0.5 else "⭐⭐"
             return stars + "（样本较少）" if p.low_sample else stars
-    
+
         @staticmethod
         def confidence_text(p) -> str:
             """模型信心等级：🟢 高 / 🟡 中 / 🔴 低，只由概率计算。
@@ -229,7 +210,7 @@ class PredictionView:
             elif p.low_sample:
                 text += "（近期样本不足）"
             return text
-    
+
         @staticmethod
         def risk_bullets(p) -> list[str]:
             """风险提示正文（不带符号）：缺什么就说什么，绝不虚构概率。
@@ -253,7 +234,7 @@ class PredictionView:
         def risk_lines(cls, p) -> list[str]:
             """风险提示：每行自带 ⚠️，供需要独立成行的场景使用。"""
             return [f"⚠️ {line}" for line in cls.risk_bullets(p)]
-    
+
         @classmethod
         def format_prediction_card(cls, p, tz, model_version: str = MODEL_VERSION) -> str:
             """预测主卡：少文字 + 大结论 + 数据卡片。
@@ -266,7 +247,7 @@ class PredictionView:
             top_label, top_prob = max(probs, key=lambda kv: kv[1])
             home, away = esc(team_mobile(p.home)), esc(team_mobile(p.away))
             level = p.level
-    
+
             # 大结论：不败 / 单一结果，比「最可能结果」更接近用户直觉
             if top_label == "主胜":
                 verdict = f"{home}不败" if top_prob + a["draw_prob"] >= 0.7 else "主胜"
@@ -274,7 +255,7 @@ class PredictionView:
                 verdict = f"{away}不败" if top_prob + a["draw_prob"] >= 0.7 else "客胜"
             else:
                 verdict = "平局"
-    
+
             # 数据可信度： GOOD / FAIR / POOR，一眼看出结论能不能信
             if getattr(p, "insufficient", False):
                 quality = "POOR"
@@ -282,7 +263,7 @@ class PredictionView:
                 quality = "FAIR"
             else:
                 quality = "GOOD"
-    
+
             # 概率行：图标 + 两字标签 + 等宽条与百分比。
             # 百分比放进 <code> 而不是用 <b> 包在外面——正文是比例字体，
             # 「9%」和「100%」宽度不同会错开；等宽块里用 >3 补位才真正对齐。
@@ -334,19 +315,19 @@ class PredictionView:
             core_rows.append(("🧩", "数据完整性", esc(p.data_completeness)))
             for icon, label, value in core_rows:
                 lines.append(kv_line(icon, label, value, CORE_LABEL_WIDTH))
-    
+
             # 模型分析：结论式短句，不做长篇说明
             notes = cls._model_notes(p, home, away, verdict)
             if notes:
                 lines += ["", SEP, "", "<b>📝 模型分析</b>", ""]
                 lines += [f"• {n}" for n in notes]
-    
+
             # 风险因素：与主卡的免责声明不同，这里说的是「本次预测具体缺什么」
             risks = cls.risk_bullets(p)
             if risks:
                 lines += ["", SEP, "", "<b>⚠️ 风险因素</b>", ""]
                 lines += [f"• {r}" for r in risks]
-    
+
             # 脚注：来源/赛季/模型版本/更新时间一律小字，不占正文篇幅
             lines += [
                 "",
@@ -355,7 +336,7 @@ class PredictionView:
                 f"<code>MODEL: {esc(model_version)} · UPDATED: "
                 f"{CommonView.fmt_time(p.created_at, tz, '%H:%M')} UTC+8</code>",
             ]
-    
+
             # 数据不足：必须明确告知结论不可信，不能与正常预测同等呈现
             if getattr(p, "insufficient", False):
                 lines += [
@@ -369,7 +350,7 @@ class PredictionView:
                 lines += ["", "ℹ️ 备用数据源：仅基础比赛数据，赔率等高级统计不可用。"]
             lines += ["", DISCLAIMER]
             return "\n".join(lines)
-    
+
         @staticmethod
         def _model_notes(p, home: str, away: str, verdict: str) -> list[str]:
             """模型分析短句：每条结论都对应真实数据，缺数据时不编造。"""
@@ -388,7 +369,7 @@ class PredictionView:
                 notes.append(f"{home}主场防守更稳固")
             notes.append(f"综合数据倾向：{verdict}")
             return notes
-    
+
         @staticmethod
         def format_odds_detail(p, tz) -> str:
             title = "💰 <b>赔率对比</b>"

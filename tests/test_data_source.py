@@ -1,8 +1,7 @@
 """备用数据源 football-data.org 与主源切换的测试（全部 Mock，不需要真实 Token）。"""
 import asyncio
-import json
 import time
-from datetime import date, timedelta
+from datetime import date
 
 import httpx
 import pytest
@@ -293,9 +292,8 @@ def test_both_sources_feed_same_model():
     """主源与备用源的数据都要能喂给同一个泊松模型产出合法概率。"""
     from analyzer import build_league_model
     from config import load_settings
-    from service import PredictionService
 
-    settings = load_settings(
+    load_settings(
         {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
     )
     fd = make_fd(ok_standings)
@@ -534,7 +532,6 @@ def test_multi_day_page_shows_date_and_recent_title():
     """跨天时标题应为「近期赛程」，且每行显示日期，避免误以为是今天的比赛。"""
     from bot_handler import BotUI
     from config import load_settings
-    from service import PredictionService
 
     settings = load_settings(
         {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}
@@ -553,7 +550,6 @@ def test_today_with_matches_keeps_today_title():
     """今日有比赛时不触发扩展，标题仍是「今日赛程」且不带日期前缀。"""
     from bot_handler import BotUI
     from config import load_settings
-    from service import PredictionService
 
     settings = load_settings(
         {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}

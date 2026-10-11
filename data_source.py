@@ -21,7 +21,7 @@ import time
 from datetime import date
 from typing import Any
 
-from football_data import FootballDataAPI, FootballDataError
+from football_data import FootballDataAPI
 from normalize import is_fallback_id
 
 log = logging.getLogger(__name__)
@@ -172,14 +172,14 @@ class DataSourceRouter:
                 league_id = int(args[0])
             except (TypeError, ValueError):
                 pass
-        
+
         # ID 归属路由：ID 来自备用源时只能问备用源，别拿去污染主源的健康判定。
         uses_fallback_id = (
             method in FIXTURE_ID_METHODS and bool(args) and is_fallback_id(args[0])
         )
         if uses_fallback_id:
             log.debug("%s：ID 来自备用源（%s），跳过主源", method, args[0])
-        
+
         # 按联赛隔离的冷却检查
         if not uses_fallback_id and self.mode in ("auto", "api-football") and not self._primary_cooling(league_id):
             tried_primary = True
@@ -261,7 +261,8 @@ class DataSourceRouter:
             if not primary_reason:
                 # 明确区分两种「没有具体错误」的情形，避免一律显示成\"未尝试\"，
                 # 让人误以为主源压根没被调用过。
-                cooling_left = self._primary_cooldown_by_league.get(league_id, 0.0) - time.monotonic() if league_id else 0
+                cooling_left = self._primary_cooldown_by_league.get(
+                    league_id, 0.0) - time.monotonic() if league_id else 0
                 primary_reason = (
                     f"冷却中未发起请求（联赛{league_id}剩余 {int(max(cooling_left, 0))} 秒）"
                     if cooling_left > 0 else "已尝试但无具体错误"
@@ -336,4 +337,3 @@ class DataSourceRouter:
                     await close()
                 except Exception:  # noqa: BLE001 - 关闭失败不影响退出
                     pass
-

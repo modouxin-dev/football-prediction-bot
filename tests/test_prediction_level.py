@@ -73,7 +73,7 @@ def test_total_within_tolerance_passes():
 
 # ---- 统一数据结构 ---------------------------------------------------------------
 def test_payload_contains_required_fields():
-    from datetime import datetime, timedelta, timezone
+    pass
 
     from tests.test_prediction import FullAPI, now_fixtures  # 复用已有桩
 
@@ -144,7 +144,7 @@ def test_no_markdown_table_in_output():
 
 
 def test_card_shows_source_and_season():
-    from types import SimpleNamespace
+    pass
 
     from tests.test_prediction import FullAPI, now_fixtures
     import asyncio

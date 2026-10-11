@@ -13,6 +13,8 @@ import os
 from typing import Any
 
 # 允许的 chat_id 必须由环境变量提供，缺失时拒绝全部请求（fail-closed）
+
+
 def _allowed_chat_ids() -> set[int]:
     raw = os.environ.get("TG_ALLOWED_CHAT_IDS", "")
     ids: set[int] = set()

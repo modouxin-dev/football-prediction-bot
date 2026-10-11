@@ -7,45 +7,28 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from analyzer import OUTCOMES, calculate_prediction_level, overround
-from service import MODEL_VERSION, parse_kickoff
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from service import MODEL_VERSION
 from views.common import CommonView
 from templates import (
-    BRAND_CN,
-    BRAND_EN,
-    BULLET,
     DISCLAIMER,
-    MENU_ITEMS,
     NO_DATA,
-    OUTCOME_LABEL,
     SEP,
-    STATUS_TEXT,
-    TABS,
-    THIN_SEP,
-    VALUE_HIGH,
-    VALUE_LOW,
 )
 from formatkit import (
     BLANK,
     _factors,
     _form_line,
-    _is_fallback,
     _is_fallback_source,
-    _num,
     _row_line,
-    _row_summary,
-    bar,
     esc,
     hbar,
     kv_line,
-    league_label,
     section,
     section_join,
     team_mobile,
     team_name,
-    web_entry_text,
 )
+
 
 def _injuries_body(report: dict, errors: dict) -> list[str]:
     """伤停信息文案：有就列名单，没有就说明原因（不伪造、不隐藏失败）。"""
@@ -89,7 +72,7 @@ class AnalysisView:
                 if report["has_team_data"]
                 else "无数据"
             )
-    
+
             # 分节统一走 section()：图标+标题 → 分隔线 → 内容 → 空行。
             # 原来各段直接堆 SEP，相邻两块之间没有任何留白，手机上读起来
             # 是一整片；空行才是移动端可读性的关键。
@@ -176,7 +159,7 @@ class AnalysisView:
                 DISCLAIMER,
             ]
             return "\n".join(lines)
-    
+
         @staticmethod
         def format_deep_analysis(p, tz) -> str:
             a, hs, aws = p.analysis, p.home_strength, p.away_strength
@@ -219,7 +202,7 @@ class AnalysisView:
             lines = section_join(blocks).split("\n")
             lines += [SEP, BLANK, DISCLAIMER]
             return "\n".join(lines)
-    
+
         @staticmethod
         def format_h2h(p, matches: list[dict], tz) -> str:
             title = "📊 <b>历史交锋</b>"
@@ -227,7 +210,7 @@ class AnalysisView:
             if not finished:
                 return f"{title}\n{CommonView.matchup(p, tz)}\n{SEP}\n暂无历史交锋记录。"
             finished.sort(key=lambda m: (m.get("fixture") or {}).get("date") or "", reverse=True)
-    
+
             win = draw = loss = gf = ga = 0
             rows = []
             for m in finished:
@@ -241,7 +224,8 @@ class AnalysisView:
                 raw = (m.get("fixture") or {}).get("date")
                 if raw:
                     try:
-                        date = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(tz).strftime("%Y-%m-%d")
+                        date = datetime.fromisoformat(str(raw).replace("Z", "+00:00")
+                                                      ).astimezone(tz).strftime("%Y-%m-%d")
                     except ValueError:
                         date = str(raw)[:10]
                 mark = "🟢" if ours > theirs else "🟡" if ours == theirs else "🔴"
