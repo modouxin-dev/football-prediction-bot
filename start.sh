@@ -7,7 +7,7 @@
 # 写的 football.db，看板永远显示「暂无数据」。所以两者必须同容器，共用 /data。
 set -eu
 
-PORT="${PORT:-8000}"
+PORT="${PORT:-8080}"
 
 # ENABLE_WEB=0 可关掉看板（默认开启）
 if [ "${ENABLE_WEB:-1}" = "1" ]; then

@@ -135,8 +135,8 @@ JobQueue 逻辑抽出来，不是换调度器。
 
 ```bash
 pip install -r requirements-web.txt
-python -m uvicorn api:app --host 0.0.0.0 --port 8000
-# 浏览器打开 http://localhost:8000 即可看到看板
+python -m uvicorn api:app --host 0.0.0.0 --port 8080
+# 浏览器打开 http://localhost:8080 即可看到看板
 ```
 
 然后在 Railway 设置 `WEB_URL=https://你的域名`，Telegram 的 `/web` 命令就会给出可点击地址。

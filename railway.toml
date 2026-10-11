@@ -6,12 +6,12 @@ dockerfile = "./Dockerfile"
 # 必须是 start.sh，不能写 "python main.py"。
 #
 # 原因：Railway 的 startCommand 会覆盖 Dockerfile 的 CMD ["start.sh"]。
-# 而 start.sh 干的是「先后台起 uvicorn（Web 看板，监听 :${PORT:-8000}），
+# 而 start.sh 干的是「先后台起 uvicorn（Web 看板，监听 :${PORT:-8080}），
 # 再前台 exec python main.py（机器人）」。
 # 若这里写成 "python main.py"，容器只跑机器人，uvicorn 永远不启动：
-#   - 8000 端口无人监听 → Web 看板打不开
+#   - 8080 端口无人监听 → Web 看板打不开
 #   - healthCheck 的 /health 永远失败 → 服务被判定不健康
-# main.py 自身不含任何 HTTP server 代码（全文无 uvicorn / 8000），
+# main.py 自身不含任何 HTTP server 代码（全文无 uvicorn / 8080），
 # 所以必须由 start.sh 来拉起看板。
 startCommand = "start.sh"
 restartPolicyType = "on_failure"
@@ -20,7 +20,7 @@ restartPolicyMaxRetries = 3
 [environments.production]
 healthCheck = {
   path = "/health",
-  port = 8000,
+  port = 8080,
   timeout = 10,
   interval = 10
 }
@@ -34,7 +34,7 @@ volumes = [
 DATABASE_PATH = "/data/football.db"
 LOG_LEVEL = "INFO"
 # 显式固定 PORT，让三处保持一致：
-#   start.sh 监听 ${PORT:-8000}、healthCheck.port=8000、Railway 流量转发目标
-# 不设的话 PORT 取 Railway 注入值，可能不是 8000，
+#   start.sh 监听 ${PORT:-8080}、healthCheck.port=8080、Railway 流量转发目标
+# 不设的话 PORT 取 Railway 注入值，可能不是 8080，
 # 导致看板监听 A 端口、健康检查却探 B 端口，表现同样是「打不开」。
-PORT = "8000"
+PORT = "8080"

@@ -653,7 +653,7 @@ def web_entry_text(web_url: str = "") -> str:
             section(
                 "🛠", "启用方法",
                 "• 安装可选依赖 <code>pip install -r requirements-web.txt</code>",
-                "• 启动 <code>uvicorn api:app --host 0.0.0.0 --port 8000</code>",
+                "• 启动 <code>uvicorn api:app --host 0.0.0.0 --port 8080</code>",
                 "• 设置环境变量 <code>WEB_URL</code>，值为该服务的完整访问地址",
             ),
             section("✅", "未启用期间", "下方菜单功能不受影响。"),

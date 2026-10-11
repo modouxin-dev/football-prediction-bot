@@ -168,16 +168,16 @@ pip install -r requirements-web.txt
 # 启动 API 服务器
 # 注意：看板入口是仓库根目录的 api.py，不是 web/api.py。
 # start.sh 里跑的就是这条命令；web/api.py 从未被挂载且返回硬编码假数据，已删除。
-uvicorn api:app --host 0.0.0.0 --port 8000
+uvicorn api:app --host 0.0.0.0 --port 8080
 
 # 打开浏览器访问看板
-# http://localhost:8000/frontend.html
+# http://localhost:8080/frontend.html
 ```
 
 **API 文档** (自动生成):
 ```
-http://localhost:8000/docs
-http://localhost:8000/redoc
+http://localhost:8080/docs
+http://localhost:8080/redoc
 ```
 
 ### 📈 性能指标
