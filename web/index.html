@@ -173,8 +173,6 @@ async function runDiagnostic() {
   $('debug-info').textContent = debugLog.join('\\n');
 }
 
-const $ = (id) => document.getElementById(id);
-
 async function get(url){
   addDebugLog(`正在请求: ${url}`);
   try {
@@ -407,6 +405,25 @@ async function load(){
 
 load();
 setInterval(load, 60000);   // 每分钟自动刷新
+</script>
+
+<script>
+// 独立看门狗：单独一个 <script> 块，与主脚本分开编译。
+// 主脚本若存在语法错误（例如同一标识符重复声明），整个块一行都不会执行，
+// 页面会永远停在静态占位「正在加载数据…」，而没有任何报错提示。
+// 分开编译保证这段即使主脚本挂掉也照样运行，能给出可见的错误提示。
+setTimeout(function () {
+  var root = document.getElementById('root');
+  if (!root) return;
+  var html = root.innerHTML;
+  // 已渲染出卡片 = 加载成功，不干预
+  if (html.indexOf('class="card"') !== -1) return;
+  if (html.indexOf('正在加载数据') === -1) return;
+  root.innerHTML = '<div class="card"><div class="err">页面脚本未执行或加载超时</div>'
+    + '<div class="empty">主脚本可能被语法错误中断，或接口 15 秒内未返回。'
+    + '请先点右上角「诊断」：若诊断区也无任何输出，说明脚本未运行；'
+    + '若有输出，按其中的失败端点排查。</div></div>';
+}, 15000);
 </script>
 </body>
 </html>

@@ -76,7 +76,7 @@
 ## 五、Web 看板（可选）
 
 - [ ] 安装可选依赖：`pip install -r requirements-web.txt`
-- [ ] 启动：`python -m uvicorn api:app --host 0.0.0.0 --port 8000`
+- [ ] 启动：`python -m uvicorn api:app --host 0.0.0.0 --port 8080`
 - [ ] 设置 `WEB_URL=https://你的域名`
 - [ ] 浏览器打开，确认三张卡片都有数据（模型健康度 / 强度榜 / 预测审计）
 - [ ] `curl $WEB_URL/health` → `persistent: true`

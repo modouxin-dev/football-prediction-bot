@@ -12,10 +12,10 @@
 
 启动：
     pip install -r requirements-web.txt
-    python -m uvicorn api:app --host 0.0.0.0 --port 8000
+    python -m uvicorn api:app --host 0.0.0.0 --port 8080
 
-    curl http://127.0.0.1:8000/health
-    curl http://127.0.0.1:8000/stats
+    curl http://127.0.0.1:8080/health
+    curl http://127.0.0.1:8080/stats
 """
 from __future__ import annotations
 
@@ -345,7 +345,7 @@ async def commands() -> JSONResponse:
 def main() -> None:  # pragma: no cover
     import uvicorn
 
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "8080"))
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 
