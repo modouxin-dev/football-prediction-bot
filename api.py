@@ -176,10 +176,18 @@ def _repo() -> PredictionRepository:
 
 @app.get("/")
 async def index():
-    """看板页面。"""
+    """看板页面。
+
+    显式禁用缓存：index.html 是单文件内联脚本，改动后若被浏览器或中间
+    代理缓存住，用户拿到的仍是旧脚本——页面会一直卡在「正在加载数据…」
+    而服务端早已修好，现场表现为「明明部署了却还是打不开」。
+    """
     if not _INDEX.exists():  # pragma: no cover - 打包遗漏时给出明确提示
         raise HTTPException(status_code=500, detail=f"缺少静态页面：{_INDEX}")
-    return FileResponse(_INDEX)
+    return FileResponse(
+        _INDEX,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/health")
@@ -333,6 +341,40 @@ async def fixtures(date: str | None = None, limit: int = 100) -> JSONResponse:
         "date": day,
         "total": total,
         "leagues": payload,
+    })
+
+
+@app.get("/backtest")
+async def backtest(limit: int = 20, competition: str | None = None) -> JSONResponse:
+    """历史回测结论（新→旧），用于观察指标随样本积累的变化。
+
+    数据来自 backtest_runs 表——由 backtest_job 每日跑完 Walk-Forward
+    回测后落盘。表为空时返回 status=empty，**不**编造任何数字：
+    看板必须能区分「还没跑过」和「跑出来是 0」。
+
+    Walk-Forward 的含义：逐场只用该场**之前**的数据做预测，因此不存在
+    前视偏差；这里的准确率与 Telegram 推送口径同源。
+    """
+    comp = _default_competition() if competition is None else competition
+    limit = max(1, min(int(limit), 100))
+    repo = _repo()
+    try:
+        items = repo.backtest_history(comp, limit=limit)
+    except Exception as exc:
+        log.exception("/backtest 读取失败")
+        raise HTTPException(status_code=500, detail=f"读取回测结论失败：{exc}") from exc
+    return JSONResponse({
+        "version": _VERSION,
+        "status": "ok" if items else "empty",
+        "competition": comp,
+        "competition_cn": _league_name(comp),
+        "count": len(items),
+        "items": items,
+        "message": (
+            "" if items else
+            "尚无回测记录。backtest_job 每日自动跑一次并落盘，"
+            "首次生效约在启动 30 分钟后。"
+        ),
     })
 
 
