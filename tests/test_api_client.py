@@ -22,7 +22,10 @@ def test_success_returns_response_and_sends_rapidapi_headers():
 
     def handler(request):
         seen["headers"], seen["url"] = request.headers, str(request.url)
-        return httpx.Response(200, json={"errors": [], "response": [{"ok": 1}]}, headers={"x-ratelimit-requests-remaining": "42"})
+        return httpx.Response(
+            200, json={"errors": [], "response": [{"ok": 1}]},
+            headers={"x-ratelimit-requests-remaining": "42"},
+        )
 
     api = make_api(handler)
     assert run(api.get_odds(7)) == [{"ok": 1}]
@@ -70,7 +73,10 @@ def test_http_403_is_translated_into_a_readable_reason_and_not_retried():
 
 def test_errors_field_becomes_api_error_and_plan_hint_is_added():
     def handler(request):
-        return httpx.Response(200, json={"errors": {"plan": "Free plans do not have access to this season"}, "response": []})
+        return httpx.Response(200, json={
+            "errors": {"plan": "Free plans do not have access to this season"},
+            "response": [],
+        })
 
     with pytest.raises(APIError) as exc:
         run(make_api(handler).get_standings(39, 2026))

@@ -20,11 +20,7 @@ import math
 
 import pytest
 
-from analyzer import (
-    TEMP_MIN_SAMPLES,
-    apply_temperature,
-    fit_temperature,
-)
+from analyzer import TEMP_MIN_SAMPLES, apply_temperature, fit_temperature
 
 
 def _obs(n: int, overconfident: bool = True) -> list[tuple]:
@@ -149,8 +145,8 @@ def test_predict_match_applies_temperature_without_flipping_direction():
     cal = a.predict_match(model, 1, 2, temperature=1.4)
 
     # 方向不变
-    assert max(("win_prob", "draw_prob", "loss_prob"), key=lambda k: raw[k]) == \
-           max(("win_prob", "draw_prob", "loss_prob"), key=lambda k: cal[k])
+    assert (max(("win_prob", "draw_prob", "loss_prob"), key=lambda k: raw[k])
+            == max(("win_prob", "draw_prob", "loss_prob"), key=lambda k: cal[k]))
     # 但最大项被压低（不再那么自信）
     top = max(("win_prob", "draw_prob", "loss_prob"), key=lambda k: raw[k])
     assert cal[top] < raw[top]
@@ -182,9 +178,9 @@ def test_backtest_calibration_does_not_use_future():
     import os
     import tempfile
 
+    import repository
     from backtest import WalkForwardBacktester
     from backtest_corpus import load_corpus
-    import repository
 
     with tempfile.TemporaryDirectory() as d:
         ms, _ = load_corpus(

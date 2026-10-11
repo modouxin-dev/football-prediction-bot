@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 
-
 from api_client import APIError
 from data_source import OPTIONAL_METHODS, DataSourceRouter
 

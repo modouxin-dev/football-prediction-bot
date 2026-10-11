@@ -167,11 +167,10 @@ def test_team_name_monolingual_mode():
 # ---- 机器人指令表 / Bot commands --------------------------------------------------
 def test_bot_commands_registered_and_bilingual():
     """每个指令都要有中英双语说明，且都有对应的 CommandHandler。"""
-    from main import BOT_COMMANDS
-
     # 注册改由 commands 包的 dispatcher 数据驱动，因此查运行时注册表，
     # 不再匹配源码字符串——后者在重构后会误报，前者才是真正有效的校验。
     from commands import build_dispatcher
+    from main import BOT_COMMANDS
 
     dispatcher = build_dispatcher()
     for cmd, desc in BOT_COMMANDS:

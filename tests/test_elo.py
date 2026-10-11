@@ -2,17 +2,15 @@
 
 纯函数要求 100% 可测；引擎部分重点验证幂等性与零和性质。
 """
-from elo import (
-    DEFAULT_RATING, ELO_CLAMP, HOME_ADVANTAGE, K_BASE, K_NEW_TEAM,
-    EloEngine, calculate_elo, elo_multiplier, expected_score,
-    goal_diff_multiplier, k_factor_for, outcome_from_score,
-)
+from elo import (DEFAULT_RATING, ELO_CLAMP, HOME_ADVANTAGE, K_BASE, K_NEW_TEAM,
+                 EloEngine, calculate_elo, elo_multiplier, expected_score,
+                 goal_diff_multiplier, k_factor_for, outcome_from_score)
 from repository import PredictionRepository
-
 
 # ============================================================================
 # 一、纯函数
 # ============================================================================
+
 
 def test_expected_score_equal_ratings_is_half():
     assert abs(expected_score(1500.0, 1500.0) - 0.5) < 1e-9

@@ -5,7 +5,6 @@
 """
 
 from service import PredictionService
-
 from tests.test_multileague_model import RecordingAPI, fx, settings_of
 
 

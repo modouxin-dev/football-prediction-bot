@@ -2,10 +2,8 @@
 """中文队名映射与归一化匹配的回归测试。"""
 from __future__ import annotations
 
-
-from formatkit import display_width, team_name, team_short_name, team_mobile
+from formatkit import display_width, team_mobile, team_name, team_short_name
 from templates import TEAM_NAMES
-
 
 # 每个已配置联赛至少抽两支代表队，确保映射覆盖到全部 17 个联赛
 LEAGUE_SAMPLES = {
@@ -99,8 +97,11 @@ def _mk(lid, name, home, away, hour):
 
 def test_fixtures_group_title_is_chinese_with_flag():
     """赛程分组标题必须是「国旗 + 中文联赛名 + 场数」，不能是数据源英文名。"""
+    from datetime import datetime, timedelta
+    from datetime import timezone as _tzu
+
     import pytz
-    from datetime import datetime, timedelta, timezone as _tzu
+
     from views.fixtures import FixturesView
 
     tz = pytz.timezone("Asia/Shanghai")
@@ -135,8 +136,11 @@ def test_fixtures_group_title_is_chinese_with_flag():
 
 def test_unregistered_league_falls_back_to_source_name():
     """未登记联赛不能丢失，回退数据源原名而不是显示「未知联赛」。"""
+    from datetime import datetime, timedelta
+    from datetime import timezone as _tzu
+
     import pytz
-    from datetime import datetime, timedelta, timezone as _tzu
+
     from views.fixtures import FixturesView
 
     tz = pytz.timezone("Asia/Shanghai")

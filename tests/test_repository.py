@@ -1,10 +1,10 @@
 """P1-5：预测落盘与命中率统计 / Prediction persistence & hit-rate."""
 import os
 import tempfile
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
-from api_client import flatten_standings
 from analyzer import MatchAnalyzer
+from api_client import flatten_standings
 from config import load_settings
 from repository import PredictionRepository
 from service import PredictionService

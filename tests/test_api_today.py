@@ -8,7 +8,8 @@ import api
 
 def test_today_uses_project_timezone(monkeypatch):
     """跨天场景下必须取上海日期（10-05），而非 UTC 日期（10-04）。"""
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime
+    from datetime import timezone as _tz
 
     monkeypatch.setattr(api, "_TZ_NAME", "Asia/Shanghai")
 
@@ -34,8 +35,11 @@ def test_fixtures_default_date_uses_project_tz(monkeypatch):
 
     只测 _today() 不够 —— 调用点可能压根没用它。这里从 HTTP 端点验证。
     """
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime
+    from datetime import timezone as _tz
+
     from fastapi.testclient import TestClient
+
     import api as _api
 
     class FrozenDT(datetime):

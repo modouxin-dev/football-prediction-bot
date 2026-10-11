@@ -23,39 +23,14 @@ from __future__ import annotations
 # 这些名字原本就定义在 bot_handler.py，外部（main.py / commands/ / 543 个测试）
 # 至今从本模块导入。迁移后它们分散在 formatkit 与 templates，这里集中再导出，
 # 让调用方零改动。pyflakes 会报「imported but unused」——这是有意为之。
-from formatkit import (
-    NO_DATA,
-    _WEB_ENTRY_TEXT,
-    _factors,
-    _form_line,
-    _is_fallback,
-    _num,
-    _row_line,
-    _row_summary,
-    bar,
-    build_prediction_payload,
-    esc,
-    league_label,
-    split_html_blocks,
-    team_name,
-    web_entry_text,
-)
+from formatkit import (_WEB_ENTRY_TEXT, NO_DATA, _factors, _form_line,
+                       _is_fallback, _num, _row_line, _row_summary, bar,
+                       build_prediction_payload, esc, league_label,
+                       split_html_blocks, team_name, web_entry_text)
 from keyboards import Keyboards
-from templates import (
-    BRAND_CN,
-    BRAND_EN,
-    DISCLAIMER,
-    LEAGUE_NAMES,
-    MENU_ITEMS,
-    OUTCOME_LABEL,
-    SEP,
-    STATUS_TEXT,
-    TABS,
-    TEAM_NAMES,
-    THIN_SEP,
-    VALUE_HIGH,
-    VALUE_LOW,
-)
+from templates import (BRAND_CN, BRAND_EN, DISCLAIMER, LEAGUE_NAMES,
+                       MENU_ITEMS, OUTCOME_LABEL, SEP, STATUS_TEXT, TABS,
+                       TEAM_NAMES, THIN_SEP, VALUE_HIGH, VALUE_LOW)
 from views.analysis import AnalysisView
 from views.common import CommonView
 from views.fixtures import FixturesView

@@ -16,16 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from formatkit import (
-    TEAM_NAMES,
-    TEAM_COLLISIONS,
-    _TEAM_INDEX,
-    _TEAM_PREFIX,
-    _team_key,
-    team_name,
-    team_short_name,
-)
-
+from formatkit import (_TEAM_INDEX, _TEAM_PREFIX, TEAM_COLLISIONS, TEAM_NAMES,
+                       _team_key, team_name, team_short_name)
 
 # /teammiss 埋点导出的真实未翻译原名（2026-10-05，联赛扩容后首次采集）
 TEAMMISS_NAMES = [

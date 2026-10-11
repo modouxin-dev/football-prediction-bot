@@ -17,10 +17,10 @@
 单个联赛失败不影响其他联赛。
 """
 from __future__ import annotations
-from typing import Any
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 log = logging.getLogger(__name__)
 

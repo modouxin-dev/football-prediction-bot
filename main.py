@@ -5,62 +5,47 @@
 - 推送消息下方的按钮（预测 / 深度分析 / 历史交锋 / 赔率对比 / 刷新）在原消息上就地切换
 """
 from __future__ import annotations
-from typing import Any
-import asyncio
 
+import asyncio
 import logging
 import os
-
-import paths
-import pytz
 import sys
 from datetime import datetime, timedelta
+from typing import Any
 
+import pytz
 from dotenv import load_dotenv
 from telegram import BotCommand, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
+from telegram.ext import (Application, ApplicationBuilder,
+                          CallbackQueryHandler, CommandHandler, ContextTypes,
+                          Defaults, MessageHandler, filters)
 
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    Defaults,
-    MessageHandler,
-    filters,
-)
-
+import paths
 from analyzer import MatchAnalyzer, calculate_prediction_level
 from api_client import APIError, FootballAPI
-from data_source import DataSourceRouter
-from football_data import FootballDataAPI
 from bot_handler import MENU_ITEMS, BotUI, esc, league_label
 from commands import CommandRuntime, build_dispatcher
-# 定时任务已迁到 scheduler.py。以下两个名字仍是既有测试与调用方的入口，
-# 保留再导出；其余不再从 main 暴露。
-from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
-from keyboards import nav_row
-from views.digest import DigestView
-from tghtml import normalize
-from support import (back_to_menu_markup, begin_task, describe_error, edit_view,
-                     end_task, is_admin, reply_html,
-                     set_panel_state)
-from templates import (PANEL_CLOSE_LABEL, PANEL_COLLAPSED, PANEL_EXPANDED,
-                       PANEL_HINTS, PANEL_OPEN_LABEL)
 from commands.adapters import FakeUpdate
 from commands.admin import storage_cmd
 from commands.basic import toggle_panel_message
 from config import ConfigError, Settings, load_settings
-from service import (
-    MODE_DATE,
-    ST_NO_DATA,
-    MODE_NEXT,
-    MODE_TODAY,
-    Prediction,
-    PredictionService,
-)
+from data_source import DataSourceRouter
+from football_data import FootballDataAPI
+from keyboards import nav_row
+# 定时任务已迁到 scheduler.py。以下两个名字仍是既有测试与调用方的入口，
+# 保留再导出；其余不再从 main 暴露。
+from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
+from service import (MODE_DATE, MODE_NEXT, MODE_TODAY, ST_NO_DATA, Prediction,
+                     PredictionService)
+from support import (back_to_menu_markup, begin_task, describe_error,
+                     edit_view, end_task, is_admin, reply_html,
+                     set_panel_state)
+from templates import (PANEL_CLOSE_LABEL, PANEL_COLLAPSED, PANEL_EXPANDED,
+                       PANEL_HINTS, PANEL_OPEN_LABEL)
+from tghtml import normalize
+from views.digest import DigestView
 
 try:  # 图表依赖缺失时机器人仍要能正常跑，只是不出图
     import chart

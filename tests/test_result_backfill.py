@@ -12,7 +12,7 @@
 import pytest
 
 import analytics
-from repository import PredictionRepository, VALID_RESULTS
+from repository import VALID_RESULTS, PredictionRepository
 
 # 与 repository._outcome 同一套口径
 HOME, DRAW, AWAY = "主胜", "平局", "客胜"

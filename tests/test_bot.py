@@ -9,16 +9,16 @@ import pytest
 from telegram.error import BadRequest
 
 import main
+from api_client import APIError
 from commands import admin as admin_cmds
 from commands import build_dispatcher
-from api_client import APIError
 from config import load_settings
 from data_source import DataSourceError
 from service import PredictionService
 from tests.sample_data import NOW, FakeAPI, default_fixtures
 
 ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
-    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+       "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 

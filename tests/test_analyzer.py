@@ -1,13 +1,7 @@
 import pytest
 
-from analyzer import (
-    MatchAnalyzer,
-    TeamStrength,
-    build_league_model,
-    collect_1x2_odds,
-    consensus_odds,
-    overround,
-)
+from analyzer import (MatchAnalyzer, TeamStrength, build_league_model,
+                      collect_1x2_odds, consensus_odds, overround)
 from api_client import flatten_standings
 from tests.sample_data import odds_response, standings_response
 
@@ -49,7 +43,7 @@ def test_league_model_uses_real_averages_and_ranks_teams():
 
 def test_strengths_are_shrunk_toward_one_when_no_games_played():
     rows = [{"team": {"id": 9}, "home": {"played": 0, "goals": {"for": 0, "against": 0}},
-        "away": {"played": 0, "goals": {"for": 0, "against": 0}}}]
+             "away": {"played": 0, "goals": {"for": 0, "against": 0}}}]
     s = build_league_model(rows).strength(9)
     assert (s.attack_home, s.defense_home, s.attack_away, s.defense_away) == pytest.approx((1, 1, 1, 1))
 

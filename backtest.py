@@ -18,19 +18,18 @@
 """
 
 from __future__ import annotations
-from typing import Any, Sequence
 
 import logging
 import math
 from dataclasses import dataclass, field
+from typing import Any, Sequence
 
-from analyzer import (
-    DEFAULT_AVG_AWAY_GOALS, DEFAULT_AVG_HOME_GOALS, DEFAULT_RHO,
-    MatchAnalyzer, build_league_model,
-    apply_temperature, calculate_prediction_level, fit_rho, fit_temperature,
-    implied_probabilities,
-)
-from elo import DEFAULT_RATING, elo_multiplier as elo_multiplier
+from analyzer import (DEFAULT_AVG_AWAY_GOALS, DEFAULT_AVG_HOME_GOALS,
+                      DEFAULT_RHO, MatchAnalyzer, apply_temperature,
+                      build_league_model, calculate_prediction_level, fit_rho,
+                      fit_temperature, implied_probabilities)
+from elo import DEFAULT_RATING
+from elo import elo_multiplier as elo_multiplier
 
 log = logging.getLogger(__name__)
 
@@ -338,7 +337,8 @@ class WalkForwardBacktester:
 
         hid, aid = str(home_id), str(away_id)
         rh, ra = self._ratings[hid], self._ratings[aid]
-        from elo import calculate_elo, goal_diff_multiplier, k_factor_for, outcome_from_score
+        from elo import (calculate_elo, goal_diff_multiplier, k_factor_for,
+                         outcome_from_score)
 
         result = outcome_from_score(hs, as_)
         mult = goal_diff_multiplier(hs, as_)

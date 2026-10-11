@@ -35,12 +35,8 @@ from pathlib import Path
 from typing import Any
 
 import paths
-from backtest import (
-    DEFAULT_MIN_HISTORY,
-    WalkForwardBacktester,
-    compare,
-    level_monotonic,
-)
+from backtest import (DEFAULT_MIN_HISTORY, WalkForwardBacktester, compare,
+                      level_monotonic)
 from football_data import LEAGUE_ID_TO_CODE
 
 log = logging.getLogger(__name__)

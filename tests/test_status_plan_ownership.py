@@ -7,7 +7,6 @@
 """
 import asyncio
 
-
 from commands.admin import _account_status_preferring_primary
 
 PRO_ACCOUNT = {

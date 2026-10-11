@@ -17,10 +17,10 @@ import logging
 import sqlite3
 
 from analyzer import build_league_model
-from backtest import (
-    calibration_buckets, calibration_error, log_loss as _log_loss,
-    outcome_index, rps as _rps,
-)
+from backtest import calibration_buckets, calibration_error
+from backtest import log_loss as _log_loss
+from backtest import outcome_index
+from backtest import rps as _rps
 from repository import _outcome
 
 log = logging.getLogger("analytics")

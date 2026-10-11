@@ -10,10 +10,9 @@ import sqlite3
 import pytest
 
 import analytics
-from repository import PredictionRepository
-
 # 与 backtest.py 同一套判据，避免分析层自造一套
 from backtest import log_loss, outcome_index
+from repository import PredictionRepository
 
 
 @pytest.fixture()

@@ -28,7 +28,8 @@ def standings_response():
 
 def fixture(fid, home_id, home, away_id, away, kickoff, status="NS", rnd="Regular Season - 6"):
     return {
-        "fixture": {"id": fid, "date": kickoff.isoformat(), "status": {"short": status}, "venue": {"name": "Main Ground"}},
+        "fixture": {"id": fid, "date": kickoff.isoformat(),
+                    "status": {"short": status}, "venue": {"name": "Main Ground"}},
         "league": {"id": 39, "name": "Premier League", "round": rnd},
         "teams": {"home": {"id": home_id, "name": home}, "away": {"id": away_id, "name": away}},
     }

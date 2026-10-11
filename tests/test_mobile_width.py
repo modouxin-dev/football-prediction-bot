@@ -21,14 +21,8 @@ import pytest
 from api_client import flatten_standings
 from bot_handler import BotUI
 from config import load_settings
-from formatkit import (
-    MOBILE_MAX_COLS,
-    display_width,
-    fit_cols,
-    team_mobile,
-    team_name,
-    team_short_name,
-)
+from formatkit import (MOBILE_MAX_COLS, display_width, fit_cols, team_mobile,
+                       team_name, team_short_name)
 from service import MODEL_VERSION, PredictionService
 from tests.sample_data import fixture, odds_response, standings_response
 

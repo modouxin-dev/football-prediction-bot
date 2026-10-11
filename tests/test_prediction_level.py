@@ -75,9 +75,9 @@ def test_total_within_tolerance_passes():
 def test_payload_contains_required_fields():
     pass
 
-    from tests.test_prediction import FullAPI, now_fixtures  # 复用已有桩
-
     import asyncio
+
+    from tests.test_prediction import FullAPI, now_fixtures  # 复用已有桩
 
     svc = PredictionService(SETTINGS, FullAPI(now_fixtures()))
     p = asyncio.run(svc.predict_fixture(1001, now_fixtures()))
@@ -97,8 +97,9 @@ def test_card_html_escapes_special_characters():
     from datetime import datetime, timezone
     from types import SimpleNamespace
     """球队名含 < & > 时必须转义，不能拼进 HTML 造成解析错乱。"""
-    from bot_handler import BotUI
     from unittest.mock import Mock
+
+    from bot_handler import BotUI
 
     p = Mock()
     p.home = 'A <b> & "x"'
@@ -130,10 +131,10 @@ def test_card_html_escapes_special_characters():
 
 def test_no_markdown_table_in_output():
     """Telegram 移动端对 Markdown 表格兼容性差，输出里不得出现表格语法。"""
-    from tests.test_prediction import FullAPI, now_fixtures
     import asyncio
 
     from bot_handler import BotUI
+    from tests.test_prediction import FullAPI, now_fixtures
 
     svc = PredictionService(SETTINGS, FullAPI(now_fixtures()))
     p = asyncio.run(svc.predict_fixture(1001, now_fixtures()))
@@ -146,10 +147,10 @@ def test_no_markdown_table_in_output():
 def test_card_shows_source_and_season():
     pass
 
-    from tests.test_prediction import FullAPI, now_fixtures
     import asyncio
 
     from bot_handler import BotUI
+    from tests.test_prediction import FullAPI, now_fixtures
 
     svc = PredictionService(SETTINGS, FullAPI(now_fixtures()))
     p = asyncio.run(svc.predict_fixture(1001, now_fixtures()))
@@ -159,11 +160,11 @@ def test_card_shows_source_and_season():
 
 
 def test_percentages_use_one_decimal():
-    from tests.test_prediction import FullAPI, now_fixtures
     import asyncio
     import re
 
     from bot_handler import BotUI
+    from tests.test_prediction import FullAPI, now_fixtures
 
     svc = PredictionService(SETTINGS, FullAPI(now_fixtures()))
     p = asyncio.run(svc.predict_fixture(1001, now_fixtures()))
@@ -175,10 +176,10 @@ def test_percentages_use_one_decimal():
 @pytest.mark.parametrize("word", DISCLAIM_WORDS)
 def test_no_forbidden_absolute_words(word):
     """禁止出现必胜/稳赢等绝对化表述。"""
-    from tests.test_prediction import FullAPI, now_fixtures
     import asyncio
 
     from bot_handler import BotUI
+    from tests.test_prediction import FullAPI, now_fixtures
 
     svc = PredictionService(SETTINGS, FullAPI(now_fixtures()))
     p = asyncio.run(svc.predict_fixture(1001, now_fixtures()))

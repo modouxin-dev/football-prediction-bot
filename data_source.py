@@ -98,7 +98,9 @@ class DataSourceRouter:
             return False
         return time.monotonic() < self._primary_cooldown_by_league.get(league_id, 0.0)
 
-    def _mark_primary_down(self, reason: str, method: str = "", league_id: int | None = None, *, cooldown: bool = True) -> None:
+    def _mark_primary_down(
+        self, reason: str, method: str = "", league_id: int | None = None, *, cooldown: bool = True
+    ) -> None:
         # 可选数据（赔率/交锋/近期战绩/伤停）失败不进冷却：
         # 未开盘的比赛本来就没有赔率，接口会直接拒绝（实测 164ms 快速失败），
         # 这是常态而非故障。若因此把主源冷却 10 分钟，冷却期内连赛程、

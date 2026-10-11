@@ -255,7 +255,8 @@ def test_collapsed_hint_keeps_reopen_paths():
 def _real_dispatch(monkeypatch, known):
     """真实 PTB 派发：group 0 放 /start，group 1 放兜底，返回收到的回复文本。"""
     from telegram import Chat, Message, MessageEntity, Update, User
-    from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+    from telegram.ext import (ApplicationBuilder, CommandHandler,
+                              MessageHandler, filters)
 
     replies: list[str] = []
 

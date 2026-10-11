@@ -7,47 +7,42 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from formatkit import (
-    esc,
-    hbar,
-    team_mobile,
-    web_entry_text,
-)
+from formatkit import esc, hbar, team_mobile, web_entry_text
 
 
 class CommonView:
-        @staticmethod
-        def web_text(web_url: str = "") -> str:
-            """/web 入口文案：按是否配置了 WEB_URL 动态生成。"""
-            return web_entry_text(web_url)
+    @staticmethod
+    def web_text(web_url: str = "") -> str:
+        """/web 入口文案：按是否配置了 WEB_URL 动态生成。"""
+        return web_entry_text(web_url)
 
-        @staticmethod
-        def tz_label(tz, when: datetime | None = None) -> str:
-            when = (when or datetime.now(tz)).astimezone(tz)
-            offset = when.utcoffset() or timedelta(0)  # aware 时间必有 offset，兜底仅为类型收窄
-            hours = offset.total_seconds() / 3600
-            return f"UTC{hours:+g}"
+    @staticmethod
+    def tz_label(tz, when: datetime | None = None) -> str:
+        when = (when or datetime.now(tz)).astimezone(tz)
+        offset = when.utcoffset() or timedelta(0)  # aware 时间必有 offset，兜底仅为类型收窄
+        hours = offset.total_seconds() / 3600
+        return f"UTC{hours:+g}"
 
-        @staticmethod
-        def fmt_time(dt: datetime, tz, pattern: str = "%m-%d %H:%M") -> str:
-            return dt.astimezone(tz).strftime(pattern)
+    @staticmethod
+    def fmt_time(dt: datetime, tz, pattern: str = "%m-%d %H:%M") -> str:
+        return dt.astimezone(tz).strftime(pattern)
 
-        @staticmethod
-        def matchup(p, tz) -> str:
-            """详情页顶部的一行比赛信息。"""
-            # 横排对阵用移动端短名：双语全称两个队名相加可到 77 列，
-            # 实测在手机上折成三行，横排布局完全失去意义。
-            return (
-                f"🏠 <b>{esc(team_mobile(p.home))}</b> 🆚 <b>{esc(team_mobile(p.away))}</b> ✈️\n"
-                f"🕐 <code>{CommonView.fmt_time(p.kickoff, tz)}</code> ({CommonView.tz_label(tz, p.kickoff)})"
-            )
+    @staticmethod
+    def matchup(p, tz) -> str:
+        """详情页顶部的一行比赛信息。"""
+        # 横排对阵用移动端短名：双语全称两个队名相加可到 77 列，
+        # 实测在手机上折成三行，横排布局完全失去意义。
+        return (
+            f"🏠 <b>{esc(team_mobile(p.home))}</b> 🆚 <b>{esc(team_mobile(p.away))}</b> ✈️\n"
+            f"🕐 <code>{CommonView.fmt_time(p.kickoff, tz)}</code> ({CommonView.tz_label(tz, p.kickoff)})"
+        )
 
-        @staticmethod
-        def _hbar(prob: float, width: int = 10) -> str:
-            """概率条（方块）。
+    @staticmethod
+    def _hbar(prob: float, width: int = 10) -> str:
+        """概率条（方块）。
 
-            实现下沉到 formatkit.hbar：原来挂在 CommonView 上，prediction.py
-            却用 cls._hbar 调用（cls 是 PredictionView），取不到该方法会直接
-            AttributeError。共用工具放 formatkit 才能被多个视图安全引用。
-            """
-            return hbar(prob, width)
+        实现下沉到 formatkit.hbar：原来挂在 CommonView 上，prediction.py
+        却用 cls._hbar 调用（cls 是 PredictionView），取不到该方法会直接
+        AttributeError。共用工具放 formatkit 才能被多个视图安全引用。
+        """
+        return hbar(prob, width)

@@ -33,11 +33,8 @@ from __future__ import annotations
 import logging
 
 from analyzer import build_league_model
-from football_data_uk import (
-    available_local_seasons,
-    canonical_team_name,
-    load_local,
-)
+from football_data_uk import (available_local_seasons, canonical_team_name,
+                              load_local)
 
 log = logging.getLogger(__name__)
 

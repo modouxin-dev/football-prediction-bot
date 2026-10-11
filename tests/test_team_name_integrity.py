@@ -13,18 +13,12 @@ from __future__ import annotations
 
 import pytest
 
-from formatkit import (
-    TEAM_COLLISIONS,
-    _TEAM_INDEX,
-    _team_key,
-    clear_unmatched,
-    team_short_name,
-    unmatched_team_names,
-)
+from formatkit import (_TEAM_INDEX, TEAM_COLLISIONS, _team_key,
+                       clear_unmatched, team_short_name, unmatched_team_names)
 from templates import LEAGUE_NAMES, LEAGUE_SHORT, TEAM_NAMES
 
-
 # ── 1. 归一键撞车 ────────────────────────────────────────────
+
 
 def test_collision_key_is_excluded_from_index():
     """撞车的键不进索引——留任何代表都会让另一支队被误显示。"""

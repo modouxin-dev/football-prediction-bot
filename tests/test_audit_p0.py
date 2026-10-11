@@ -20,8 +20,8 @@ import pytest
 
 import football_data
 
-
 # ── P0-1：TTL 常量 ────────────────────────────────────────────
+
 
 def _referenced_ttl_names(path="football_data.py"):
     """扫描源码里所有被读取的 TTL_* 名字。"""

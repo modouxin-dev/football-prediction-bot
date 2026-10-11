@@ -25,11 +25,8 @@ from __future__ import annotations
 
 import logging
 
-from football_data_uk import (
-    available_local_seasons,
-    canonical_team_name,
-    load_local,
-)
+from football_data_uk import (available_local_seasons, canonical_team_name,
+                              load_local)
 from migrate_elo import fetch_finished
 
 log = logging.getLogger(__name__)

@@ -6,24 +6,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-
-from service import parse_kickoff
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from templates import (
-    LEAGUE_FLAGS,
-    LEAGUE_NAMES,
-    LEAGUE_ORDER,
-    LEAGUE_SHORT,
-    SEP,
-    STATUS_TEXT,
-    THIN_SEP,
-)
-from formatkit import (
-    align_cjk,
-    display_width,
-    esc,
-    team_short_name,
-)
+
+from formatkit import align_cjk, display_width, esc, team_short_name
+from service import parse_kickoff
+from templates import (LEAGUE_FLAGS, LEAGUE_NAMES, LEAGUE_ORDER, LEAGUE_SHORT,
+                       SEP, STATUS_TEXT, THIN_SEP)
 
 # 日期导航条显示的天数：4 天是手机上不换行的上限，再多只能滚动。
 DAY_NAV_SPAN = 4
@@ -36,8 +24,7 @@ WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周�
 # 「日期时间 / 对阵 / 进度」三列就散了，对齐也就白做了 —— 所以队名列宽
 # 按本页实际内容自适应：短名页面只占 32 列，遇到 5 字中文队名才撑到 40。
 SIDE_MIN = 6     # 队名列下限：3 个中文字，再窄就没法看了
-SIDE_MAX = 10    # 队名列上限：5 个中文字。超出的（长英文名）截断，
-                 # 否则一行会被单个队名撑爆，整页都跟着横向滚动
+SIDE_MAX = 10    # 队名列上限：5 个中文字；超出的截断，否则整页被单个队名撑爆
 
 
 def _side_col(names) -> int:
@@ -183,194 +170,194 @@ def _table_row(idx: int, when: str, home: str, away: str, progress: str, side: i
 
 
 class FixturesView:
-        @staticmethod
-        def format_fixtures_page(
-            items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = "",
-            multi_day: bool = False,
+    @staticmethod
+    def format_fixtures_page(
+        items: list[dict], tz, page: int = 0, per_page: int = 5, day_label: str = "",
+        multi_day: bool = False,
         empty_range: tuple[str, str] | None = None,
         empty_source_ok: bool = True,
         active_day=None,
         all_items: list[dict] | None = None,
         league_filter: int | None = None,
-        ) -> tuple[str, InlineKeyboardMarkup, int, int]:
-            """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。
-    
-            multi_day=True 表示这批赛程跨越多天（今日无比赛时扩展到未来），
-            此时标题改为「近期赛程」，且每场比赛显示日期，避免用户误以为是今天的比赛。
+    ) -> tuple[str, InlineKeyboardMarkup, int, int]:
+        """按联赛分组渲染一页赛程。返回 (文本, 键盘, 实际页码, 总页数)。
 
-            league_filter 非 None 时只渲染该联赛，序号与「预测/分析」按钮
-            随之重排——否则点了「预测 3」会落到另一场完全不相干的比赛上。
-            """
-            pool = list(all_items if all_items is not None else items)
-            if league_filter is not None:
-                items = [f for f in pool if _league_of(f) == league_filter]
-            elif not multi_day:
-                # 单日视图按联赛聚合：数据源给的是按开赛时间排的全局序列，
-                # 直接渲染会让各联赛比赛交替出现、同一标题反复打印。
-                items = _group_by_league(pool, tz)
+        multi_day=True 表示这批赛程跨越多天（今日无比赛时扩展到未来），
+        此时标题改为「近期赛程」，且每场比赛显示日期，避免用户误以为是今天的比赛。
+
+        league_filter 非 None 时只渲染该联赛，序号与「预测/分析」按钮
+        随之重排——否则点了「预测 3」会落到另一场完全不相干的比赛上。
+        """
+        pool = list(all_items if all_items is not None else items)
+        if league_filter is not None:
+            items = [f for f in pool if _league_of(f) == league_filter]
+        elif not multi_day:
+            # 单日视图按联赛聚合：数据源给的是按开赛时间排的全局序列，
+            # 直接渲染会让各联赛比赛交替出现、同一标题反复打印。
+            items = _group_by_league(pool, tz)
+        else:
+            # 跨天视图按日期优先，日期小标题已经在行内分组了。
+            items = sorted(pool, key=lambda f: (_kickoff_key(f, tz),
+                                                _league_sort_key(_league_of(f))))
+        total_pages = max(1, -(-len(items) // per_page))
+        page = min(max(page, 0), total_pages - 1)
+        chunk = items[page * per_page:(page + 1) * per_page]
+
+        if league_filter is not None:
+            lname = (LEAGUE_SHORT.get(league_filter)
+                     or LEAGUE_NAMES.get(league_filter) or f"联赛 {league_filter}")
+            lflag = LEAGUE_FLAGS.get(league_filter, "⚽")
+            title = f"{lflag} <b>{esc(lname)}{'近期' if multi_day else '今日'}赛程</b>"
+        else:
+            title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
+        # 相对标签（今天/明天）放标题：按钮上放不下，标题没有宽度限制。
+        rel_day = active_day if active_day is not None else datetime.now(tz).date()
+        lines = [
+            title,
+            f"📆 <code>{esc(day_label)}</code> · {_relative_day(rel_day, tz)}"
+            f" · 🌍 <code>{esc(tz.zone)}</code>",
+            SEP,
+        ]
+        rows: list[list[InlineKeyboardButton]] = []
+        if not chunk:
+            # 空状态要说清三件事：没比赛、查了哪段时间、数据源是否正常。
+            # 绝不能把「窗口内没比赛」说成「数据源无数据」。
+            lines.extend([
+                "🔭 <b>NO FIXTURE IN THIS WINDOW</b>",
+                "📅 当前时间范围内暂无比赛",
+                SEP,
+            ])
+            if empty_source_ok:
+                lines.append("✅ 数据源正常，已查询：")
             else:
-                # 跨天视图按日期优先，日期小标题已经在行内分组了。
-                items = sorted(pool, key=lambda f: (_kickoff_key(f, tz),
-                                                    _league_sort_key(_league_of(f))))
-            total_pages = max(1, -(-len(items) // per_page))
-            page = min(max(page, 0), total_pages - 1)
-            chunk = items[page * per_page:(page + 1) * per_page]
-
+                lines.append("⚠️ 数据源返回异常，已查询：")
+            span_text = (
+                f"{empty_range[0]} 至 {empty_range[1]}" if empty_range
+                else esc(day_label)
+            )
+            lines.append(f"<code>{esc(span_text)}</code>")
             if league_filter is not None:
+                # 筛选后为空要说清「是这个联赛今天没球」，而不是「系统坏了」，
+                # 并给出直接看该联赛近期赛程的出口。
                 lname = (LEAGUE_SHORT.get(league_filter)
                          or LEAGUE_NAMES.get(league_filter) or f"联赛 {league_filter}")
-                lflag = LEAGUE_FLAGS.get(league_filter, "⚽")
-                title = f"{lflag} <b>{esc(lname)}{'近期' if multi_day else '今日'}赛程</b>"
-            else:
-                title = "📅 <b>近期赛程</b>" if multi_day else "📅 <b>今日赛程</b>"
-            # 相对标签（今天/明天）放标题：按钮上放不下，标题没有宽度限制。
-            rel_day = active_day if active_day is not None else datetime.now(tz).date()
-            lines = [
-                title,
-                f"📆 <code>{esc(day_label)}</code> · {_relative_day(rel_day, tz)}"
-                f" · 🌍 <code>{esc(tz.zone)}</code>",
-                SEP,
-            ]
-            rows: list[list[InlineKeyboardButton]] = []
-            if not chunk:
-                # 空状态要说清三件事：没比赛、查了哪段时间、数据源是否正常。
-                # 绝不能把「窗口内没比赛」说成「数据源无数据」。
-                lines.extend([
-                    "🔭 <b>NO FIXTURE IN THIS WINDOW</b>",
-                    "📅 当前时间范围内暂无比赛",
-                    SEP,
-                ])
-                if empty_source_ok:
-                    lines.append("✅ 数据源正常，已查询：")
-                else:
-                    lines.append("⚠️ 数据源返回异常，已查询：")
-                span_text = (
-                    f"{empty_range[0]} 至 {empty_range[1]}" if empty_range
-                    else esc(day_label)
-                )
-                lines.append(f"<code>{esc(span_text)}</code>")
-                if league_filter is not None:
-                    # 筛选后为空要说清「是这个联赛今天没球」，而不是「系统坏了」，
-                    # 并给出直接看该联赛近期赛程的出口。
-                    lname = (LEAGUE_SHORT.get(league_filter)
-                             or LEAGUE_NAMES.get(league_filter) or f"联赛 {league_filter}")
-                    lines.append("")
-                    lines.append(f"🔎 当前仅看 <b>{esc(lname)}</b>，该联赛本时段无比赛。")
-                lines += ["", "你可以尝试："]
-            else:
-                # 列宽按本页最长队名自适应：短名页面不浪费宽度，遇到
-                # 5 字中文队名（里奥夸尔托）才撑到 SIDE_MAX，避免一刀切
-                # 按最宽值把每行都拉长——那样短名页面会空出一大片空白。
-                def _names():
-                    for f in chunk:
-                        t = f.get("teams") or {}
-                        yield team_short_name((t.get("home") or {}).get("name"))
-                        yield team_short_name((t.get("away") or {}).get("name"))
+                lines.append("")
+                lines.append(f"🔎 当前仅看 <b>{esc(lname)}</b>，该联赛本时段无比赛。")
+            lines += ["", "你可以尝试："]
+        else:
+            # 列宽按本页最长队名自适应：短名页面不浪费宽度，遇到
+            # 5 字中文队名（里奥夸尔托）才撑到 SIDE_MAX，避免一刀切
+            # 按最宽值把每行都拉长——那样短名页面会空出一大片空白。
+            def _names():
+                for f in chunk:
+                    t = f.get("teams") or {}
+                    yield team_short_name((t.get("home") or {}).get("name"))
+                    yield team_short_name((t.get("away") or {}).get("name"))
 
-                side = _side_col(list(_names()))
+            side = _side_col(list(_names()))
 
-                buf: list[str] = []
+            buf: list[str] = []
 
-                def flush_table():
-                    """把累积的数据行收成一个 <pre> 块。
+            def flush_table():
+                """把累积的数据行收成一个 <pre> 块。
 
-                    整块进 <pre> 才有等宽：Telegram 正文是比例字体，补多少
-                    空格都对不齐，三列会各自漂移。
-                    """
-                    if buf:
-                        lines.append("<pre>" + "\n".join(buf) + "</pre>")
-                        buf.clear()
+                整块进 <pre> 才有等宽：Telegram 正文是比例字体，补多少
+                空格都对不齐，三列会各自漂移。
+                """
+                if buf:
+                    lines.append("<pre>" + "\n".join(buf) + "</pre>")
+                    buf.clear()
 
-                current = None  # None 与任何联赛 id 都不同，首场必打印标题
-                prev_day = None
-                for offset, fx in enumerate(chunk):
-                    idx = page * per_page + offset + 1
-                    info = fx.get("fixture") or {}
-                    try:
-                        lid = int((fx.get("league") or {}).get("id"))
-                    except (TypeError, ValueError):
-                        lid = 0
-                    if lid != current:  # 按联赛分组，只在切换联赛时打印标题
-                        flush_table()
-                        prev_day = None  # 新联赛块内重新按日期分组
-                        current = lid
-                        # 标题用中文联赛名而不是数据源的英文名（API 返回的是
-                        # "Liga Profesional Argentina" 之类，中文用户扫视时
-                        # 定位不了）。未登记的联赛回退数据源原名，绝不丢弃。
-                        flag = LEAGUE_FLAGS.get(lid, "⚽")
-                        name = LEAGUE_NAMES.get(lid) or (
-                            (fx.get("league") or {}).get("name") or f"联赛 {lid}"
-                        )
-                        # 场数按「本页内该联赛」统计，翻页时不会误导
-                        count = sum(
-                            1 for f in chunk
-                            if (int((f.get("league") or {}).get("id") or 0)
-                                if str((f.get("league") or {}).get("id") or "").lstrip("-").isdigit()
-                                else 0) == lid
-                        )
-                        lines.append(f"{flag} <b>{esc(name)}</b> <code>{count} 场</code>")
-                        lines.append(THIN_SEP)
-                    teams = fx.get("teams") or {}
-                    # 列表是扫视场景，只放中文短名：双语全名实测中位数 25 列、
-                    # 最长 41 列（门兴格拉德巴赫 (Borussia Mönchengladbach)），
-                    # 在手机上必然折行，折行后序号与队名就对不上了。
-                    # 全名仍在单场预测卡里完整呈现，此处不重复占位。
-                    home = team_short_name((teams.get("home") or {}).get("name"))
-                    away = team_short_name((teams.get("away") or {}).get("name"))
-                    kickoff = parse_kickoff(info.get("date"))
-                    if kickoff:
-                        local = kickoff.astimezone(tz)
-                        when = local.strftime("%H:%M")
-                        day = local.date()
-                    else:
-                        when = "--:--"
-                        day = None
-                    # 跨天时先打一行日期小标题，行内就只留时间。若把
-                    # 「10-07 21:45」硬塞进 5 列的时间列，对阵列会被压到
-                    # 14 列，两侧队名各只剩 5 列——中文字被砍一半。
-                    if multi_day and day is not None and day != prev_day:
-                        prev_day = day
-                        if buf:
-                            buf.append("")
-                        buf.append(f"{day.strftime('%m-%d')} {WEEKDAY_CN[day.weekday()]}")
-                    short = (info.get("status") or {}).get("short") or ""
-                    goals = fx.get("goals") or {}
-                    # 日期时间 · 主队 vs 客队 · 进度，三列固定列宽对齐
-                    buf.append(_table_row(idx, when, home, away, _progress_text(short, goals), side))
-                    rows.append(
-                        [
-                            InlineKeyboardButton(f"⚽ 预测 {idx}", callback_data=f"fx:{info.get('id')}"),
-                            InlineKeyboardButton(f"📊 分析 {idx}", callback_data=f"fa:{info.get('id')}"),
-                        ]
+            current = None  # None 与任何联赛 id 都不同，首场必打印标题
+            prev_day = None
+            for offset, fx in enumerate(chunk):
+                idx = page * per_page + offset + 1
+                info = fx.get("fixture") or {}
+                try:
+                    lid = int((fx.get("league") or {}).get("id"))
+                except (TypeError, ValueError):
+                    lid = 0
+                if lid != current:  # 按联赛分组，只在切换联赛时打印标题
+                    flush_table()
+                    prev_day = None  # 新联赛块内重新按日期分组
+                    current = lid
+                    # 标题用中文联赛名而不是数据源的英文名（API 返回的是
+                    # "Liga Profesional Argentina" 之类，中文用户扫视时
+                    # 定位不了）。未登记的联赛回退数据源原名，绝不丢弃。
+                    flag = LEAGUE_FLAGS.get(lid, "⚽")
+                    name = LEAGUE_NAMES.get(lid) or (
+                        (fx.get("league") or {}).get("name") or f"联赛 {lid}"
                     )
-                flush_table()
-            # 联赛筛选条：先看全部联赛的分组总览，再点进关心的那一个。
-            # 放在日期导航条之前——筛选联赛比切日期更高频。
-            rows.extend(_league_rows(pool, league_filter))
-            # 日期导航条：主流赛程站的标配。没有它，用户想看明天只能
-            # 手打 /date 命令——而「明天有什么球」恰恰是最常见的需求。
-            # 横排 4 天，当前所在日期打勾，一眼能看出自己停在哪一天。
-            rows.append(_day_nav_row(tz, active_day))
-
-            if not chunk:
-                # 空状态直接给可继续操作的按钮，避免用户以为系统坏了
-                rows.append([
-                    InlineKeyboardButton("⏭ 查询下一场", callback_data="fxm:next"),
-                    InlineKeyboardButton("📅 未来 7 天", callback_data="fxm:upcoming"),
-                    InlineKeyboardButton("📆 指定日期", callback_data="fxm:date"),
-                ])
-            if total_pages > 1:
+                    # 场数按「本页内该联赛」统计，翻页时不会误导
+                    count = sum(
+                        1 for f in chunk
+                        if (int((f.get("league") or {}).get("id") or 0)
+                            if str((f.get("league") or {}).get("id") or "").lstrip("-").isdigit()
+                            else 0) == lid
+                    )
+                    lines.append(f"{flag} <b>{esc(name)}</b> <code>{count} 场</code>")
+                    lines.append(THIN_SEP)
+                teams = fx.get("teams") or {}
+                # 列表是扫视场景，只放中文短名：双语全名实测中位数 25 列、
+                # 最长 41 列（门兴格拉德巴赫 (Borussia Mönchengladbach)），
+                # 在手机上必然折行，折行后序号与队名就对不上了。
+                # 全名仍在单场预测卡里完整呈现，此处不重复占位。
+                home = team_short_name((teams.get("home") or {}).get("name"))
+                away = team_short_name((teams.get("away") or {}).get("name"))
+                kickoff = parse_kickoff(info.get("date"))
+                if kickoff:
+                    local = kickoff.astimezone(tz)
+                    when = local.strftime("%H:%M")
+                    day = local.date()
+                else:
+                    when = "--:--"
+                    day = None
+                # 跨天时先打一行日期小标题，行内就只留时间。若把
+                # 「10-07 21:45」硬塞进 5 列的时间列，对阵列会被压到
+                # 14 列，两侧队名各只剩 5 列——中文字被砍一半。
+                if multi_day and day is not None and day != prev_day:
+                    prev_day = day
+                    if buf:
+                        buf.append("")
+                    buf.append(f"{day.strftime('%m-%d')} {WEEKDAY_CN[day.weekday()]}")
+                short = (info.get("status") or {}).get("short") or ""
+                goals = fx.get("goals") or {}
+                # 日期时间 · 主队 vs 客队 · 进度，三列固定列宽对齐
+                buf.append(_table_row(idx, when, home, away, _progress_text(short, goals), side))
                 rows.append(
                     [
-                        InlineKeyboardButton("⬅️ 上一页", callback_data=f"fxp:{max(0, page - 1)}"),
-                        InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"),
-                        InlineKeyboardButton("下一页 ➡️", callback_data=f"fxp:{min(total_pages - 1, page + 1)}"),
+                        InlineKeyboardButton(f"⚽ 预测 {idx}", callback_data=f"fx:{info.get('id')}"),
+                        InlineKeyboardButton(f"📊 分析 {idx}", callback_data=f"fa:{info.get('id')}"),
                     ]
                 )
-            if chunk:  # 空态已单独给出「下一场/未来 7 天」，不重复
-                rows.append([
-                    InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all"),
-                    InlineKeyboardButton("⏭ 下一场", callback_data="fxm:next"),
-                ])
-            rows.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
-            return "\n".join(lines), InlineKeyboardMarkup(rows), page, total_pages
+            flush_table()
+        # 联赛筛选条：先看全部联赛的分组总览，再点进关心的那一个。
+        # 放在日期导航条之前——筛选联赛比切日期更高频。
+        rows.extend(_league_rows(pool, league_filter))
+        # 日期导航条：主流赛程站的标配。没有它，用户想看明天只能
+        # 手打 /date 命令——而「明天有什么球」恰恰是最常见的需求。
+        # 横排 4 天，当前所在日期打勾，一眼能看出自己停在哪一天。
+        rows.append(_day_nav_row(tz, active_day))
+
+        if not chunk:
+            # 空状态直接给可继续操作的按钮，避免用户以为系统坏了
+            rows.append([
+                InlineKeyboardButton("⏭ 查询下一场", callback_data="fxm:next"),
+                InlineKeyboardButton("📅 未来 7 天", callback_data="fxm:upcoming"),
+                InlineKeyboardButton("📆 指定日期", callback_data="fxm:date"),
+            ])
+        if total_pages > 1:
+            rows.append(
+                [
+                    InlineKeyboardButton("⬅️ 上一页", callback_data=f"fxp:{max(0, page - 1)}"),
+                    InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="noop"),
+                    InlineKeyboardButton("下一页 ➡️", callback_data=f"fxp:{min(total_pages - 1, page + 1)}"),
+                ]
+            )
+        if chunk:  # 空态已单独给出「下一场/未来 7 天」，不重复
+            rows.append([
+                InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all"),
+                InlineKeyboardButton("⏭ 下一场", callback_data="fxm:next"),
+            ])
+        rows.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows), page, total_pages

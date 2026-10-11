@@ -8,7 +8,7 @@ import pytest
 
 from api_client import APIError
 from data_source import DataSourceError, DataSourceRouter
-from football_data import FootballDataAPI, FootballDataError, STATUS_MAP
+from football_data import STATUS_MAP, FootballDataAPI, FootballDataError
 
 FAKE_TOKEN = "fd-secret-token-should-never-leak"  # 仅用于验证「不泄露」，非真实凭据
 
@@ -460,7 +460,7 @@ def _future_match(mid, utc_date, home="Man City", away="Liverpool"):
 def test_today_empty_expands_to_upcoming_days():
     """今日无比赛时，应自动拉取未来几天赛程，而不是返回空。"""
     from config import load_settings
-    from service import PredictionService, UPCOMING_DAYS
+    from service import UPCOMING_DAYS, PredictionService
 
     settings = load_settings(
         {"TELEGRAM_TOKEN": "1:a", "RAPID_API_KEY": "k", "CHAT_ID": "5", "SEASON": "2026", "ADMIN_ID": "5"}

@@ -15,13 +15,13 @@
 
 from __future__ import annotations
 
-
-from backtest import WalkForwardBacktester, _blank_stats, _standings_row_from_history
+from backtest import (WalkForwardBacktester, _blank_stats,
+                      _standings_row_from_history)
 from backtest_corpus import fixture_to_match
 from football_data_uk import to_fixture
 
-
 # ---- 一、解析层：CSV → fixture ---------------------------------------------
+
 
 def _csv_row(**over):
     row = {

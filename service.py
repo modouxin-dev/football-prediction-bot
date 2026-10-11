@@ -1,5 +1,6 @@
 """业务层：把赛程 / 积分榜 / 赔率拼成预测，并保存最近的预测供按钮回调使用。"""
 from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 仅类型检查时导入，避免运行时循环依赖
@@ -12,20 +13,14 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
-from repository import PredictionRepository
-from analyzer import (
-    LeagueModel,
-    MatchAnalyzer,
-    TeamStrength,
-    apply_market_adjustment,
-    build_league_model,
-    calculate_prediction_level,
-    collect_1x2_odds,
-    consensus_odds,
-)
+from analyzer import (LeagueModel, MatchAnalyzer, TeamStrength,
+                      apply_market_adjustment, build_league_model,
+                      calculate_prediction_level, collect_1x2_odds,
+                      consensus_odds)
 from api_client import APIError, FootballAPI
-from data_source import DataSourceError
 from config import Settings
+from data_source import DataSourceError
+from repository import PredictionRepository
 from templates import LEAGUE_ORDER
 
 log = logging.getLogger(__name__)
@@ -450,7 +445,9 @@ class PredictionService:
             predictions.append(prediction)
         return predictions
 
-    async def _predict_one(self, model: LeagueModel, kickoff: datetime, fx: dict[str, Any], fresh: bool = False) -> Prediction:
+    async def _predict_one(
+        self, model: LeagueModel, kickoff: datetime, fx: dict[str, Any], fresh: bool = False
+    ) -> Prediction:
         teams = fx.get("teams") or {}
         home, away = teams.get("home") or {}, teams.get("away") or {}
         fixture_id = fx["fixture"]["id"]  # 保持数据源原类型；_store 内部统一用 str key 查找
@@ -1083,8 +1080,8 @@ class PredictionService:
                 "home_strength": model.strength(home_id),
                 "away_strength": model.strength(away_id),
                 "analysis": self.analyzer.predict_match(
-                model, home_id, away_id, temperature=self.temperature,
-            ),
+                    model, home_id, away_id, temperature=self.temperature,
+                ),
                 "avg_home_goals": model.avg_home_goals,
                 "avg_away_goals": model.avg_away_goals,
             },
