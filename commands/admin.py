@@ -49,7 +49,7 @@ async def test_cmd(update, context) -> None:
         await progress.edit_text(f"✅ 已向 CHAT_ID 发送 {result.sent} 条预测。{extra}")
 
 
-def _format_quota(api: Any, req: dict) -> str:
+def _format_quota(api: Any, req: dict[str, Any]) -> str:
     """把额度显示成「真实发起了多少次请求」。
 
     主源（API-Football）能自己报额度；备用源 football-data.org 免费层没有
@@ -152,7 +152,7 @@ def _sot_probe_count(args) -> int:
     return SOT_PROBE_DEFAULT
 
 
-def sot_probe_verdict(results: list[dict]) -> tuple[str, bool]:
+def sot_probe_verdict(results: list[dict[str, Any]]) -> tuple[str, bool]:
     """根据多场探测结果给出结论。返回 (结论, 射正数是否已可解析)。
 
     单场探测无法区分「端点不可用」「该场没统计」「字段名不匹配」——
@@ -196,13 +196,13 @@ async def sot_probe_cmd(update, context) -> None:
     comp = getattr(getattr(service, "sync", None), "competition", "") or ""
     targets = service.repo.latest_finished(comp, limit=n)
     if not targets:
-        rows = [("⚠️", "探测对象", "本地库还没有已完场的比赛，先跑一次同步或 /backfill")]
+        rows: list[tuple[str, str, str]] = [("⚠️", "探测对象", "本地库还没有已完场的比赛，先跑一次同步或 /backfill")]
         body = section_join([section("🔬 场面数据探测",
                                      [kv_line(i, k, v, width=W) for i, k, v in rows])])
         await update.message.reply_text(normalize(body), parse_mode="HTML")
         return
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
     detail: list[str] = []
     all_types: list[str] = []
 
@@ -245,7 +245,7 @@ async def sot_probe_cmd(update, context) -> None:
                 if service.repo.save_match_stats(r["id"], None, None):
                     marked += 1
 
-    rows: list[tuple[str, str, str]] = [
+    rows = [
         ("🎯", "探测场次", f"{len(results)} 场"),
         ("🧭", "结论", verdict),
     ]
@@ -268,7 +268,7 @@ async def sot_probe_cmd(update, context) -> None:
     await update.message.reply_text(normalize(body), parse_mode="HTML")
 
 
-async def _account_status_preferring_primary(api: Any) -> dict:
+async def _account_status_preferring_primary(api: Any) -> dict[str, Any]:
     """读取账号/额度信息，优先直连主源。
 
     套餐与额度是**主源账号**的属性，与当前生效的是哪个源无关。
@@ -385,7 +385,7 @@ async def status_cmd(update, context) -> None:
 CALIBRATION_MIN_SAMPLE = 100
 
 
-def _calibration_section(st: dict, level_names: dict[str, str]) -> list[list[str]]:
+def _calibration_section(st: dict[str, Any], level_names: dict[str, str]) -> list[list[str]]:
     """校准仪表：分信心等级的 Brier + 总体指标 + 单调性判定。
 
     只有命中率看不出模型是否「知道自己不知道」：一个永远给 33% 的模型和一个
@@ -740,7 +740,7 @@ def _parse_backtest_variant(context) -> tuple[str, list[str]]:
     无法识别的参数原样返回，由调用方显式提示——静默回退最容易误导。
     """
     args = [a for a in (getattr(context, "args", None) or []) if not str(a).startswith("/")]
-    rejected = []
+    rejected: list[str] = []
     for raw in args:
         token = (raw or "").strip().lower()
         if token in BACKTEST_VARIANTS:
@@ -823,14 +823,14 @@ async def backtest_cmd(update, context) -> None:
     n = chal["n"] or 0
     delta = comp.get("log_loss_delta")
 
-    def _row(tag: str, d: dict) -> str:
+    def _row(tag: str, d: dict[str, Any]) -> str:
         ll, acc = d.get("log_loss"), d.get("accuracy")
         ll_txt = f"{ll:.4f}" if ll is not None else "—"
         acc_txt = f"{acc:>3.0%}" if acc is not None else " —"
         return (f"<code>{pad_cjk(tag, 10)}</code>"
                 f"<code>LL {ll_txt}</code> <code>命中 {acc_txt}</code>")
 
-    def comparison_rows(b: dict, c: dict, var: str) -> list[str]:
+    def comparison_rows(b: dict[str, Any], c: dict, var: str) -> list[str]:
         """默认（poisson）时基线与挑战者本就是同一模型，只列一行，
         避免输出两行相同数字造成误读；显式变体时才列双路。"""
         if var == "poisson":

@@ -5,6 +5,7 @@
 引用它们而不必反向依赖入口模块（那会形成循环导入）。
 """
 from __future__ import annotations
+from typing import Any
 
 import html
 import unicodedata
@@ -19,8 +20,8 @@ from templates import (
     DISCLAIMER,
     LEAGUE_NAMES,
     MENU_ITEMS,
-    NO_DATA,
-    SEP,
+    NO_DATA as NO_DATA,
+    SEP as SEP,
     STATUS_TEXT,
     TABS,
     THIN_SEP,
@@ -481,7 +482,7 @@ def _is_fallback(p) -> bool:
     """预测结果是否来自备用数据源 football-data.org。"""
     return "football-data" in str(getattr(p, "source", "")).lower()
 
-def _is_fallback_source(report: dict) -> bool:
+def _is_fallback_source(report: dict[str, Any]) -> bool:
     """深度分析报告是否基于备用数据源。"""
     return "football-data" in str(report.get("source", "")).lower()
 
@@ -491,7 +492,7 @@ def _num(value) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-def _row_summary(row: dict | None) -> dict | None:
+def _row_summary(row: dict[str, Any] | None) -> dict | None:
     """积分榜一行 → 排名 / 积分 / 胜平负 / 场均进失球。缺字段时相应项为 None。"""
     if not row:
         return None
@@ -520,7 +521,7 @@ def _row_summary(row: dict | None) -> dict | None:
 def _form_mark(result: str) -> str:
     return {"win": "🟢", "draw": "🟡", "lose": "🔴"}.get(result, "⚪")
 
-def _form_line(form: dict) -> str:
+def _form_line(form: dict[str, Any]) -> str:
     """近期战绩一行摘要（没有足够样本时明确说没有数据）。"""
     if not form["played"]:
         return NO_DATA
@@ -529,7 +530,7 @@ def _form_line(form: dict) -> str:
     marks = " ".join(_form_mark(m["result"]) + m["score"] for m in form["matches"][:5])
     return f"{form['win']}胜 {form['draw']}平 {form['lose']}负 · 进 {form['goals_for']} / 失 {form['goals_against']} · 场均 {avg_for} / {avg_against}\n   {marks}"
 
-def _row_line(row: dict | None) -> str:
+def _row_line(row: dict[str, Any] | None) -> str:
     if not row:
         return NO_DATA
     summary = _row_summary(row)
@@ -544,7 +545,7 @@ def _row_line(row: dict | None) -> str:
         f" · 场均进 {avg_for} / 失 {avg_against}"
     )
 
-def _factors(report: dict) -> tuple[list[str], list[str], list[str]]:
+def _factors(report: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     """从数据推导有利 / 不利 / 不确定因素。没有数据就不编，直接归入不确定。"""
     pros: list[str] = []
     cons: list[str] = []
@@ -590,7 +591,7 @@ def _factors(report: dict) -> tuple[list[str], list[str], list[str]]:
     unknowns.append("数据源未提供伤停信息（当前套餐不支持）")
     return pros, cons, unknowns
 
-def build_prediction_payload(p, tz) -> dict:
+def build_prediction_payload(p, tz) -> dict[str, Any]:
     """统一预测结果数据结构（供格式化与未来的网页端复用）。"""
     a = p.analysis
     probabilities = {

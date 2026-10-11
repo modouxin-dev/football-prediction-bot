@@ -24,6 +24,7 @@
 """
 
 from __future__ import annotations
+from typing import Any
 
 from analyzer import calculate_prediction_level
 from formatkit import (
@@ -82,7 +83,7 @@ def _group_blocks(predictions, tz) -> list[tuple[int, list[str]]]:
 
     分组与排序的唯一实现：单页汇总与分页汇总都走这里，避免两处逻辑漂移。
     """
-    grouped: dict[int, list] = {}
+    grouped: dict[int, list[Any]] = {}
     for p in predictions:
         grouped.setdefault(_league_id_of(p), []).append(p)
 
@@ -159,7 +160,7 @@ class DigestView:
         坏了，而真实原因（国际比赛日 / 套餐不支持该赛季）必须说出来。
         """
         if not predictions:
-            lines = [
+            lines: list[str] = [
                 "⚽ <b>今日预测汇总</b>",
                 f"<code>{BRAND_EN} · DAILY</code>",
                 SEP,
@@ -176,7 +177,7 @@ class DigestView:
         total = len(predictions)
         day_label = fmt_time(min(p.kickoff for p in predictions), tz, "%m月%d日")
 
-        lines: list[str] = [
+        lines = [
             "⚽ <b>今日预测汇总</b>",
             f"<code>{BRAND_EN} · DAILY</code>",
             SEP,

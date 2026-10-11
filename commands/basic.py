@@ -18,7 +18,7 @@ ui = BotUI()
 try:  # 图表依赖缺失时机器人仍要能正常跑，只是不出图
     import chart
 except ImportError:  # pragma: no cover
-    chart = None
+    chart = None  # type: ignore[assignment]  # 图表依赖缺失时的降级
 
 
 async def start(update, context) -> None:

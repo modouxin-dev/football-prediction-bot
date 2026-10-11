@@ -14,6 +14,7 @@
 输出：双路对比（纯泊松 vs 泊松+Elo）、信心等级单调性、校准曲线。
 """
 from __future__ import annotations
+from typing import Any
 
 import argparse
 import logging
@@ -32,7 +33,7 @@ LEVEL_ORDER = {"high": 3, "medium": 2, "low": 1}
 
 # ---- 数据加载 ---------------------------------------------------------------
 
-def load_real(db: str, competition: str = "") -> list[dict]:
+def load_real(db: str, competition: str = "") -> list[dict[str, Any]]:
     from repository import PredictionRepository
 
     repo = PredictionRepository(db)
@@ -40,7 +41,7 @@ def load_real(db: str, competition: str = "") -> list[dict]:
 
 
 def simulate(seed: int, n: int = 1140, teams: int = 20, drift: float = 0.0,
-             dc_rho: float = 0.0) -> list[dict]:
+             dc_rho: float = 0.0) -> list[dict[str, Any]]:
     """生成与真实联赛分布接近的模拟数据（用于管线自检，不用于下结论）。
 
     ⚠️ dc_rho 是关键：
@@ -105,7 +106,7 @@ def _fmt(v, nd=4):
     return f"{v:.{nd}f}" if isinstance(v, float) else "—"
 
 
-def print_table(cmp_result: dict, label: str) -> None:
+def print_table(cmp_result: dict[str, Any], label: str) -> None:
     b, c = cmp_result["baseline"], cmp_result["challenger"]
     print(f"\n{'=' * 62}\n{label}  样本 {b['n']} 场\n{'=' * 62}")
     print(f"{'指标':<10}{'纯泊松':>10}{'+Elo':>10}{'变化':>10}   方向")
@@ -127,7 +128,7 @@ def print_table(cmp_result: dict, label: str) -> None:
           f"（正=Elo 更好）· RPS 改善 {_fmt(cmp_result['rps_delta'])}")
 
 
-def print_levels(info: dict, by_level: dict, label: str) -> None:
+def print_levels(info: dict[str, Any], by_level: dict, label: str) -> None:
     rates = info["rates"]
     if not rates:
         print(f"\n{label}：无足够样本")
@@ -142,7 +143,7 @@ def print_levels(info: dict, by_level: dict, label: str) -> None:
     print(f"  {flag}")
 
 
-def print_calibration(buckets: list[dict], label: str) -> None:
+def print_calibration(buckets: list[dict[str, Any]], label: str) -> None:
     if not buckets:
         return
     print(f"\n{label} 校准曲线（模型说的 vs 实际发生的）：")
@@ -211,8 +212,8 @@ def _scan_blend(args) -> int:
         def patched(hr, ar, *, home_advantage=elo_mod.HOME_ADVANTAGE, _b=blend, **kw):
             return original(hr, ar, home_advantage=home_advantage, blend=_b, **kw)
 
-        elo_mod.elo_multiplier = patched
-        bt.elo_multiplier = patched
+        elo_mod.elo_multiplier = patched  # type: ignore[assignment]  # 扫描用的 monkeypatch
+        bt.elo_multiplier = patched  # type: ignore[assignment]  # 扫描用的 monkeypatch
         deltas = []
         for seed in [int(s) for s in args.seeds.split(",") if s.strip()]:
             ms = simulate(seed, args.simulate, drift=args.drift)
@@ -225,6 +226,8 @@ def _scan_blend(args) -> int:
         print(f"{blend:<8.1f}{'':>10}{mean:>+12.4f}{'更优' if mean > 0.001 else '更差':>10}")
     elo_mod.elo_multiplier = original
     bt.elo_multiplier = original
+    if best is None:  # 上面循环非空，理论不可达；仅为类型收窄
+        return 0
     print(f"\n最佳 blend={best[0]}，对数损失改善 {best[1]:+.4f}")
     if best[1] < 0.001:
         print("→ 即便调到最佳参数仍无改善：Elo 在当前框架下没有增量价值，不建议接入预测主流程。")

@@ -27,7 +27,7 @@ import httpx
 try:
     from cache_manager import AsyncTTLCache
 except ImportError:
-    AsyncTTLCache = None
+    AsyncTTLCache = None  # type: ignore[assignment,misc]  # 依赖缺失时的降级
 
 
 class SimpleCache:
@@ -90,7 +90,7 @@ class APIError(RuntimeError):
 SHOT_ON_TARGET_TYPES = ("Shots on Goal", "Shots on Target")
 
 
-def _stat_value(statistics: list[dict], types: tuple[str, ...]) -> int | None:
+def _stat_value(statistics: list[dict[str, Any]], types: tuple[str, ...]) -> int | None:
     """在单队的 statistics 数组里取出计数值。"""
     for item in statistics or []:
         if not isinstance(item, dict):
@@ -112,7 +112,7 @@ def _stat_value(statistics: list[dict], types: tuple[str, ...]) -> int | None:
     return None
 
 
-def stat_types_of(response: list[dict]) -> list[str]:
+def stat_types_of(response: list[dict[str, Any]]) -> list[str]:
     """响应里出现的统计项名称（用于探测：确认套餐下到底有哪些字段）。"""
     out: list[str] = []
     for item in response or []:
@@ -125,7 +125,7 @@ def stat_types_of(response: list[dict]) -> list[str]:
     return out
 
 
-def parse_shots_on_target(response: list[dict], *,
+def parse_shots_on_target(response: list[dict[str, Any]], *,
                           home_team_id=None, away_team_id=None) -> dict[str, int] | None:
     """从 /fixtures/statistics 响应解析主客队射正数。"""
     entries: list[tuple[str | None, int | None]] = []
@@ -155,9 +155,9 @@ def parse_shots_on_target(response: list[dict], *,
     return {"home": int(home), "away": int(away)}
 
 
-def flatten_standings(response: list[dict]) -> list[dict]:
+def flatten_standings(response: list[dict[str, Any]]) -> list[dict]:
     """把 /standings 的响应展开成球队积分行列表（兼容分组赛制）。"""
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     for item in response or []:
         for group in (item.get("league") or {}).get("standings") or []:
             rows.extend(group)
@@ -261,7 +261,7 @@ class FootballAPI:
             self.quota_remaining = remaining
 
     @staticmethod
-    def _json(resp: httpx.Response) -> dict:
+    def _json(resp: httpx.Response) -> dict[str, Any]:
         try:
             payload = resp.json()
         except ValueError:
@@ -294,22 +294,22 @@ class FootballAPI:
         return str(errors)
 
     # ---- 业务接口 ---------------------------------------------------------
-    async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict]:
+    async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict[str, Any]]:
         """指定日期范围（含）内的赛程。"""
         params = {"league": league_id, "season": season, "from": date_from.isoformat(), "to": date_to.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
-    async def get_fixtures_by_date(self, day: date) -> list[dict]:
+    async def get_fixtures_by_date(self, day: date) -> list[dict[str, Any]]:
         """某一天的全部赛程（不按联赛过滤）。"""
         params = {"date": day.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
-    async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict]:
+    async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict[str, Any]]:
         """整季赛程（只按赛季拉取，不带日期范围）。"""
         params = {"league": league_id, "season": season}
         return await self._get("fixtures", params, ttl=TTL_SEASON_FIXTURES)
 
-    async def get_injuries(self, fixture_id: int) -> list[dict]:
+    async def get_injuries(self, fixture_id: int) -> list[dict[str, Any]]:
         """指定比赛的伤停名单。"""
         try:
             return await self._get("injuries", {"fixture": fixture_id}, ttl=TTL_INJURIES)
@@ -317,26 +317,26 @@ class FootballAPI:
             log.info("伤停不可用（fixture=%s）：%s", fixture_id, exc)
             return []
 
-    async def get_standings(self, league_id: int, season: int) -> list[dict]:
+    async def get_standings(self, league_id: int, season: int) -> list[dict[str, Any]]:
         """积分榜（含主客场进球/失球）。"""
         response = await self._get("standings", {"league": league_id, "season": season}, ttl=TTL_STANDINGS)
         return flatten_standings(response)
 
-    async def get_odds(self, fixture_id: int, fresh: bool = False) -> list[dict]:
+    async def get_odds(self, fixture_id: int, fresh: bool = False) -> list[dict[str, Any]]:
         return await self._get("odds", {"fixture": fixture_id}, ttl=TTL_ODDS, fresh=fresh)
 
-    async def get_h2h(self, home_id: int, away_id: int, last: int = 5) -> list[dict]:
+    async def get_h2h(self, home_id: int, away_id: int, last: int = 5) -> list[dict[str, Any]]:
         params = {"h2h": f"{home_id}-{away_id}", "last": last}
         return await self._get("fixtures/headtohead", params, ttl=TTL_H2H)
 
-    async def get_team_form(self, team_id: int, season: int, last: int = 5) -> list[dict]:
+    async def get_team_form(self, team_id: int, season: int, last: int = 5) -> list[dict[str, Any]]:
         """某支球队最近 last 场已结束的比赛。"""
         params = {"team": team_id, "season": season, "last": last}
         matches = await self._get("fixtures", params, ttl=TTL_FORM)
         done = {"FT", "AET", "PEN"}
         return [m for m in matches or [] if ((m.get("fixture") or {}).get("status") or {}).get("short") in done]
 
-    async def get_fixture_statistics(self, fixture_id: int) -> list[dict]:
+    async def get_fixture_statistics(self, fixture_id: int) -> list[dict[str, Any]]:
         """单场技术统计（/fixtures/statistics）。"""
         return await self._get("fixtures/statistics", {"fixture": fixture_id}, ttl=TTL_STATS)
 
@@ -351,7 +351,7 @@ class FootballAPI:
                 continue
         return sorted(seasons)
 
-    async def get_account_status(self) -> dict:
+    async def get_account_status(self) -> dict[str, Any]:
         """账户与额度（用于 /status 诊断）。"""
         response = await self._get("status", {}, ttl=TTL_STATUS)
         return response if isinstance(response, dict) else {}

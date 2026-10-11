@@ -7,6 +7,10 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 仅类型检查用；运行时本模块已依赖 pytz
+    from pytz.tzinfo import BaseTzInfo
 
 from paths import DB_PATH
 import pytz
@@ -55,7 +59,7 @@ def parse_push_time(raw: str | None, default: time = time(8, 0)) -> time:
         hour, minute = int(m.group(1)), int(m.group(2) or 0)
     elif re.fullmatch(r"\d{4}", text):
         hour, minute = int(text[:2]), int(text[2:])
-    if hour is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
+    if hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
         log.warning("PUSH_TIME=%r 无法解析，改用默认值 %s", raw, default.strftime("%H:%M"))
         return default
     return time(hour, minute)
@@ -85,7 +89,7 @@ class Settings:
     league_ids: tuple[int, ...]  # 全部启用联赛；league_ids[0] 恒等于 league_id
     season: int
     push_time: time
-    timezone: object  # pytz 时区对象
+    timezone: "BaseTzInfo"  # pytz 时区对象
     log_level: str
     max_matches: int
     lookahead_hours: int

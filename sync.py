@@ -17,6 +17,7 @@
 单个联赛失败不影响其他联赛。
 """
 from __future__ import annotations
+from typing import Any
 
 import logging
 from datetime import date, datetime, timedelta, timezone
@@ -34,7 +35,7 @@ class MatchSync:
     def __init__(self, service, repository) -> None:
         self.service = service
         self.repo = repository
-        self.last_result: dict = {}
+        self.last_result: dict[str, Any] = {}
 
     # ---- 联赛 / 分区 ------------------------------------------------------
     @property
@@ -67,14 +68,14 @@ class MatchSync:
 
     # ---- 窗口同步 ---------------------------------------------------------
     async def sync_window(self, date_from: date, date_to: date,
-                          *, kind: str = "window") -> dict:
+                          *, kind: str = "window") -> dict[str, Any]:
         """拉取指定日期窗口的比赛并落盘。
 
         主源 HTTP 成功但返回 0 场 ≠ 失败，记为「窗口内暂无比赛」，不切备用源。
         只有 HTTP 错误 / 超时 / 解析失败才切换。
         """
         comps = self.competitions
-        result = {
+        result: dict[str, Any] = {
             "kind": kind,
             "competition": comps[0] if len(comps) == 1 else ",".join(comps),
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
@@ -90,7 +91,7 @@ class MatchSync:
         return result
 
     async def _sync_window_one(self, league_id: int, date_from: date, date_to: date,
-                               *, kind: str) -> dict:
+                               *, kind: str) -> dict[str, Any]:
         """单个联赛的窗口同步：拉取 → 按该联赛分区保存。"""
         comp = self.competition_for(league_id)
         item = {
@@ -138,14 +139,14 @@ class MatchSync:
         return item
 
     # ---- 赛季回填 ---------------------------------------------------------
-    async def sync_season(self, season: int) -> dict:
+    async def sync_season(self, season: int) -> dict[str, Any]:
         """按赛季整季回填（付费套餐解锁的历史赛季用）。
 
         与 sync_window 的区别：不带日期范围，只按 league+season 请求，
         否则主源会因套餐限制拒绝历史赛季。
         """
         comps = self.competitions
-        result = {
+        result: dict[str, Any] = {
             "kind": f"season-{season}",
             "competition": comps[0] if len(comps) == 1 else ",".join(comps),
             "season": season, "date_from": "-", "date_to": "-",
@@ -158,7 +159,7 @@ class MatchSync:
         self.last_result = result
         return result
 
-    async def _sync_season_one(self, league_id: int, season: int) -> dict:
+    async def _sync_season_one(self, league_id: int, season: int) -> dict[str, Any]:
         """单个联赛的整季回填。"""
         comp = self.competition_for(league_id)
         item = {
@@ -204,7 +205,7 @@ class MatchSync:
 
     # ---- 汇总 -------------------------------------------------------------
     @staticmethod
-    def _aggregate(result: dict, *, empty_message: str = "当前时间范围内暂无比赛") -> None:
+    def _aggregate(result: dict[str, Any], *, empty_message: str = "当前时间范围内暂无比赛") -> None:
         """把 per_league 汇总成顶层 received / saved / ok / message。
 
         部分联赛失败时整体仍算成功（只要有联赛存进去），
@@ -236,17 +237,17 @@ class MatchSync:
             result["ok"] = result["saved"] > 0
 
     # ---- 常用窗口 ---------------------------------------------------------
-    async def sync_upcoming(self, days: int = UPCOMING_DAYS) -> dict:
+    async def sync_upcoming(self, days: int = UPCOMING_DAYS) -> dict[str, Any]:
         """启动 / 定时同步：未来 N 天赛程。"""
         today = datetime.now(timezone.utc).date()
         return await self.sync_window(today, today + timedelta(days=days), kind="upcoming")
 
-    async def sync_recent(self, days: int = RECENT_DAYS) -> dict:
+    async def sync_recent(self, days: int = RECENT_DAYS) -> dict[str, Any]:
         """赛后同步：最近 N 天比赛，回写最终比分。"""
         today = datetime.now(timezone.utc).date()
         return await self.sync_window(today - timedelta(days=days), today, kind="recent")
 
-    async def sync_full_season(self) -> dict:
+    async def sync_full_season(self) -> dict[str, Any]:
         """当前赛季整季回填（约 380 场）。
 
         原实现走的是 ``sync_window(today-365, today+365)`` —— 带日期范围。
@@ -257,7 +258,7 @@ class MatchSync:
         """
         return await self.sync_season(self.service.season_in_use)
 
-    async def sync_history(self, seasons: list[int] | None = None) -> dict:
+    async def sync_history(self, seasons: list[int] | None = None) -> dict[str, Any]:
         """回填历史赛季（付费套餐解锁）。
 
         :param seasons: 显式指定赛季列表；None = 向主源查询账号可用赛季。
@@ -269,7 +270,7 @@ class MatchSync:
             except Exception as exc:  # noqa: BLE001
                 log.warning("查询可用赛季失败：%s", exc)
                 seasons = []
-        result = {
+        result: dict[str, Any] = {
             "kind": "history", "season": "-", "seasons": 0,
             "received": 0, "saved": 0, "per_season": [], "ok": False,
             "message": "" if seasons else "未能获取可用赛季（可能套餐不支持历史赛季）",
@@ -297,7 +298,7 @@ class MatchSync:
         self.last_result = result
         return result
 
-    async def run_startup(self) -> dict:
+    async def run_startup(self) -> dict[str, Any]:
         """启动同步：先拉未来赛程，保证机器人起来就有数据可展示。"""
         return await self.sync_upcoming()
 
