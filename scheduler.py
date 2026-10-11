@@ -23,13 +23,13 @@ from dataclasses import dataclass
 from telegram import InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from bot_handler import BotUI
-from keyboards import nav_row
 from backtester_fixed import BacktesterFixed
+from bot_handler import BotUI
 from config import Settings
+from keyboards import nav_row
 from service import PredictionService
-from tghtml import normalize
 from support import describe_error, notify_admins
+from tghtml import normalize
 from views.digest import DigestView
 
 log = logging.getLogger("bot")

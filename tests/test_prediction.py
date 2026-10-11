@@ -7,15 +7,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 import main
-from api_client import APIError
+from api_client import APIError, flatten_standings
 from bot_handler import BotUI
 from config import load_settings
 from service import MODEL_VERSION, PredictionService
-from api_client import flatten_standings
-from tests.sample_data import FakeAPI, default_fixtures, fixture, odds_response, standings_response
+from tests.sample_data import (FakeAPI, default_fixtures, fixture,
+                               odds_response, standings_response)
 
 ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
-    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+       "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 

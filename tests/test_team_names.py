@@ -11,7 +11,6 @@ import pytest
 from formatkit import team_short_name
 from templates import TEAM_NAMES
 
-
 # 数据源实际下发的缩写/短名 → 期望中文。
 # 这些写法来自数据源公开的积分榜与赛事资料，不是推测。
 ABBREV_CASES = [

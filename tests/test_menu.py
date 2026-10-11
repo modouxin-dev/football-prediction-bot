@@ -9,15 +9,15 @@ from telegram import InlineKeyboardButton, KeyboardButton
 
 import main
 from api_client import APIError
-from bot_handler import BotUI, STATUS_TEXT
-from templates import PANEL_CLOSE_LABEL
+from bot_handler import STATUS_TEXT, BotUI
 from config import load_settings
 from repository import PredictionRepository
 from service import PredictionService
+from templates import PANEL_CLOSE_LABEL
 from tests.sample_data import FakeAPI, fixture
 
 ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
-    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+       "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 
@@ -450,8 +450,8 @@ def test_unexpected_exception_does_not_crash():
 # ==============================================================================
 def test_query_status_ok_when_window_has_matches():
     api = TodayAPI(today_fixtures(3))
-    from service import PredictionService
     from analyzer import MatchAnalyzer
+    from service import PredictionService
 
     svc = PredictionService(SETTINGS, api, MatchAnalyzer())
     res = run(svc.query_fixtures("today"))
@@ -461,8 +461,8 @@ def test_query_status_ok_when_window_has_matches():
 
 def test_query_status_no_data_keeps_real_reason():
     """接口故障必须保留真实原因，不能伪装成「今天没比赛」。"""
-    from service import PredictionService
     from analyzer import MatchAnalyzer
+    from service import PredictionService
 
     svc = PredictionService(SETTINGS, BoomAPI(), MatchAnalyzer())
     res = run(svc.query_fixtures("today"))
@@ -473,8 +473,8 @@ def test_query_status_no_data_keeps_real_reason():
 
 def test_query_next_mode_returns_single_upcoming_match():
     """「下一场」只返回不早于当前时刻的第一场。"""
-    from service import PredictionService
     from analyzer import MatchAnalyzer
+    from service import PredictionService
 
     api = TodayAPI(today_fixtures(2))
     svc = PredictionService(SETTINGS, api, MatchAnalyzer())
@@ -485,9 +485,10 @@ def test_query_next_mode_returns_single_upcoming_match():
 
 def test_query_window_empty_shows_season_range():
     """窗口无比赛时要给出赛季数据范围，方便排查。"""
-    from service import PredictionService
-    from analyzer import MatchAnalyzer
     from datetime import date
+
+    from analyzer import MatchAnalyzer
+    from service import PredictionService
 
     class EmptyAPI(TodayAPI):
         def __init__(self):

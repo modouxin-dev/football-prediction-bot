@@ -12,9 +12,9 @@
 数字经两条独立路径互证：回测框架与逐场核算均为 597/1110。
 详见 docs/MARKET_FUSION_EVAL.md。
 """
+from analyzer import implied_probabilities
 from backtest import WalkForwardBacktester, run_backtest
 from backtest_corpus import fixture_to_match
-from analyzer import implied_probabilities
 
 
 def _match(home_id, away_id, hs, as_, odds=None):

@@ -6,18 +6,9 @@ from __future__ import annotations
 
 import pytest
 
-from analyzer import (
-    DSA_CLAMP_HI,
-    DSA_CLAMP_LO,
-    DSA_RECENT_N,
-    DSA_MID_N,
-    DSA_W_MID,
-    DSA_W_RECENT,
-    DSA_W_TAIL,
-    PRIOR_GAMES,
-    build_league_model,
-    dsa_weight,
-)
+from analyzer import (DSA_CLAMP_HI, DSA_CLAMP_LO, DSA_MID_N, DSA_RECENT_N,
+                      DSA_W_MID, DSA_W_RECENT, DSA_W_TAIL, PRIOR_GAMES,
+                      build_league_model, dsa_weight)
 
 
 def _row(team_id, h_played=10, h_for=15, h_against=10,

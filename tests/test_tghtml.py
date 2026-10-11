@@ -16,8 +16,8 @@ import pytest
 from formatkit import display_width, kv_line, pad_cjk
 from tghtml import normalize, split_message
 
-
 # ---- 标签归约 ----------------------------------------------------------------
+
 
 @pytest.mark.parametrize("html_in,expected", [
     ("<p>Para 1</p><p>Para 2</p>", "Para 1\nPara 2"),

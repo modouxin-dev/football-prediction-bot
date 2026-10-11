@@ -8,15 +8,12 @@
 
 from __future__ import annotations
 
-import analyzer
 import pytest
+
+import analyzer
 from analyzer import build_league_model
-from season_prior import (
-    _LEAGUE_TO_DIV,
-    clear_cache,
-    known_team_ids,
-    load_prior_strength,
-)
+from season_prior import (_LEAGUE_TO_DIV, clear_cache, known_team_ids,
+                          load_prior_strength)
 
 
 @pytest.fixture(autouse=True)

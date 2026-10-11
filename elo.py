@@ -12,6 +12,7 @@
 """
 
 from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 仅类型检查时导入，避免与 repository 形成运行时循环依赖

@@ -15,10 +15,10 @@ import asyncio
 import pytest
 
 import service as service_mod
-from config import load_settings
-from service import PredictionService
-from season_prior import clear_cache
 from api_client import flatten_standings
+from config import load_settings
+from season_prior import clear_cache
+from service import PredictionService
 from tests.sample_data import standings_response
 
 ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",

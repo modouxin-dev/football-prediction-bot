@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 
 import repository
-from repository import PredictionRepository
 from elo import EloEngine
+from repository import PredictionRepository
 
 
 def test_atomic_commits(tmp_path):

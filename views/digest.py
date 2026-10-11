@@ -24,28 +24,14 @@
 """
 
 from __future__ import annotations
+
 from typing import Any
 
 from analyzer import calculate_prediction_level
-from formatkit import (
-    BLANK,
-    esc,
-    fit_cols,
-    fmt_time,
-    league_label,
-    team_mobile,
-)
-from templates import (
-    BRAND_EN,
-    BULLET,
-    DISCLAIMER,
-    LEAGUE_FLAGS,
-    LEAGUE_NAMES,
-    LEAGUE_ORDER,
-    OUTCOME_LABEL,
-    SEP,
-    THIN_SEP,
-)
+from formatkit import BLANK, esc, fit_cols, fmt_time, league_label, team_mobile
+from templates import (BRAND_EN, BULLET, DISCLAIMER, LEAGUE_FLAGS,
+                       LEAGUE_NAMES, LEAGUE_ORDER, OUTCOME_LABEL, SEP,
+                       THIN_SEP)
 
 # 单场「对阵行」的守门宽度：时间(5) + 空格(1) + 两队名(各 12) + " vs "(5) ≈ 35。
 # 与 formatkit.MOBILE_MAX_COLS=36 同源，这里略放宽是因为已经用了短名。

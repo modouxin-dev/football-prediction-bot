@@ -70,7 +70,7 @@ def test_fallback_output_matches_primary_shape():
 
     fd = _fd_client(lambda r: httpx.Response(200, json=_fd_match_payload()))
     converted = asyncio.run(fd.get_fixtures(39, 2026, __import__("datetime").date(2026, 9, 25),
-                                           __import__("datetime").date(2026, 9, 25)))
+                                            __import__("datetime").date(2026, 9, 25)))
     assert converted, "备用源应有数据"
 
     primary = fixture(1001, 1, "曼城", 2, "利物浦", datetime.now(timezone.utc))

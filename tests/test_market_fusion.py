@@ -7,12 +7,8 @@
     Value Bet 各阈值 ROI 全负：>0% -11.94% >5% -16.26% >10% -17.85% >15% -20.61%
 详见 docs/MARKET_FUSION_EVAL.md。
 """
-from analyzer import (
-    MatchAnalyzer,
-    apply_market_adjustment,
-    build_league_model,
-    implied_probabilities,
-)
+from analyzer import (MatchAnalyzer, apply_market_adjustment,
+                      build_league_model, implied_probabilities)
 
 
 def _analysis():
@@ -60,6 +56,7 @@ def test_score_matrix_blocks_match_market_marginals():
     a = _analysis()
     out = apply_market_adjustment(a, {"home": 1.8, "draw": 3.6, "away": 4.5})
     import pytest
+
     # 用 top_scores 无法还原全矩阵，改为校验三项概率之和为 1 且顺序与市场一致
     assert out["win_prob"] + out["draw_prob"] + out["loss_prob"] == pytest.approx(1.0)
     market = implied_probabilities({"home": 1.8, "draw": 3.6, "away": 4.5})

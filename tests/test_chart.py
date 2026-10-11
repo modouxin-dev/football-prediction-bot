@@ -1,6 +1,6 @@
 """阶段八：图表生成与发送闭环（不落盘，不联网）。"""
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -16,7 +16,7 @@ from tests.sample_data import fixture
 chart = pytest.importorskip("chart", reason="matplotlib 未安装时跳过图表用例")
 
 ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
-    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+       "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 
@@ -263,8 +263,8 @@ def test_chart_callback_duplicate_click_blocked():
 def test_no_temp_files_left_behind():
     """图表只在内存生成，不得产生临时文件。"""
     import glob
-    import tempfile
     import os
+    import tempfile
 
     before = set(glob.glob(os.path.join(tempfile.gettempdir(), "*.png")))
     ctx, _ = make_ctx(ChartAPI(), fx_cache={"date": "x", "items": [now_fixture()]})

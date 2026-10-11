@@ -8,11 +8,8 @@ Inefficiencies in the Football Betting Market", Applied Statistics.
 """
 import math
 
-
-from analyzer import (
-    MAX_GOALS, RHO_MIN_SAMPLES, dc_rho_bounds, dc_score_matrix, dc_tau,
-    clamp_rho, fit_rho, poisson_pmf,
-)
+from analyzer import (MAX_GOALS, RHO_MIN_SAMPLES, clamp_rho, dc_rho_bounds,
+                      dc_score_matrix, dc_tau, fit_rho, poisson_pmf)
 
 # 手算基准：λ=1.5, μ=1.2, ρ=-0.1
 LH, LA, RHO = 1.5, 1.2, -0.1

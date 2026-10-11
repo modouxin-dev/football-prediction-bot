@@ -8,8 +8,8 @@ from pathlib import Path
 import paths
 from repository import PredictionRepository
 
-
 # ---- 持久化判定 -------------------------------------------------------------
+
 
 def test_is_persistent_returns_bool():
     assert isinstance(paths.is_persistent(), bool)

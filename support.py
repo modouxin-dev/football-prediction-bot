@@ -15,8 +15,8 @@ from telegram.error import TelegramError
 
 from api_client import APIError
 from bot_handler import split_html_blocks
-from tghtml import normalize
 from config import Settings
+from tghtml import normalize
 
 log = logging.getLogger("bot")
 

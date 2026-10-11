@@ -6,14 +6,9 @@
 from __future__ import annotations
 
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
-                      KeyboardButton, ReplyKeyboardMarkup,
-                      ReplyKeyboardRemove)
+                      KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
-from templates import (
-    MENU_ITEMS,
-    PANEL_CLOSE_LABEL,
-    TABS,
-)
+from templates import MENU_ITEMS, PANEL_CLOSE_LABEL, TABS
 
 # 主菜单每行按钮数。
 # 实测：MENU_ITEMS 现有 8 项，按每行 2 个排是 4 行，底部面板连同「收起」

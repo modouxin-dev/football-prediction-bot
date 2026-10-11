@@ -14,7 +14,7 @@ from service import PredictionService, form_stats, h2h_stats
 from tests.sample_data import FakeAPI, fixture, standings_response
 
 ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
-    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+       "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 
@@ -53,7 +53,8 @@ def standings_with_points():
             "goalsDiff": gf - ga,
             "all": {"played": w + d + losses, "win": w, "draw": d, "lose": losses, "goals": {"for": gf, "against": ga}},
             "home": {"played": w, "win": w, "draw": 0, "lose": 0, "goals": {"for": gf // 2, "against": ga // 2}},
-            "away": {"played": d + losses, "win": 0, "draw": d, "lose": losses, "goals": {"for": gf // 2, "against": ga // 2}},
+            "away": {"played": d + losses, "win": 0, "draw": d, "lose": losses,
+                     "goals": {"for": gf // 2, "against": ga // 2}},
         }
     return [row(1, 1, 18, 6, 0, 1, 16, 5), row(2, 4, 11, 3, 2, 2, 10, 9)]
 

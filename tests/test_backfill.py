@@ -4,7 +4,6 @@
 """
 import sqlite3
 
-
 from repository import PredictionRepository
 
 

@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-
 from backtest import run_backtest
 from backtest_corpus import fixture_to_match, known_team_ids, load_corpus
 from football_data_uk import available_local_seasons

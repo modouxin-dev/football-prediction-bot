@@ -60,9 +60,8 @@ def test_menu_single_league_unchanged():
 def test_status_line_lists_all_leagues():
     from types import SimpleNamespace
 
-    from tests.test_bot import command_update, make_app
-
     from commands import admin as admin_cmds
+    from tests.test_bot import command_update, make_app
 
     app, _, _ = make_app(settings=settings_of([39, 140]), warm=False)
     update, msg = command_update()

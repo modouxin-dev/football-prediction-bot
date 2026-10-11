@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 from bot_handler import BotUI
 from config import load_settings
 from formatkit import team_name, team_short_name

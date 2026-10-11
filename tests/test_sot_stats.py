@@ -14,17 +14,13 @@ import sqlite3
 import httpx
 import pytest
 
-from api_client import (
-    FootballAPI,
-    SHOT_ON_TARGET_TYPES,
-    parse_shots_on_target,
-    stat_types_of,
-)
+from api_client import (SHOT_ON_TARGET_TYPES, FootballAPI,
+                        parse_shots_on_target, stat_types_of)
 from data_source import DataSourceRouter
 from repository import PredictionRepository
 
-
 # ---- 采样响应 ---------------------------------------------------------------
+
 
 def _payload(home_sot, away_sot, *, home_id=33, away_id=34,
              shot_type="Shots on Goal"):
@@ -74,12 +70,12 @@ def test_percentage_value_is_rejected_not_silently_used():
 def test_missing_on_either_side_returns_none():
     """半份数据比没有更危险：一侧射正、一侧进球，量纲不一致。"""
     assert parse_shots_on_target(_payload(7, None), home_team_id=33,
-                                away_team_id=34) is None
+                                 away_team_id=34) is None
 
 
 def test_single_team_response_returns_none():
     assert parse_shots_on_target(_payload(7, 3)[:1], home_team_id=33,
-                                away_team_id=34) is None
+                                 away_team_id=34) is None
 
 
 def test_empty_response_returns_none():
@@ -89,7 +85,7 @@ def test_empty_response_returns_none():
 
 def test_zero_is_a_real_value_not_missing():
     assert parse_shots_on_target(_payload(0, 0), home_team_id=33,
-                                away_team_id=34) == {"home": 0, "away": 0}
+                                 away_team_id=34) == {"home": 0, "away": 0}
 
 
 def test_falls_back_to_response_order_without_ids():

@@ -12,18 +12,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-
-from commands.admin import (
-    SOT_PROBE_DEFAULT,
-    SOT_PROBE_MAX,
-    _sot_probe_count,
-    sot_probe_cmd,
-    sot_probe_verdict,
-)
+from commands.admin import (SOT_PROBE_DEFAULT, SOT_PROBE_MAX, _sot_probe_count,
+                            sot_probe_cmd, sot_probe_verdict)
 from repository import PredictionRepository
 
-
 # ---- 场数解析 ---------------------------------------------------------------
+
 
 def test_default_count_when_no_args():
     assert _sot_probe_count(None) == SOT_PROBE_DEFAULT

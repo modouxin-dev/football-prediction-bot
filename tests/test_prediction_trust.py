@@ -2,11 +2,12 @@
 
 核心目标：预测必须可追溯、可解释，数据不足时绝不给虚假结论。
 """
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from analyzer import MatchAnalyzer, calculate_prediction_level, validate_probabilities
+from analyzer import (MatchAnalyzer, calculate_prediction_level,
+                      validate_probabilities)
 from api_client import APIError, flatten_standings
 from service import PredictionService
 from tests.sample_data import fixture, standings_response

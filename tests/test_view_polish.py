@@ -17,9 +17,8 @@ import re
 import pytest
 
 from formatkit import align_cjk, display_width, hbar, pad_cjk, status_emoji
-from views.prediction import PredictionView
-
 from tests.test_prediction import SETTINGS, FullAPI, now_fixtures
+from views.prediction import PredictionView
 
 
 def _run(coro):

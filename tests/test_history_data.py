@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-
 import football_data_uk as fduk
 
 EXPECTED_SEASONS = (2023, 2024, 2025)

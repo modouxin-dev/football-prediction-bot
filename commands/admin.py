@@ -10,22 +10,22 @@ import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-import paths
-from backtest import DEFAULT_MIN_HISTORY, run_backtest
-from backtest_corpus import load_corpus
-from api_client import parse_shots_on_target, stat_types_of
-from repository import BRIER_RANDOM, quota_today
-from bot_handler import BotUI, esc
-from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
-from tghtml import normalize
 from telegram.constants import ChatAction
 
+import paths
+from api_client import parse_shots_on_target, stat_types_of
+from backtest import DEFAULT_MIN_HISTORY, run_backtest
+from backtest_corpus import load_corpus
+from bot_handler import BotUI, esc
+from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
+from repository import BRIER_RANDOM, quota_today
 from scheduler import DAILY_JOB, run_push
 from support import describe_error
+from tghtml import normalize
 
 from . import CommandDispatcher
-from typing import Any
 
 log = logging.getLogger("bot")
 
@@ -844,7 +844,7 @@ async def backtest_cmd(update, context) -> None:
         section("📦", "样本", *[
             kv_line("🗄", "已完赛", f"{total} 场", W),
             kv_line("🧱", "来源", f"库内 {corpus_info['db']} · 内置历史 "
-                                  f"{corpus_info['history']}", W),
+                    f"{corpus_info['history']}", W),
             kv_line("🎯", "计入评估", f"{n} 场", W),
             kv_line("🔥", "预热", f"{DEFAULT_MIN_HISTORY} 场（不计入评估）", W),
         ]),

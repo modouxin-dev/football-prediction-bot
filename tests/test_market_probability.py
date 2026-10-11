@@ -15,8 +15,8 @@ import pytest
 
 from analyzer import implied_probabilities, market_gap, overround
 
-
 # ---- implied_probabilities ------------------------------------------------
+
 
 def test_standard_odds_sum_to_one():
     """标准英超盘：去水后三项概率之和恰为 1。"""
@@ -133,9 +133,9 @@ def _fake_prediction(odds=None, bookmakers=None):
 
 def test_odds_detail_renders_dewatered_table():
     """赔率对比卡必须出现去水口径的三行表。"""
-    from views.prediction import PredictionView
-
     from zoneinfo import ZoneInfo
+
+    from views.prediction import PredictionView
 
     odds = {"home": 1.91, "draw": 3.60, "away": 4.20, "n": 3}
     p = _fake_prediction(odds=odds)

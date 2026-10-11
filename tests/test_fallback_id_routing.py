@@ -11,7 +11,6 @@
 """
 import asyncio
 
-
 from data_source import DataSourceRouter
 
 FALLBACK_FIXTURE_ID = "fd-5001"

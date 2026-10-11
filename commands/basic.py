@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import logging
 
-from bot_handler import BotUI
 from telegram.constants import ParseMode
 
+from bot_handler import BotUI
 from support import panel_expanded, panel_state, reply_html, set_panel_state
+from templates import PANEL_COLLAPSED, PANEL_EXPANDED, PANEL_HINTS
 from tghtml import normalize
-from templates import (PANEL_COLLAPSED, PANEL_EXPANDED, PANEL_HINTS)
 
 from . import CommandDispatcher
 

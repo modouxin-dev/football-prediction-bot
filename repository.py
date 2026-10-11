@@ -12,18 +12,18 @@
 - 统计命中率、连胜、各信心等级命中率
 """
 from __future__ import annotations
-from typing import Any
 
 import json
 import logging
 import math
+import random
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-import random
-import time
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -236,8 +236,8 @@ def _quota_day() -> str:
     避免 UTC 与本地时区错位导致跨天统计串味。
     """
     try:
-        from zoneinfo import ZoneInfo
         import os
+        from zoneinfo import ZoneInfo
         tz = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Shanghai"))
     except Exception:  # 容器缺 tzdata 时退化为固定 +8，不影响计数可用性
         from datetime import timedelta

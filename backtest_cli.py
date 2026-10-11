@@ -14,15 +14,15 @@
 输出：双路对比（纯泊松 vs 泊松+Elo）、信心等级单调性、校准曲线。
 """
 from __future__ import annotations
-from typing import Any
 
 import argparse
 import logging
 import math
 import random
 import sys
+from typing import Any
 
-from backtest import compare, run_backtest, WalkForwardBacktester
+from backtest import WalkForwardBacktester, compare, run_backtest
 from migrate_elo import fetch_finished
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
@@ -201,8 +201,8 @@ def main(argv: list[str] | None = None) -> int:
 
 def _scan_blend(args) -> int:
     """扫描融合强度：确认「调参无效」还是「方法本身无效」。"""
-    import elo as elo_mod
     import backtest as bt
+    import elo as elo_mod
 
     original = elo_mod.elo_multiplier
     print("\nElo 融合强度扫描（blend）")

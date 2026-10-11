@@ -12,8 +12,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # 仅类型检查用；运行时本模块已依赖 pytz
     from pytz.tzinfo import BaseTzInfo
 
-from paths import DB_PATH
 import pytz
+
+from paths import DB_PATH
 
 log = logging.getLogger(__name__)
 

@@ -533,7 +533,9 @@ def _form_line(form: dict[str, Any]) -> str:
     avg_for = f"{form['avg_for']:.1f}" if form["avg_for"] is not None else "-"
     avg_against = f"{form['avg_against']:.1f}" if form["avg_against"] is not None else "-"
     marks = " ".join(_form_mark(m["result"]) + m["score"] for m in form["matches"][:5])
-    return f"{form['win']}胜 {form['draw']}平 {form['lose']}负 · 进 {form['goals_for']} / 失 {form['goals_against']} · 场均 {avg_for} / {avg_against}\n   {marks}"
+    return (f"{form['win']}胜 {form['draw']}平 {form['lose']}负 "
+            f"· 进 {form['goals_for']} / 失 {form['goals_against']} "
+            f"· 场均 {avg_for} / {avg_against}\n   {marks}")
 
 
 def _row_line(row: dict[str, Any] | None) -> str:

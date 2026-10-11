@@ -220,7 +220,8 @@ def prob_ring(prediction, tz, model_version: str = "poisson-v0.1") -> bytes | No
                   fontweight="bold", va="center")
     title_ax.text(1, 0.5, f"MODEL CERTAINTY {best:.0f}%", color=MUTED,
                   fontsize=8.5, va="center", ha="right")
-    _footer(fig, f"{model_version} · {BotUI.fmt_time(prediction.created_at, tz, '%Y-%m-%d %H:%M')} · {BotUI.tz_label(tz)}")
+    _footer(fig, f"{model_version} · "
+                 f"{BotUI.fmt_time(prediction.created_at, tz, '%Y-%m-%d %H:%M')} · {BotUI.tz_label(tz)}")
     return _finish(fig)
 
 
@@ -436,7 +437,8 @@ def h2h_chart(report: dict[str, Any], tz) -> bytes | None:
     ax.set_title(f"历史交锋（近 {h2h['played']} 次，{report['home']} 视角）", pad=14)
     from bot_handler import BotUI
 
-    _footer(fig, f"进球 {h2h['goals_for']}-{h2h['goals_against']} · {BotUI.fmt_time(report['created_at'], tz, '%Y-%m-%d')}")
+    _footer(fig, f"进球 {h2h['goals_for']}-{h2h['goals_against']} · "
+                 f"{BotUI.fmt_time(report['created_at'], tz, '%Y-%m-%d')}")
     return _finish(fig)
 
 

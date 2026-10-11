@@ -160,8 +160,9 @@ def test_predictions_for_day_matches_fixtures_page_scope():
     赛程页按自然日展示「明天凌晨那场」，预测按滚动窗口就会漏掉它，
     于是汇总标题跳到下一天——这正是用户实测到的现象。
     """
-    import pytz
     from datetime import date as _date
+
+    import pytz
 
     tz = pytz.timezone("Asia/Shanghai")
     # 构造本地 10-04 的三场比赛：00:30（UTC 10-03 16:30）、21:45、23:30

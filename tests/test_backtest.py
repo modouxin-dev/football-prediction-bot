@@ -2,11 +2,11 @@
 
 先保证尺子本身准，再拿它去量模型。
 """
-from backtest import (
-    OUTCOME_AWAY, OUTCOME_DRAW, OUTCOME_HOME, WalkForwardBacktester,
-    accuracy, brier, calibration_buckets, calibration_error, compare,
-    favorite_index, level_monotonic, log_loss, outcome_index, rps, run_backtest,
-)
+from backtest import (OUTCOME_AWAY, OUTCOME_DRAW, OUTCOME_HOME,
+                      WalkForwardBacktester, accuracy, brier,
+                      calibration_buckets, calibration_error, compare,
+                      favorite_index, level_monotonic, log_loss, outcome_index,
+                      rps, run_backtest)
 
 P = (0.5, 0.3, 0.2)
 

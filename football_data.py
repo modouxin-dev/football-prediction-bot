@@ -408,7 +408,9 @@ class FootballDataAPI:
         """某队最近 last 场已完场。免费层无专用端点，从联赛赛程里过滤。"""
         league_id = _league_of_team(team_id)
         code = _code_for(league_id)
-        payload = await self._get(f"competitions/{code}/matches", {"season": season, "status": "FINISHED"}, ttl=TTL_MATCHES)
+        payload = await self._get(
+            f"competitions/{code}/matches", {"season": season, "status": "FINISHED"}, ttl=TTL_MATCHES,
+        )
         matches = payload.get("matches") or []
         target = str(team_id)
         mine = []
