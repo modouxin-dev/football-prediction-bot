@@ -7,6 +7,7 @@
 - 数据不足时返回 None，由上层只发文字结果，绝不生成误导性图表
 """
 from __future__ import annotations
+from typing import Any
 
 import io
 import logging
@@ -17,7 +18,7 @@ matplotlib.use("Agg")  # 必须在 pyplot 之前设置
 
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
-from matplotlib.patches import FancyBboxPatch  # noqa: E402
+from matplotlib.patches import Circle, FancyBboxPatch  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ def _footer(fig, text: str) -> None:
     fig.text(0.01, 0.01, text, color="#8FA3B0", fontsize=7)
 
 
-def schedule_chart(fixtures: list, tz, day_label: str = "", source: str = "") -> bytes | None:
+def schedule_chart(fixtures: list[Any], tz, day_label: str = "", source: str = "") -> bytes | None:
     """赛程总览图 / Fixtures overview chart.
 
     同一天 → 按开赛小时分布；跨多天 → 按日期分布。
@@ -99,7 +100,7 @@ def schedule_chart(fixtures: list, tz, day_label: str = "", source: str = "") ->
     from bot_handler import BotUI  # 局部导入避免循环依赖
     from service import parse_kickoff
 
-    buckets: dict[str, int] = {}
+    buckets: dict[str, list[int]] = {}
     for fx in fixtures:
         kickoff = (fx.get("fixture") or {}).get("date")
         dt = parse_kickoff(kickoff)
@@ -223,7 +224,7 @@ def prob_ring(prediction, tz, model_version: str = "poisson-v0.1") -> bytes | No
     return _finish(fig)
 
 
-def match_card(prediction, tz, level: dict, league_name: str = "",
+def match_card(prediction, tz, level: dict[str, Any], league_name: str = "",
                matchday: str = "", source: str = "",
                model_version: str = "poisson-v0.1") -> bytes | None:
     """高级版比赛主卡 / Premium match card.
@@ -359,7 +360,7 @@ def prob_chart(prediction, tz, model_version: str = "poisson-v0.1") -> bytes | N
     return _finish(fig)
 
 
-def form_chart(report: dict, tz) -> bytes | None:
+def form_chart(report: dict[str, Any], tz) -> bytes | None:
     """近期战绩对比图（主队 vs 客队，胜/平/负计数）。"""
     home, away = report["home_form"], report["away_form"]
     if not home["played"] and not away["played"]:
@@ -385,7 +386,7 @@ def form_chart(report: dict, tz) -> bytes | None:
     return _finish(fig)
 
 
-def goals_chart(report: dict, tz) -> bytes | None:
+def goals_chart(report: dict[str, Any], tz) -> bytes | None:
     """场均进失球对比图。"""
     home, away = report["home_form"], report["away_form"]
     if home["avg_for"] is None and away["avg_for"] is None:
@@ -418,7 +419,7 @@ def goals_chart(report: dict, tz) -> bytes | None:
     return _finish(fig)
 
 
-def h2h_chart(report: dict, tz) -> bytes | None:
+def h2h_chart(report: dict[str, Any], tz) -> bytes | None:
     """历史交锋图（主队胜 / 平 / 客队胜）。"""
     h2h = report["h2h"]
     if not h2h["played"]:
@@ -470,8 +471,8 @@ def brand_banner(title: str = BRAND_EN,
 
         # 右侧装饰：同心圆靶心（外→内：蓝 黄 绿，中心红点，与顶部四色呼应）
         for r, alpha, color in ((0.085, 0.30, ACCENT), (0.055, 0.55, DRAW), (0.028, 0.85, WIN)):
-            ax.add_patch(plt.Circle((0.855, 0.50), r, color=color, alpha=alpha, fill=True))
-        ax.add_patch(plt.Circle((0.855, 0.50), 0.010, color=LOSE, alpha=1.0, fill=True))
+            ax.add_patch(Circle((0.855, 0.50), r, color=color, alpha=alpha, fill=True))
+        ax.add_patch(Circle((0.855, 0.50), 0.010, color=LOSE, alpha=1.0, fill=True))
 
         return _finish(fig)
     except Exception:  # 图表永远不能拖垮主流程

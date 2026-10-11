@@ -18,6 +18,7 @@
 """
 
 from __future__ import annotations
+from typing import Any, Sequence
 
 import logging
 import math
@@ -29,7 +30,7 @@ from analyzer import (
     apply_temperature, calculate_prediction_level, fit_rho, fit_temperature,
     implied_probabilities,
 )
-from elo import DEFAULT_RATING, elo_multiplier
+from elo import DEFAULT_RATING, elo_multiplier as elo_multiplier
 
 log = logging.getLogger(__name__)
 
@@ -96,8 +97,8 @@ def favorite_index(probs: tuple[float, float, float]) -> int:
 CALIBRATION_EDGES = (0.0, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 1.01)
 
 
-def calibration_buckets(records: list[dict],
-                        edges: tuple[float, ...] = CALIBRATION_EDGES) -> list[dict]:
+def calibration_buckets(records: list[dict[str, Any]],
+                        edges: tuple[float, ...] = CALIBRATION_EDGES) -> list[dict[str, Any]]:
     """校准曲线：把预测按概率分桶，比较「模型说的」与「实际发生的」。
 
     完美校准时，每个桶的 predicted 与 observed 应当接近。
@@ -127,7 +128,7 @@ def calibration_buckets(records: list[dict],
     return out
 
 
-def calibration_error(buckets: list[dict]) -> float:
+def calibration_error(buckets: list[dict[str, Any]]) -> float:
     """期望校准误差（ECE）：各桶 |predicted − observed| 的样本加权平均。越低越好。"""
     total = sum(b["n"] for b in buckets)
     if not total:
@@ -148,8 +149,8 @@ class BacktestReport:
     log_loss_sum: float = 0.0
     rps_sum: float = 0.0
     brier_sum: float = 0.0
-    by_level: dict[str, dict] = field(default_factory=dict)
-    records: list[dict] = field(default_factory=list)
+    by_level: dict[str, dict[str, Any]] = field(default_factory=dict)
+    records: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def accuracy_rate(self) -> float | None:
@@ -169,14 +170,14 @@ class BacktestReport:
         return self.brier_sum / self.n if self.n else None
 
     @property
-    def calibration(self) -> list[dict]:
+    def calibration(self) -> list[dict[str, Any]]:
         return calibration_buckets(self.records)
 
     @property
     def ece(self) -> float:
         return calibration_error(self.calibration)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "label": self.label,
             "n": self.n,
@@ -194,7 +195,7 @@ class BacktestReport:
         }
 
 
-def _standings_row_from_history(stats: dict, use_sot: bool = False) -> dict:
+def _standings_row_from_history(stats: dict[str, Any], use_sot: bool = False) -> dict:
     """把累积的主客场比赛统计，转成 build_league_model 需要的积分榜行格式。
 
     use_sot=True 且该队有射正数累积时，用**射正数**代替进球数作为强度指标。
@@ -228,7 +229,7 @@ def _standings_row_from_history(stats: dict, use_sot: bool = False) -> dict:
     }
 
 
-def _blank_stats(team_id) -> dict:
+def _blank_stats(team_id) -> dict[str, Any]:
     return {
         "team_id": team_id, "home_played": 0, "home_for": 0, "home_against": 0,
         "away_played": 0, "away_for": 0, "away_against": 0,
@@ -286,11 +287,11 @@ class WalkForwardBacktester:
         self.refit_every: int = 100
         self.temperature: float = 1.0
         self._temp_fitted: bool = False
-        self._calib_observations: list[tuple] = []
+        self._calib_observations: list[tuple[Any, ...]] = []
         self.min_fit_samples: int = 200
-        self._dc_observations: list[tuple] = []
+        self._dc_observations: list[tuple[Any, ...]] = []
         # 累积状态
-        self._team_stats: dict[str, dict] = {}
+        self._team_stats: dict[str, dict[str, Any]] = {}
         self._ratings: dict[str, float] = {}
         self._games: dict[str, int] = {}
         self._seen = 0
@@ -352,7 +353,7 @@ class WalkForwardBacktester:
         """返回 ((主胜, 平, 客胜), λ主, λ客)。λ 供 Dixon-Coles 的 ρ 拟合使用。"""
         rows = [_standings_row_from_history(s, self.use_sot)
                 for s in self._team_stats.values()]
-        kwargs = {} if self.prior_games is None else {"prior_games": self.prior_games}
+        kwargs: dict[str, Any] = {} if self.prior_games is None else {"prior_games": self.prior_games}
         if self.use_dsa:
             match_logs = {}
             for s in self._team_stats.values():
@@ -431,7 +432,7 @@ class WalkForwardBacktester:
             return team_id
 
     # ---- 主流程 -------------------------------------------------------------
-    def run(self, matches: list[dict]) -> BacktestReport:
+    def run(self, matches: list[dict[str, Any]]) -> BacktestReport:
         """matches 需按时间正序，元素含 home_team_id/away_team_id/home_score/away_score。"""
         label = "poisson"
         if self.use_dc:
@@ -478,7 +479,7 @@ class WalkForwardBacktester:
                     ):
                         self.temperature = fit_temperature(self._calib_observations)
                         self._temp_fitted = True
-                    probs = self._predict(hid, aid)
+                    probs: Sequence[float] = self._predict(hid, aid)
                     if self.use_calib and self.temperature != 1.0:
                         probs = apply_temperature(probs, self.temperature)
                     if self.use_market:
@@ -535,7 +536,7 @@ class WalkForwardBacktester:
 # ============================================================================
 
 def compare(baseline: BacktestReport, challenger: BacktestReport,
-            *, min_delta: float = 0.001) -> dict:
+            *, min_delta: float = 0.001) -> dict[str, Any]:
     """把挑战者（challenger）与基线（baseline）对比，给出可操作结论。
 
     主判据是对数损失与 RPS（越低越好），准确率只作参考。
@@ -569,7 +570,7 @@ def compare(baseline: BacktestReport, challenger: BacktestReport,
     }
 
 
-def level_monotonic(report: BacktestReport) -> dict:
+def level_monotonic(report: BacktestReport) -> dict[str, Any]:
     """检验信心等级是否单调：高信心命中率应 ≥ 中 ≥ 低。
 
     若不成立，说明信心分级是失效的装饰品。
@@ -586,8 +587,8 @@ def level_monotonic(report: BacktestReport) -> dict:
     return {"rates": rates, "ordered": ordered, "monotonic": monotonic}
 
 
-def run_backtest(matches: list[dict], *, min_history: int = DEFAULT_MIN_HISTORY,
-                 variant: str = "poisson") -> dict:
+def run_backtest(matches: list[dict[str, Any]], *, min_history: int = DEFAULT_MIN_HISTORY,
+                 variant: str = "poisson") -> dict[str, Any]:
     """一键跑双路回测：纯泊松（基线） vs 指定变体（挑战者）。
 
     variant:

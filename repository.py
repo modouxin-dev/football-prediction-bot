@@ -12,6 +12,7 @@
 - 统计命中率、连胜、各信心等级命中率
 """
 from __future__ import annotations
+from typing import Any
 
 import json
 import logging
@@ -239,7 +240,7 @@ def _quota_day() -> str:
         tz = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Shanghai"))
     except Exception:  # 容器缺 tzdata 时退化为固定 +8，不影响计数可用性
         from datetime import timedelta
-        tz = timezone(timedelta(hours=8))
+        tz: ZoneInfo | timezone = timezone(timedelta(hours=8))
     return datetime.now(tz).strftime("%Y-%m-%d")
 
 
@@ -680,7 +681,7 @@ class PredictionRepository:
             return []
 
     # ---- 统计 ---------------------------------------------------------------
-    def settled_samples(self, limit: int = 2000) -> list[tuple]:
+    def settled_samples(self, limit: int = 2000) -> list[tuple[Any, ...]]:
         """已结算且三项概率齐全的样本，供温度校准拟合。
 
         返回 [(probs, actual_index), ...]，actual_index 为 0/1/2（主胜/平局/客胜）。
@@ -698,7 +699,7 @@ class PredictionRepository:
         except Exception as exc:
             log.warning("读取已结算样本失败：%s", exc)
             return []
-        out: list[tuple] = []
+        out: list[tuple[Any, ...]] = []
         for r in rows:
             try:
                 probs = [float(r["home_prob"]), float(r["draw_prob"]), float(r["away_prob"])]
@@ -712,7 +713,7 @@ class PredictionRepository:
 
     # ---- 回测留档 ----------------------------------------------------------
     def save_backtest_run(self, *, competition: str, variant: str,
-                          min_history: int, result: dict,
+                          min_history: int, result: dict[str, Any],
                           season: int | None = None) -> int | None:
         """把一次回测的结论落盘。返回新记录 id，失败返回 None。
 
@@ -751,7 +752,7 @@ class PredictionRepository:
             return None
 
     def latest_backtest(self, competition: str,
-                        variant: str | None = None) -> dict | None:
+                        variant: str | None = None) -> dict[str, Any] | None:
         """取最近一次回测结论。没有就返回 None（调用方自行判断）。"""
         import json
 
@@ -779,7 +780,7 @@ class PredictionRepository:
                 d[k] = {}
         return d
 
-    def backtest_history(self, competition: str, limit: int = 20) -> list[dict]:
+    def backtest_history(self, competition: str, limit: int = 20) -> list[dict[str, Any]]:
         """历史回测记录（新→旧），用于观察指标随时间的变化。"""
         try:
             conn = self._connect()
@@ -793,7 +794,7 @@ class PredictionRepository:
             return []
         return [dict(r) for r in rows]
 
-    def stats(self) -> dict:
+    def stats(self) -> dict[str, Any]:
         """命中率统计：总命中、连胜/连败、各信心等级命中率。"""
         try:
             conn = self._connect()
@@ -814,7 +815,7 @@ class PredictionRepository:
         scored = 0
         brier_sum = 0.0
         logloss_sum = 0.0
-        by_level: dict[str, dict] = {}
+        by_level: dict[str, dict[str, Any]] = {}
         for r in rows:
             actual = _outcome(r["actual_home"], r["actual_away"])
             if actual is None:
@@ -897,7 +898,7 @@ class PredictionRepository:
 
 
     # ---- 比赛本地缓存（外部 API 拉取，SQLite 保存） ---------------------------
-    def save_matches(self, competition: str, matches: list[dict],
+    def save_matches(self, competition: str, matches: list[dict[str, Any]],
                      source: str = "football-data.org",
                      http_status: str = "200", message: str = "") -> int:
         """把外部 API 拉到的比赛写入本地库，返回实际写入条数。
@@ -963,7 +964,7 @@ class PredictionRepository:
         self.log_sync(source, competition, "", "", http_status, len(matches), saved, message)
         return saved
 
-    def latest_finished(self, competition: str = "", limit: int = 1) -> list[dict]:
+    def latest_finished(self, competition: str = "", limit: int = 1) -> list[dict[str, Any]]:
         """最近已完场的比赛（有比分），按开赛时间倒序。"""
         try:
             conn = self._connect()
@@ -988,7 +989,7 @@ class PredictionRepository:
             return []
         return [dict(r) for r in rows]
 
-    def finished_without_stats(self, competition: str = "", limit: int = 50) -> list[dict]:
+    def finished_without_stats(self, competition: str = "", limit: int = 50) -> list[dict[str, Any]]:
         """已完场但还没抓过技术统计的比赛。
 
         stats_fetched 标记「已经探测过」：探测成功与否都置 1，
@@ -1001,7 +1002,7 @@ class PredictionRepository:
                 "WHERE home_score IS NOT NULL "
                 "AND (stats_fetched IS NULL OR stats_fetched=0) "
             )
-            params: list = []
+            params: list[Any] = []
             if competition:
                 sql += "AND competition_code=? "
                 params.append(competition)
@@ -1055,7 +1056,7 @@ class PredictionRepository:
             return 0
 
     def load_matches(self, competition: str, date_from: str, date_to: str,
-                     *, limit: int = 500) -> list[dict]:
+                     *, limit: int = 500) -> list[dict[str, Any]]:
         """从本地库读取指定日期范围内的比赛（不再回源）。
 
         返回的是保存时的原始 fixture 结构，可直接喂给预测/展示模块。
@@ -1079,7 +1080,7 @@ class PredictionRepository:
                 continue
         return out
 
-    def matches_with_predictions(self, day: str, *, limit: int = 300) -> list[dict]:
+    def matches_with_predictions(self, day: str, *, limit: int = 300) -> list[dict[str, Any]]:
         """指定日期（YYYY-MM-DD）的全部比赛，左连已生成的预测。
 
         为什么连表而不是让上层自己拼：predictions 的键是 API fixture_id 的
@@ -1109,7 +1110,7 @@ class PredictionRepository:
         except Exception as exc:
             log.warning("读取当日赛程失败：%s", exc)
             return []
-        out: list[dict] = []
+        out: list[dict[str, Any]] = []
         for r in rows:
             if r["pred_result"] is None:
                 pred = None
@@ -1195,7 +1196,7 @@ def _as_int(value) -> int | None:
         return None
 
 
-def _extract_match(m: dict) -> dict:
+def _extract_match(m: dict[str, Any]) -> dict:
     """把两种数据源的赛程结构归一化成同一组字段。
 
     API-Football（主源）是嵌套结构：fixture / teams / goals / league。

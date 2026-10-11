@@ -5,6 +5,7 @@
 - 推送消息下方的按钮（预测 / 深度分析 / 历史交锋 / 赔率对比 / 刷新）在原消息上就地切换
 """
 from __future__ import annotations
+from typing import Any
 import asyncio
 
 import logging
@@ -64,7 +65,7 @@ from service import (
 try:  # 图表依赖缺失时机器人仍要能正常跑，只是不出图
     import chart
 except ImportError:  # pragma: no cover
-    chart = None
+    chart = None  # type: ignore[assignment]  # 图表依赖缺失时的降级
 
 log = logging.getLogger("bot")
 ui = BotUI()
@@ -290,7 +291,7 @@ def settings_timezone_of(service):
     return service.settings.timezone
 
 
-async def _build_digest_predictions(service) -> tuple[list, str | None]:
+async def _build_digest_predictions(service) -> tuple[list[Any], str | None]:
     """取今日预测；无比赛时放宽到 WIDE_HOURS，并返回说明文案。
 
     抽出是因为「按钮回调」和「底部键盘文字」两个入口都要用同一套取数逻辑，
@@ -639,7 +640,7 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 _UNKNOWN_CMD_HINT_LIMIT = 8
 
 
-def _unknown_command_text(name: str, commands: list, is_admin_user: bool) -> str:
+def _unknown_command_text(name: str, commands: list[Any], is_admin_user: bool) -> str:
     """拼「未识别命令」的回复文案。"""
     lines = [f"❓ <b>未识别的命令</b> /{esc(name)}"]
     if commands:
@@ -879,7 +880,7 @@ async def on_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await reply_html(update.effective_message, ui.format_coming(key), None)
 
 
-def render_view(action: str, p: Prediction, settings: Settings, h2h: list[dict] | None = None) -> str:
+def render_view(action: str, p: Prediction, settings: Settings, h2h: list[dict[str, Any]] | None = None) -> str:
     tz = settings.timezone
     if action == "deep":
         return ui.format_deep_analysis(p, tz)
@@ -962,6 +963,7 @@ async def post_init(app: Application) -> None:
     else:
         log.info("备用数据源 football-data.org 未配置或未启用，仅使用主数据源")
     # 免费层额度（100 次/天）在备用源侧没有查询端点，改为本地记录实际请求次数。
+    api_router: FootballAPI | DataSourceRouter  # 两种构造都会赋给 api
     try:
         from repository import bump_quota as _bump_quota
         api = DataSourceRouter(api, fallback, mode=settings.data_source_mode,

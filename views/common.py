@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from analyzer import OUTCOMES, calculate_prediction_level, overround
 from service import MODEL_VERSION, parse_kickoff
@@ -52,7 +52,8 @@ class CommonView:
         @staticmethod
         def tz_label(tz, when: datetime | None = None) -> str:
             when = (when or datetime.now(tz)).astimezone(tz)
-            hours = when.utcoffset().total_seconds() / 3600
+            offset = when.utcoffset() or timedelta(0)  # aware 时间必有 offset，兜底仅为类型收窄
+            hours = offset.total_seconds() / 3600
             return f"UTC{hours:+g}"
     
         @staticmethod

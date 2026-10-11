@@ -12,6 +12,10 @@
 """
 
 from __future__ import annotations
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # 仅类型检查时导入，避免与 repository 形成运行时循环依赖
+    from repository import PredictionRepository
 
 import logging
 from dataclasses import dataclass, field
@@ -129,7 +133,7 @@ class EloEngine:
     用 `<=` 比较会静默跳过有效比赛。
     """
 
-    repo: object
+    repo: "PredictionRepository"
     competition: str = ""
     home_advantage: float = HOME_ADVANTAGE
     base_rating: float = DEFAULT_RATING
@@ -149,7 +153,7 @@ class EloEngine:
     # ---- 单场更新 -----------------------------------------------------------
     def apply_match(self, fixture_id, home_team_id, away_team_id,
                     home_score: int, away_score: int, *, season: int | None = None,
-                    dry_run: bool = False) -> dict:
+                    dry_run: bool = False) -> dict[str, Any]:
         """把一场已结束的比赛计入 Elo。
 
         返回本次变更明细；若该场已处理过则返回 {'applied': False}。
@@ -252,7 +256,7 @@ class EloEngine:
             return 0  # 取不到就当新队，用大 K 快速收敛
 
     # ---- 批量回算（冷启动 / 迁移） ------------------------------------------
-    def replay(self, matches: list[dict]) -> int:
+    def replay(self, matches: list[dict[str, Any]]) -> int:
         """按顺序重放一批历史赛果，让模型上线第一秒就有「经验值」。
 
         matches 元素需含 fixture_id / home_team_id / away_team_id /
