@@ -33,7 +33,6 @@ def test_brand_name_lives_in_banner_not_text():
         import chart
     except ImportError:
         pytest.skip("matplotlib 未安装（可选依赖）")
-    import inspect
 
     # 品牌名由常量定义，头图与文案共用同一处，不会各写一份
     assert chart.BRAND_EN == "FOOTBALL INSIGHT"

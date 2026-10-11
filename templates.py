@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 
-
 SEP = "━━━━━━━━━━━━━━━━━━"
 
 THIN_SEP = "──────────────────"  # 次级分隔：用于分区内部，避免主分隔线过度重复

@@ -18,7 +18,6 @@ from api_client import parse_shots_on_target, stat_types_of
 from repository import BRIER_RANDOM, quota_today
 from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
-from migrate_elo import fetch_finished
 from tghtml import normalize
 from telegram.constants import ChatAction
 

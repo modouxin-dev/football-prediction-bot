@@ -10,13 +10,15 @@ log = logging.getLogger(__name__)
 # Render Persistent Disk 默认挂载点
 _DEFAULT_DATA_DIR = Path("/data")
 
+
 def _resolve(env_key, default, fallback_root):
     raw = (os.getenv(env_key) or "").strip()
     path = Path(raw) if raw else default
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".write_test"
-        probe.touch(); probe.unlink()
+        probe.touch()
+        probe.unlink()
         return path
     except Exception as exc:
         fb = fallback_root / path.name
@@ -26,6 +28,7 @@ def _resolve(env_key, default, fallback_root):
         except Exception:
             fb = Path(tempfile.gettempdir()) / path.name
         return fb
+
 
 # 核心路径定义
 DATA_DIR = _resolve("DATA_DIR", _DEFAULT_DATA_DIR, Path("/tmp"))

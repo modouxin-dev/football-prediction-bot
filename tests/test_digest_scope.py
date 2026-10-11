@@ -123,7 +123,6 @@ def test_truncation_is_visible_when_explicit_limit_given():
 def test_pre_match_statuses_include_tbd():
     """TBD（时间待定）也是未开赛，只认 NS 会漏掉这类比赛。"""
     now = datetime.now(timezone.utc)
-    svc = PredictionService(settings_of(), RecordingAPI())
     items = [
         (now + timedelta(hours=2), fx(1, 39, 1, 2, now + timedelta(hours=2), status="TBD")),
     ]
@@ -135,7 +134,6 @@ def test_pre_match_statuses_include_tbd():
 
 def test_finished_matches_never_enter_predictions():
     now = datetime.now(timezone.utc)
-    svc = PredictionService(settings_of(), RecordingAPI())
     items = [fx(1, 39, 1, 2, now - timedelta(hours=1), status="FT")]
     kept = PredictionService._upcoming(items, now, now + timedelta(hours=48))
     assert kept == [], "已完场的比赛不能进预测候选"
@@ -163,10 +161,11 @@ def test_predictions_for_day_matches_fixtures_page_scope():
     于是汇总标题跳到下一天——这正是用户实测到的现象。
     """
     import pytz
-    from datetime import date as _date, time as _time
+    from datetime import date as _date
 
     tz = pytz.timezone("Asia/Shanghai")
     # 构造本地 10-04 的三场比赛：00:30（UTC 10-03 16:30）、21:45、23:30
+
     def local(day, h, m):
         return tz.localize(datetime(2026, 10, day, h, m)).astimezone(timezone.utc)
 

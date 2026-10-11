@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from datetime import datetime, timezone
 
 import pytest
 
@@ -189,7 +188,7 @@ def test_prediction_contains_disclaimer(ui, base):
 
 
 def test_prediction_has_no_guaranteed_win_wording(ui, base):
-    from templates import DISCLAIMER
+    pass
 
     text = ui.format_prediction(base, SETTINGS.timezone)
     for bad in ("必胜", "稳赢", "100%准确", "确定中奖"):

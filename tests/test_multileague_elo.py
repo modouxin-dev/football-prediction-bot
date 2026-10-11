@@ -3,12 +3,10 @@
 核心保证（防串味）：
     西甲的赛果不能改变英超球队的评分，否则 Elo 修正 λ 时会用到错误强度。
 """
-import asyncio
 
-from config import load_settings
 from service import PredictionService
 
-from tests.test_multileague_model import RecordingAPI, fx, run, settings_of
+from tests.test_multileague_model import RecordingAPI, fx, settings_of
 
 
 def test_elo_engine_is_per_league():

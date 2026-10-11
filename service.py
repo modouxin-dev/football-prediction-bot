@@ -691,7 +691,8 @@ class PredictionService:
             merged.extend(fixtures)
         if not merged and first_error is not None:
             raise first_error
-        merged.sort(key=lambda fx: parse_kickoff((fx.get("fixture") or {}).get("date")) or datetime.min.replace(tzinfo=timezone.utc))
+        merged.sort(key=lambda fx: parse_kickoff((fx.get("fixture") or {}).get("date"))
+                    or datetime.min.replace(tzinfo=timezone.utc))
         return merged, self.season_in_use, (notes[0] if notes else None)
 
     def _season_range(self) -> tuple[Any, ...] | None:

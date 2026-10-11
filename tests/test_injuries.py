@@ -1,6 +1,5 @@
 """伤停接入测试：分组整理 + 缺失降级 + 视图渲染（不联网）。"""
 import asyncio
-from datetime import datetime, timedelta, timezone
 
 from service import injuries_stats
 from views.analysis import _injuries_body

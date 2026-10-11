@@ -64,9 +64,15 @@ from views.prediction import PredictionView
 from views.standings import StandingsView
 
 __all__ = [
-    "BotUI", "MENU_ITEMS", "WEB_ENTRY_TEXT", "esc", "league_label",
-    "split_html_blocks", "team_name", "web_entry_text", "bar",
+    "BotUI", "MENU_ITEMS", "esc", "league_label", "split_html_blocks", "team_name", "web_entry_text",
+    "bar", "NO_DATA", "_WEB_ENTRY_TEXT", "_factors", "_form_line", "_is_fallback",
+    "_num", "_row_line", "_row_summary", "build_prediction_payload", "Keyboards",
+    "BRAND_CN", "BRAND_EN", "DISCLAIMER", "LEAGUE_NAMES", "OUTCOME_LABEL", "SEP",
+    "STATUS_TEXT", "TABS", "TEAM_NAMES", "THIN_SEP", "VALUE_HIGH", "VALUE_LOW",
+    "AnalysisView", "CommonView", "FixturesView", "MenuView", "PredictionView",
+    "StandingsView",
 ]
+
 
 class BotUI(
     Keyboards,          # 按钮键盘
@@ -85,5 +91,6 @@ class BotUI(
 
     # 未配置 WEB_URL 时的兜底文案（保留类属性以兼容既有引用）
     WEB_ENTRY_TEXT = _WEB_ENTRY_TEXT
+
 
 WEB_ENTRY_TEXT = BotUI.WEB_ENTRY_TEXT

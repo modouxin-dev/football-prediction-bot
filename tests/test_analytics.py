@@ -13,7 +13,7 @@ import analytics
 from repository import PredictionRepository
 
 # 与 backtest.py 同一套判据，避免分析层自造一套
-from backtest import log_loss, outcome_index, rps
+from backtest import log_loss, outcome_index
 
 
 @pytest.fixture()
@@ -28,8 +28,8 @@ def _seed(db, n_matches=0, n_predictions=0, seed=1):
     repo = PredictionRepository(db)
     conn = repo._connect()
 
-    def pois(l):
-        limit, k, p = math.exp(-l), 0, 1.0
+    def pois(lam):
+        limit, k, p = math.exp(-lam), 0, 1.0
         while True:
             p *= random.random()
             if p <= limit:

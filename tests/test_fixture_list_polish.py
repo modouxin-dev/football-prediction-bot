@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-import pytest
 
 from bot_handler import BotUI
 from config import load_settings

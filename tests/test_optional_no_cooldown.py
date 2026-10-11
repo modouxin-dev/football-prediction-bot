@@ -13,11 +13,9 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 
-import httpx
 
 from api_client import APIError
 from data_source import OPTIONAL_METHODS, DataSourceRouter
-from football_data import FootballDataAPI
 
 FAKE_TOKEN = "fd-secret-token-should-never-leak"
 DAY = date(2026, 9, 25)

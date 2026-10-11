@@ -104,7 +104,8 @@ def test_network_errors_are_retried_and_reported_without_leaking_details():
 
 
 def test_per_minute_rate_limit_in_errors_field_is_retried():
-    payloads = iter([{"errors": {"rateLimit": "Too many requests"}, "response": []}, {"errors": [], "response": ["ok"]}])
+    payloads = iter([{"errors": {"rateLimit": "Too many requests"},
+                    "response": []}, {"errors": [], "response": ["ok"]}])
 
     def handler(request):
         return httpx.Response(200, json=next(payloads))

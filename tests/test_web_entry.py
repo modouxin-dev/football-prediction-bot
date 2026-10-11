@@ -3,7 +3,6 @@
 /web 必须给出**能打开的真实地址**；未部署时宁可明说，
 也不给一条点开是 404 的链接。
 """
-import pytest
 
 from bot_handler import BotUI, web_entry_text
 

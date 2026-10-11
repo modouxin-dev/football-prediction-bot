@@ -7,7 +7,6 @@
 """
 import asyncio
 
-import pytest
 
 from commands.admin import _account_status_preferring_primary
 

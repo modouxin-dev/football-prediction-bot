@@ -53,7 +53,8 @@ def test_stale_season_variable_falls_back_to_the_current_season():
 
 
 def test_predictions_use_real_team_strength():
-    preds = build(FakeAPI({2026: [fixture(1, 1, "Alpha FC", 4, "Delta", NOW + timedelta(hours=2)), fixture(2, 4, "Delta", 1, "Alpha FC", NOW + timedelta(hours=3))]}))[2]
+    preds = build(FakeAPI({2026: [fixture(1, 1, "Alpha FC", 4, "Delta", NOW + timedelta(hours=2)),
+                  fixture(2, 4, "Delta", 1, "Alpha FC", NOW + timedelta(hours=3))]}))[2]
     strong_home, weak_home = preds
     # 展示概率已换成市场口径（见 apply_market_adjustment），不再直接反映球队强度；
     # 「模型确实用了真实球队强度」这一性质由 poisson_probs（内部基准）继续守。

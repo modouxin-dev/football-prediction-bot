@@ -6,51 +6,27 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-# 日期导航条显示的天数：4 天是手机上不换行的上限，再多只能滚动。
-DAY_NAV_SPAN = 4
 
-from analyzer import OUTCOMES, calculate_prediction_level, overround
-from service import MODEL_VERSION, parse_kickoff
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from service import parse_kickoff
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from templates import (
-    BRAND_CN,
     LEAGUE_FLAGS,
     LEAGUE_NAMES,
     LEAGUE_ORDER,
     LEAGUE_SHORT,
-    BRAND_EN,
-    BULLET,
-    DISCLAIMER,
-    MENU_ITEMS,
-    NO_DATA,
-    OUTCOME_LABEL,
     SEP,
     STATUS_TEXT,
-    TABS,
     THIN_SEP,
-    VALUE_HIGH,
-    VALUE_LOW,
 )
 from formatkit import (
-    _factors,
-    _form_line,
-    _is_fallback,
-    _is_fallback_source,
-    _num,
-    _row_line,
-    _row_summary,
     align_cjk,
     display_width,
-    BLANK,
-    bar,
     esc,
-    hbar,
-    league_label,
-    status_emoji,
-    team_name,
     team_short_name,
-    web_entry_text,
 )
+
+# 日期导航条显示的天数：4 天是手机上不换行的上限，再多只能滚动。
+DAY_NAV_SPAN = 4
 
 WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
 
@@ -238,8 +214,8 @@ class FixturesView:
                                                     _league_sort_key(_league_of(f))))
             total_pages = max(1, -(-len(items) // per_page))
             page = min(max(page, 0), total_pages - 1)
-            chunk = items[page * per_page : (page + 1) * per_page]
-    
+            chunk = items[page * per_page:(page + 1) * per_page]
+
             if league_filter is not None:
                 lname = (LEAGUE_SHORT.get(league_filter)
                          or LEAGUE_NAMES.get(league_filter) or f"联赛 {league_filter}")

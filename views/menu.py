@@ -5,48 +5,26 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 
-from analyzer import OUTCOMES, calculate_prediction_level, overround
-from service import MODEL_VERSION, parse_kickoff
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from views.common import CommonView
 from templates import (
     BRAND_CN,
     BRAND_EN,
-    BULLET,
     DISCLAIMER,
     MENU_ITEMS,
-    NO_DATA,
-    OUTCOME_LABEL,
     SEP,
-    STATUS_TEXT,
-    TABS,
     THIN_SEP,
-    VALUE_HIGH,
-    VALUE_LOW,
 )
 from formatkit import (
     BLANK,
-    _factors,
-    _form_line,
-    _is_fallback,
-    _is_fallback_source,
-    _num,
-    _row_line,
-    _row_summary,
-    bar,
-    display_width,
     esc,
     kv_line,
-    league_label,
     leagues_label,
     pad_cjk,
     section,
     section_join,
-    team_name,
-    web_entry_text,
 )
+
 
 class MenuView:
         @staticmethod
@@ -81,7 +59,7 @@ class MenuView:
                 f"⏰ 每日 <code>{settings.push_time:%H:%M}</code>（{esc(CommonView.tz_label(settings.timezone))}）自动推送\n"
                 "💡 点击下方菜单，或发送 /menu 开始"
             )
-    
+
         @staticmethod
         def format_menu(settings) -> str:
             return (
@@ -99,7 +77,7 @@ class MenuView:
                 "\n"
                 "📌 <b>请选择功能</b>"
             )
-    
+
         @staticmethod
         def format_help() -> str:
             # 功能与命令各成一节。命令名放进等宽块并按最长命令补位：
@@ -137,7 +115,7 @@ class MenuView:
             lines = section_join(blocks).split("\n")
             lines += [SEP, BLANK, DISCLAIMER]
             return "\n".join(lines)
-    
+
         @staticmethod
         def format_coming(key: str) -> str:
             label = dict(MENU_ITEMS).get(key, key)
@@ -150,7 +128,7 @@ class MenuView:
                 f"{SEP}\n"
                 "📌 可先使用其他功能，或发送 /help 查看完整说明。"
             )
-    
+
         @staticmethod
         def error_hint(exc) -> str:
             """把 APIError 翻译成人话，区分 Key / 套餐 / 限流 / 赛季 / 网络等原因。"""

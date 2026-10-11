@@ -14,7 +14,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from templates import DISCLAIMER, LEAGUE_NAMES
 from views.digest import DigestView, _league_id_of, _league_sort_key

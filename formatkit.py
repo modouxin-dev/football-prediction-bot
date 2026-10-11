@@ -12,20 +12,14 @@ import unicodedata
 from datetime import datetime
 
 import tghtml
-from analyzer import OUTCOMES, calculate_prediction_level, overround
-from service import MODEL_VERSION, parse_kickoff
+from analyzer import calculate_prediction_level
 from templates import (
-    BRAND_EN,
     TEAM_NAMES,
-    DISCLAIMER,
     LEAGUE_NAMES,
-    MENU_ITEMS,
     NO_DATA as NO_DATA,
     SEP as SEP,
-    STATUS_TEXT,
-    TABS,
-    THIN_SEP,
 )
+
 
 def team_name(raw: str | None, bilingual: bool = True) -> str:
     """队名展示 / Display team name.
@@ -48,13 +42,14 @@ def team_name(raw: str | None, bilingual: bool = True) -> str:
         return raw
     return f"{cn} ({raw})"
 
+
 # —— 队名归一化索引 ——
 # API-Football 对同一支队的写法并不唯一（"Fenerbahçe SK" / "Fenerbahce"、
 # "1. FC Köln" / "FC Koln"），精确匹配会漏。这里在导入期建一张归一化索引：
 # 去掉重音、标点、常见俱乐部词缀后做匹配。归一化只用于**找已收录的队**，
 # 找不到仍返回英文原名，绝不按发音或子串臆造中文名。
-import re as _re
-import unicodedata as _ud
+import re as _re  # noqa: E402
+import unicodedata as _ud  # noqa: E402
 
 # 俱乐部通用词缀：剥离后 "Liverpool FC" 与 "Liverpool" 归一到同一个键
 _CLUB_TOKENS = frozenset(
@@ -324,6 +319,7 @@ def leagues_label(league_ids) -> str:
         return "未配置"
     return " / ".join(league_label(i) for i in ids)
 
+
 def fmt_time(dt: datetime, tz, pattern: str = "%m-%d %H:%M") -> str:
     """时区格式化。
 
@@ -333,8 +329,10 @@ def fmt_time(dt: datetime, tz, pattern: str = "%m-%d %H:%M") -> str:
     """
     return dt.astimezone(tz).strftime(pattern)
 
+
 def esc(value) -> str:
     return html.escape(str(value), quote=False)
+
 
 def bar(prob: float, width: int = 10) -> str:
     """概率条：▰▰▰▰▱▱▱▱▱▱"""
@@ -469,6 +467,7 @@ def status_emoji(short: str) -> str:
     """比赛状态短码 → 图标；未收录返回 ⚪。"""
     return STATUS_EMOJI.get(str(short or "").upper(), "⚪")
 
+
 def split_html_blocks(text: str, limit: int = 3500) -> list[str]:
     """按行拆分超长 HTML 文本，避免超过 Telegram 单条 4096 字符限制。
 
@@ -478,19 +477,23 @@ def split_html_blocks(text: str, limit: int = 3500) -> list[str]:
     """
     return tghtml.split_message(text, limit)
 
+
 def _is_fallback(p) -> bool:
     """预测结果是否来自备用数据源 football-data.org。"""
     return "football-data" in str(getattr(p, "source", "")).lower()
 
+
 def _is_fallback_source(report: dict[str, Any]) -> bool:
     """深度分析报告是否基于备用数据源。"""
     return "football-data" in str(report.get("source", "")).lower()
+
 
 def _num(value) -> float:
     try:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
 
 def _row_summary(row: dict[str, Any] | None) -> dict | None:
     """积分榜一行 → 排名 / 积分 / 胜平负 / 场均进失球。缺字段时相应项为 None。"""
@@ -518,8 +521,10 @@ def _row_summary(row: dict[str, Any] | None) -> dict | None:
         "avg_against": ga / played if played else None,
     }
 
+
 def _form_mark(result: str) -> str:
     return {"win": "🟢", "draw": "🟡", "lose": "🔴"}.get(result, "⚪")
+
 
 def _form_line(form: dict[str, Any]) -> str:
     """近期战绩一行摘要（没有足够样本时明确说没有数据）。"""
@@ -529,6 +534,7 @@ def _form_line(form: dict[str, Any]) -> str:
     avg_against = f"{form['avg_against']:.1f}" if form["avg_against"] is not None else "-"
     marks = " ".join(_form_mark(m["result"]) + m["score"] for m in form["matches"][:5])
     return f"{form['win']}胜 {form['draw']}平 {form['lose']}负 · 进 {form['goals_for']} / 失 {form['goals_against']} · 场均 {avg_for} / {avg_against}\n   {marks}"
+
 
 def _row_line(row: dict[str, Any] | None) -> str:
     if not row:
@@ -544,6 +550,7 @@ def _row_line(row: dict[str, Any] | None) -> str:
         f"{rank} · {points} · {summary['win']}胜{summary['draw']}平{summary['lose']}负"
         f" · 场均进 {avg_for} / 失 {avg_against}"
     )
+
 
 def _factors(report: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     """从数据推导有利 / 不利 / 不确定因素。没有数据就不编，直接归入不确定。"""
@@ -591,6 +598,7 @@ def _factors(report: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     unknowns.append("数据源未提供伤停信息（当前套餐不支持）")
     return pros, cons, unknowns
 
+
 def build_prediction_payload(p, tz) -> dict[str, Any]:
     """统一预测结果数据结构（供格式化与未来的网页端复用）。"""
     a = p.analysis
@@ -615,6 +623,7 @@ def build_prediction_payload(p, tz) -> dict[str, Any]:
     )
     return probabilities
 
+
 _WEB_ENTRY_TEXT = (
     "🌐 <b>网页端</b>\n\n"
     "网页查询界面正在规划中，当前阶段以 Telegram 机器人的数据稳定性为主。\n\n"
@@ -624,6 +633,7 @@ _WEB_ENTRY_TEXT = (
     "· 多联赛切换\n\n"
     "目前请继续使用下方菜单功能。"
 )
+
 
 def web_entry_text(web_url: str = "") -> str:
     """网页端入口文案。

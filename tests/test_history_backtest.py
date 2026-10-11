@@ -233,7 +233,6 @@ def test_save_backtest_run_survives_bad_result(tmp_path):
 @pytest.mark.asyncio
 async def test_end_to_end_history_then_backtest(tmp_path):
     """入库 → 回测 → 落盘，整条链路跑通，且语料来源正确记录。"""
-    import os
 
     from backtester_fixed import BacktesterFixed
 

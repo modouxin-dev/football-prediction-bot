@@ -13,7 +13,8 @@ from config import load_settings
 from service import PredictionService, form_stats, h2h_stats
 from tests.sample_data import FakeAPI, fixture, standings_response
 
-ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k", "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
+ENV = {"TELEGRAM_TOKEN": "123456:TEST-TOKEN", "RAPID_API_KEY": "k",
+    "CHAT_ID": "555", "SEASON": "2026", "ADMIN_ID": "555"}
 SETTINGS = load_settings(ENV)
 
 
@@ -44,15 +45,15 @@ def finished_match(team_id, opponent_id, our, their, is_home=True, days_ago=3):
 
 def standings_with_points():
     """带 points / all 字段的积分榜（更接近真实 API 结构）。"""
-    def row(team_id, rank, points, w, d, l, gf, ga):
+    def row(team_id, rank, points, w, d, losses, gf, ga):
         return {
             "rank": rank,
             "team": {"id": team_id, "name": f"T{team_id}"},
             "points": points,
             "goalsDiff": gf - ga,
-            "all": {"played": w + d + l, "win": w, "draw": d, "lose": l, "goals": {"for": gf, "against": ga}},
+            "all": {"played": w + d + losses, "win": w, "draw": d, "lose": losses, "goals": {"for": gf, "against": ga}},
             "home": {"played": w, "win": w, "draw": 0, "lose": 0, "goals": {"for": gf // 2, "against": ga // 2}},
-            "away": {"played": d + l, "win": 0, "draw": d, "lose": l, "goals": {"for": gf // 2, "against": ga // 2}},
+            "away": {"played": d + losses, "win": 0, "draw": d, "lose": losses, "goals": {"for": gf // 2, "against": ga // 2}},
         }
     return [row(1, 1, 18, 6, 0, 1, 16, 5), row(2, 4, 11, 3, 2, 2, 10, 9)]
 

@@ -35,9 +35,9 @@ except ImportError as exc:  # pragma: no cover - 未装可选依赖时给出明�
         "缺少 Web 依赖。请先执行：pip install -r requirements-web.txt"
     ) from exc
 
-import analytics
-import paths
-from repository import PredictionRepository
+import analytics  # noqa: E402
+import paths  # noqa: E402
+from repository import PredictionRepository  # noqa: E402
 
 # 默认日期必须按项目时区（默认 Asia/Shanghai）算，不能用 UTC。
 # 反例：上海 10-05 07:00，UTC 仍是 10-04 23:00 —— 用 UTC 取「今天」
@@ -54,10 +54,11 @@ def _today() -> str:
     except Exception:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+
 # templates 是零依赖模块（只放静态文案与联赛名表），可以安全地在顶层引入。
 # 刻意**不在顶层** import formatkit：它依赖 service，实测导入耗时 1192ms，
 # 会直接压垮首请求。改为在 lifespan 预热时绑定一次（见 _team_cn）。
-from templates import LEAGUE_NAMES
+from templates import LEAGUE_NAMES  # noqa: E402
 
 # 联赛 ID → 竞赛代码（用于给统计端点一个「当前联赛」默认值）。
 # 单独 try 包一层：football_data 依赖 httpx，若将来被拆成可选依赖，
@@ -80,6 +81,7 @@ def _default_competition() -> str:
     except ValueError:
         return ""
     return LEAGUE_ID_TO_CODE.get(league_id, "")
+
 
 # 指令清单在启动时构建一次并缓存。
 # 实测：若在每个请求里现算，首次调用要导入 commands → bot_handler → chart →

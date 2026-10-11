@@ -48,7 +48,8 @@ def test_league_model_uses_real_averages_and_ranks_teams():
 
 
 def test_strengths_are_shrunk_toward_one_when_no_games_played():
-    rows = [{"team": {"id": 9}, "home": {"played": 0, "goals": {"for": 0, "against": 0}}, "away": {"played": 0, "goals": {"for": 0, "against": 0}}}]
+    rows = [{"team": {"id": 9}, "home": {"played": 0, "goals": {"for": 0, "against": 0}},
+        "away": {"played": 0, "goals": {"for": 0, "against": 0}}}]
     s = build_league_model(rows).strength(9)
     assert (s.attack_home, s.defense_home, s.attack_away, s.defense_away) == pytest.approx((1, 1, 1, 1))
 
@@ -82,7 +83,8 @@ def test_collect_odds_picks_match_winner_bet_not_first_bet():
 
 def test_collect_odds_skips_incomplete_or_invalid_rows():
     response = odds_response([("Bet A", 1.80, 3.60, 4.50)])
-    response[0]["bookmakers"].append({"name": "Broken", "bets": [{"id": 1, "values": [{"value": "Home", "odd": "abc"}]}]})
+    response[0]["bookmakers"].append(
+        {"name": "Broken", "bets": [{"id": 1, "values": [{"value": "Home", "odd": "abc"}]}]})
     assert len(collect_1x2_odds(response)) == 1
     assert collect_1x2_odds(None) == [] and collect_1x2_odds([]) == []
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from api_client import APIError, flatten_standings
+from api_client import flatten_standings
 
 NOW = datetime(2026, 9, 24, 4, 0, tzinfo=timezone.utc)  # 固定“当前时间”，让测试可重复
 
@@ -82,7 +82,8 @@ class FakeAPI:
 
     def __init__(self, fixtures_by_season, odds=None, h2h=None, odds_error=None, h2h_error=None, form=None):
         self.fixtures_by_season = fixtures_by_season
-        self.odds = odds if odds is not None else odds_response([("Bet A", 1.80, 3.60, 4.50), ("Bet B", 1.85, 3.50, 4.40)])
+        self.odds = odds if odds is not None else odds_response(
+            [("Bet A", 1.80, 3.60, 4.50), ("Bet B", 1.85, 3.50, 4.40)])
         self.h2h = h2h if h2h is not None else h2h_matches()
         self.odds_error, self.h2h_error = odds_error, h2h_error
         self.form = form if form is not None else {}  # {team_id: [近期比赛]}

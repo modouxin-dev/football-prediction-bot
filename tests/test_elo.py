@@ -71,7 +71,6 @@ def test_calculate_elo_is_zero_sum():
 
 def test_calculate_elo_underdog_wins_more():
     """弱队赢球拿到的分，应多于强队赢球拿到的分。"""
-    _, weak_gain = calculate_elo(1400.0, 1600.0, 1.0, 20.0)[0], None
     weak_after, strong_after = calculate_elo(1400.0, 1600.0, 1.0, 20.0)
     gain_underdog = weak_after - 1400.0
     fav_after, _ = calculate_elo(1600.0, 1400.0, 1.0, 20.0)

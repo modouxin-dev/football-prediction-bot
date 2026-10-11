@@ -116,7 +116,6 @@ def test_fit_uses_only_past_samples():
     t = fit_temperature(obs[:half])          # 只用前半段
     assert t > 1.0
 
-
     def nll(rows, temp):
         return -sum(math.log(max(apply_temperature(p, temp)[a], 1e-9))
                     for p, a in rows) / len(rows)
@@ -162,7 +161,6 @@ def test_predict_match_applies_temperature_without_flipping_direction():
 
 def test_service_refresh_calibration_is_safe_on_empty_db(tmp_path):
     """空库/无已结算样本时必须保持 T=1.0，不校准、不猜测、不崩。"""
-    import os
 
     from repository import PredictionRepository
     from service import PredictionService
