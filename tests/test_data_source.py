@@ -31,6 +31,13 @@ class StubPrimary:
             raise self.error
         return self.result
 
+    async def get_fixtures_by_season(self, *a, **k):
+        """整季赛程（历史回填用），行为与 get_fixtures 一致。"""
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.result
+
     async def get_standings(self, *a, **k):
         return self.result
 
@@ -855,3 +862,20 @@ def test_primary_empty_then_ok_clears_error():
     router.primary = StubPrimary()
     run(router.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     assert router.last_error("api-football") is None
+
+
+def test_primary_empty_season_fixtures_does_not_switch_source():
+    """整季赛程返回空时同样不能切备用源。
+
+    修复前只有 get_fixtures 有豁免，get_fixtures_by_season 没有：
+    历史回填拉整季赛程拿到空 → 落到备用源分支 → _source 被永久染成
+    football-data → 之后赔率、伤停、积分榜全部按备用源降级，
+    预测一律显示 DATA QUALITY: POOR，而主源其实是好的。
+    备用源免费层只支持当前赛季，历史赛季切过去本也拿不到数据。
+    """
+    router = DataSourceRouter(StubPrimary(result=[]), _FallbackFail(), mode="auto")
+    result = run(router.get_fixtures_by_season(39, 2026))
+    assert result == []
+    assert router.source == "api-football"
+    assert router.using_fallback is False
+    assert "返回空数据" in (router.last_error("api-football") or "")
