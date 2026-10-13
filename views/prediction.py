@@ -203,8 +203,17 @@ class PredictionView:
         elif p.low_sample:
             lines.append("主/客场已赛场次不足 5 场，强度估计不稳定。")
         if not p.odds:
-            lines.append("暂无赔率数据，未做价值偏差对比。")
-        lines.append("未计入伤停、赛程密度等临场因素。")
+            reason = (p.inputs or {}).get("odds_error")
+            if reason:
+                # 订阅了会员却一直显示「暂无赔率」时，用户无法判断是套餐不含、
+                # 未开盘还是限流。这里把真实原因显示出来（/diag 可复现探测）。
+                # 截断：风险提示每行有手机宽度上限，原因过长会折行。
+                lines.append(f"未取到赔率：{str(reason)[:16]}")
+            else:
+                lines.append("暂无赔率数据，未做价值偏差对比。")
+        # 伤停、赛程密度确实不参与概率计算（/analysis 可查看伤停名单）。
+        # 原措辞「未计入伤停」会被读成「没拿到伤停数据」，与订阅能力无关，故改口径。
+        lines.append("伤停等临场因素不参与概率计算。")
         return lines
 
     @classmethod
