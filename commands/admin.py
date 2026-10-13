@@ -22,6 +22,7 @@ from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
 from repository import BRIER_RANDOM, quota_today
 from scheduler import DAILY_JOB, run_push
 from support import describe_error
+from templates import LEAGUE_SHORT
 from tghtml import normalize
 
 from . import CommandDispatcher
@@ -74,6 +75,61 @@ def _format_quota(api: Any, req: dict[str, Any]) -> str:
     return "｜".join(parts)
 
 
+# ── /diag 的多联赛探测 ────────────────────────────────────────────
+# 只探主联赛会把「该联赛当天没比赛」误报成「主源坏了」：五大联赛在休赛期
+# 和国际比赛日会整体停摆，而欧冠与其余联赛照常开踢。曾经英超当日无球就
+# 显示「赛程请求 ✅ 0 场」，用户据此反复排查订阅与 key —— 其实主源是活的。
+# 所以固定补探欧战与其余四大联赛，用「有没有任何一个联赛有比赛」来判定
+# 主源是否真的可用，而不是拿单个联赛的空结果当故障。
+DIAG_PROBE_LEAGUES: tuple[int, ...] = (2, 140, 78, 135, 61)  # 欧冠 / 西甲 / 德甲 / 意甲 / 法甲
+DIAG_PROBE_MAX = 5       # 含主联赛在内的探测上限（每个联赛一次真实请求）
+DIAG_WIDEN_DAYS = 3      # 当前窗口全网无球时，自动扩到几天后重探一次
+
+
+def diag_probe_pool(primary: int) -> list[int]:
+    """构造 /diag 的联赛探测池：主联赛恒排首位，其余按固定顺序补足。
+
+    主联赛排首位是刻意的 —— 它是每日推送的口径，出问题要先看它；
+    排在后面的联赛只用于回答「主源到底还活不活着」。
+    """
+    pool = [primary]
+    for lid in DIAG_PROBE_LEAGUES:
+        if lid != primary and lid not in pool:
+            pool.append(lid)
+        if len(pool) >= DIAG_PROBE_MAX:
+            break
+    return pool
+
+
+def diag_verdict(rows: list[tuple[int, int | None, str | None]]) -> tuple[str, str]:
+    """根据各联赛探测结果给出主源可用性结论。返回 (图标, 结论文本)。
+
+    三种结局必须分开，否则又会退回「0 场 = 坏了」的误判：
+    - 任一联赛有比赛 → 主源可用，0 场只是该联赛当天没球
+    - 全部报错       → 主源确实不可用
+    - 全部返回空     → 两者无法区分，如实说明，不替用户下结论
+    """
+    ok = [(lid, n) for lid, n, e in rows if e is None and n]
+    err = [(lid, e) for lid, n, e in rows if e]
+    total = sum(n for _, n in ok)
+    if ok:
+        return ("✅", f"主源可用（{len(ok)}/{len(rows)} 个联赛有比赛，共 {total} 场）")
+    if err and len(err) == len(rows):
+        return ("❌", f"主源请求失败（{len(err)}/{len(rows)} 个联赛报错）")
+    if err:
+        return ("⚠️", f"部分联赛报错（{len(err)}/{len(rows)}），其余返回空")
+    return ("⚠️", "所有联赛均返回空：当日可能确实无比赛，也可能是主源异常 —— 本命令无法区分")
+
+
+def diag_pool_line(rows: list[tuple[int, int | None, str | None]]) -> str:
+    """把各联赛探测结果压成一行短名摘要（欧冠9 · 西甲0 · …）。"""
+    parts: list[str] = []
+    for lid, n, e in rows:
+        name = LEAGUE_SHORT.get(lid) or f"联赛{lid}"
+        parts.append(f"{name}{'✗' if e else (n if n is not None else '?')}")
+    return " · ".join(parts)
+
+
 async def diag_cmd(update, context) -> None:
     """/diag — 直连主源探活，暴露真实失败原因（套餐 / 赛季 / 配额 / 冷却）。
 
@@ -122,25 +178,62 @@ async def diag_cmd(update, context) -> None:
         except Exception as exc:  # noqa: BLE001 - 诊断命令要把原因显示出来，不吞异常
             rows.append(("📋", "可用赛季", f"❌ {esc(describe_error(exc))}"))
 
-    # 真实请求 2：按当前窗口拉赛程，参数与每日推送一致
-    fixtures: list[dict[str, Any]] = []
-    try:
-        fixtures = await primary.get_fixtures(settings.league_id, settings.season, d_from, d_to)
-        rows.append(("🧪", "赛程请求", f"✅ {len(fixtures)} 场"))
-    except Exception as exc:  # noqa: BLE001
-        rows.append(("🧪", "赛程请求", f"❌ {esc(describe_error(exc))}"))
+    # 真实请求 2：多联赛按当前窗口拉赛程。
+    # 只探主联赛时，该联赛当天没球会显示「✅ 0 场」，看着像主源坏了 ——
+    # 五大联赛休赛期会整体停摆而欧冠照常开踢，所以补探几个联赛再判定。
+    pool = diag_probe_pool(settings.league_id)
+
+    async def _probe(day_from, day_to):
+        out: list[tuple[int, int | None, str | None]] = []
+        found: dict[int, list[dict[str, Any]]] = {}
+        for lid in pool:
+            try:
+                fx = await primary.get_fixtures(lid, settings.season, day_from, day_to)
+            except Exception as exc:  # noqa: BLE001 - 诊断要把原因显示出来
+                out.append((lid, None, esc(describe_error(exc))))
+                found[lid] = []
+                continue
+            fx = fx or []
+            out.append((lid, len(fx), None))
+            found[lid] = fx
+        return out, found
+
+    probe_rows, by_league = await _probe(d_from, d_to)
+    widened = False
+    if not any(n for _, n, e in probe_rows if e is None and n):
+        # 当前窗口全网无球：扩窗再探一次，用来区分「今天没球」与「主源异常」
+        widened = True
+        d_to = (now + timedelta(days=DIAG_WIDEN_DAYS)).date()
+        probe_rows, by_league = await _probe(d_from, d_to)
+
+    main_fx = by_league.get(settings.league_id) or []
+    main_name = LEAGUE_SHORT.get(settings.league_id) or str(settings.league_id)
+    rows.append(("🧪", "主联赛赛程",
+                 f"{'✅' if main_fx else '⚠️'} {len(main_fx)} 场（{main_name}）"))
+    rows.append(("🌐", "多联赛探测", esc(diag_pool_line(probe_rows))))
+    v_icon, verdict = diag_verdict(probe_rows)
+    rows.append(("🎯", "主源判定", f"{v_icon} {esc(verdict)}"))
+    if widened:
+        rows.append(("📆", "窗口", f"当前窗口全空，已自动扩到 {DIAG_WIDEN_DAYS} 天后重探"))
 
     # 真实请求 3/4：直连主源探测赔率与伤停。
     # 订阅了会员却显示「暂无赔率 / 未计入伤停」时，无法区分三种情况：
     # 套餐不含该端点、该场尚未开盘、或压根没走主源。这里实测一次即可区分。
+    # 探测对象取自整个探测池而非只认主联赛：端点能否用与联赛无关，
+    # 主联赛当天没球时照样能验证套餐。
+    fixtures: list[dict[str, Any]] = main_fx or next(
+        (v for v in by_league.values() if v), [])
     probe_id = next(
         ((f.get("fixture") or {}).get("id") for f in fixtures if (f.get("fixture") or {}).get("id")),
         None,
     )
     if probe_id is None:
-        rows.append(("💰", "赔率端点", "⚠️ 无可用比赛，跳过探测"))
-        rows.append(("🚑", "伤停端点", "⚠️ 无可用比赛，跳过探测"))
+        rows.append(("💰", "赔率端点", "⚠️ 探测池内无可用比赛，跳过探测"))
+        rows.append(("🚑", "伤停端点", "⚠️ 探测池内无可用比赛，跳过探测"))
     else:
+        src = main_name if main_fx else (
+            LEAGUE_SHORT.get(next((lid for lid, v in by_league.items() if v), 0), "?"))
+        rows.append(("🎲", "探测对象", esc(f"fixture {probe_id}（{src}）")))
         for icon, label, method in (("💰", "赔率端点", "get_odds"), ("🚑", "伤停端点", "get_injuries")):
             fn = getattr(primary, method, None)
             if not callable(fn):
