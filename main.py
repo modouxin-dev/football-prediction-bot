@@ -78,7 +78,7 @@ BOT_COMMANDS: list[tuple[str, str]] = [
 ]
 WIDE_HOURS = 24 * 14  # /test 在近期无比赛（如国际比赛日）时放宽到 14 天，方便看到示例消息
 
-FX_PER_PAGE = 5  # 今日赛程每页比赛数
+FX_PER_PAGE = 10  # 今日赛程每页比赛数
 MENU_BY_LABEL = {label: key for key, label in MENU_ITEMS}  # 底部键盘文字 → 菜单 key
 
 
