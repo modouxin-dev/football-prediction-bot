@@ -260,13 +260,20 @@ python backtest_cli.py --simulate 1140 --seeds 1,2,3
 `matches`（赛程缓存）、`predictions`（预测 + 回写赛果）、`sync_log`（拉取记录）、
 `elo_ratings` / `elo_processed` / `elo_log`（Elo 相关）。
 
-### 依赖约束（httpx 不要单独升级）
+### 依赖约束（httpx 不能越界升级）
 
-`httpx` 被 `python-telegram-bot 20.3` 锁定在 `~=0.24.0`（等价 `>=0.24.0,==0.24.*`，实测自该版本 wheel 的 `Requires-Dist` 字段）。
+`httpx` 的版本区间被 `python-telegram-bot` 锁定，不能单独升：
 
-单独升到 0.25+ 会让 pip 依赖解析失败——CI 在**装依赖阶段**就报红，pytest 从未启动（表现为 test 仅 9 秒失败）。已在 `.github/dependabot.yml` 配置 `ignore` 阻断该类提议。
+| PTB 版本 | 其 wheel 元数据要求的 httpx |
+| --- | --- |
+| 20.3（旧） | `~=0.24.0`（等价 `>=0.24.0,==0.24.*`） |
+| **22.8（当前）** | `<0.29,>=0.27` |
 
-要升级 httpx，必须先升级 `python-telegram-bot` 到支持新 httpx 的版本。
+当前组合 **PTB 22.8 + httpx 0.28.1**，实测 **1298 条测试全部通过**。
+
+升级顺序必须是 **先升 PTB、再升 httpx**。PTB 20.3 时代单独升 httpx 到 0.28 会让 pip 依赖解析失败——CI 在装依赖阶段即报红（表现为 test 仅 9 秒失败，pytest 从未启动）。已在 `.github/dependabot.yml` 配置 `ignore` 阻断越界提议。
+
+> ⚠️ **已知待办**：PTB 21.10 起弃用 pytz 时区，启动时会有 `PTBDeprecationWarning`（`main.py` 的 `Defaults(tzinfo=...)`）。当前不影响功能，但未来 PTB 移除 pytz 支持后需改用 `zoneinfo`。
 
 ## 模型说明
 
