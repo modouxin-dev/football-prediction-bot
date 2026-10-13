@@ -120,3 +120,26 @@ jobs:
           assert s.db_path, "db_path 不能为空"
           print("smoke ok: db_path =", s.db_path)
           PY
+
+  readme-sync:
+    name: README 同步提醒
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 源码变更时检查 README 是否同步
+        # 提醒而非阻断：纯内部重构可能确实无需改文档，强制失败会拖慢开发。
+        # 目的是让"改了功能却忘了同步文档"在 PR 里显式暴露出来。
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          CHANGED="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" || true)"
+          CODE="$(printf '%s\n' "$CHANGED" | grep -E '\.(py|sh|yml)$|Dockerfile' | grep -v '^tests/' || true)"
+          if [ -n "$CODE" ] && ! printf '%s\n' "$CHANGED" | grep -qx 'README.md'; then
+            echo "::warning::改动涉及源码/部署配置但未更新 README.md —— 命令、环境变量、端点、口径变化都应同步到文档。改动文件："
+            printf '%s\n' "$CODE"
+            echo "::notice::若确为无需改文档的内部重构，可忽略本提醒。"
+          else
+            echo "README 同步检查通过"
+          fi
