@@ -98,6 +98,20 @@ class DataSourceRouter:
             return False
         return time.monotonic() < self._primary_cooldown_by_league.get(league_id, 0.0)
 
+    @property
+    def primary_cooldown_remaining(self) -> float:
+        """任一联赛的冷却剩余秒数（取最大值），0 表示未冷却。
+
+        冷却按联赛隔离存在字典里，而 _primary_cooling() 不传 league_id 时
+        恒返回 False —— 它只能回答"某个具体联赛是否冷却"，无法回答
+        "是否有任一联赛正在冷却"。诊断命令曾直接调用无参版本，于是永远
+        显示「未冷却」，而实际上主源正被冷却挡着一次都没调用，
+        排查方向被彻底误导。这里给出全局视图供诊断使用。
+        """
+        now = time.monotonic()
+        # 下界取 0：过期的冷却条目会算出负数，诊断会显示「剩余 -10 秒」。
+        return max(0.0, max((v - now for v in self._primary_cooldown_by_league.values()), default=0.0))
+
     def _mark_primary_down(
         self, reason: str, method: str = "", league_id: int | None = None, *, cooldown: bool = True
     ) -> None:
@@ -216,11 +230,15 @@ class DataSourceRouter:
                 # 预测只能按联赛平均估算（DATA QUALITY: POOR）。
                 # 改为如实返回空，让上层用主源自己的窗口扩展重查，
                 # 拿到的是带积分榜与赔率的高质量数据。
-                if method == "get_fixtures":
+                # 整季赛程（get_fixtures_by_season）与按联赛按时段赛程同理：
+                # 备用源免费层只支持当前赛季，历史赛季切过去本就拿不到数据，
+                # 却会把 _source 永久染成 football-data —— 之后赔率、伤停、
+                # 积分榜全部按备用源降级，预测一律显示 DATA QUALITY: POOR，
+                # 而主源其实是好的。故赛程类一律不切备用源。
+                if method.startswith("get_fixtures"):
                     self._source = "api-football"
                     log.info(
-                        "主源确认 %s 该时段无比赛，不再切备用源取回退结果，"
-                        "交由上层用主源扩窗重查", method)
+                        "主源确认 %s 无数据，不再切备用源取回退结果", method)
                     return []
 
         if self._fallback_blocked():
