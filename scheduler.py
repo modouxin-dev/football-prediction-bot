@@ -44,12 +44,33 @@ SETTLE_JOB = "settle_results"
 SYNC_JOB = "sync_matches"
 BACKTEST_JOB = "backtest_run"
 HISTORY_JOB = "sync_history"
+AUTO_PREDICT_JOB = "auto_predict"
+REVIEW_JOB = "daily_review"
 
 # 历史赛季回填与回测都是重活：前者要拉整季（数百场，吃 API 额度），
 # 后者要逐场滚动预测（1100 场约数十秒）。默认每天各一次即可，
 # 太频繁只会白烧额度，且结论不会变得更有用。
 HISTORY_INTERVAL_HOURS = 24
 BACKTEST_INTERVAL_HOURS = 24
+
+# ── 自动预测与复盘 ────────────────────────────────────────────────────────
+# 欧冠（2）默认纳入无人值守预测：它是关注度最高的赛事之一，
+# 但用户手动点「预测」时只覆盖当前选中的单一联赛，欧冠因此长期没有预测记录，
+# 看板上整片显示「未预测」。主联赛由 settings.league_id 提供，这里只补额外联赛。
+AUTO_PREDICT_EXTRA_LEAGUES: tuple[int, ...] = (2,)  # 2 = 欧洲冠军联赛
+
+# 自动预测的向前窗口（天）。2 天足够覆盖「明天」又不至于为远期赛程白烧额度——
+# 远期赛程会变（改期、阵容未定），提前算好的概率反而是噪音。
+AUTO_PREDICT_DAYS = 2
+
+# 复盘回看窗口（天）。7 天能在样本量与时效性之间取得平衡：
+# 太短（1 天）样本个位数，归因全是噪音；太长（30 天）会掩盖近期劣化。
+REVIEW_WINDOW_DAYS = 7
+
+# 自动预测执行间隔（小时）。6 小时一轮既能在赛前刷新概率，
+# 又不至于频繁重算——同一场重复预测只会用更新的赔率覆盖旧值，
+# 更密的频率换不来更准的赛前结论，只烧额度。
+AUTO_PREDICT_INTERVAL_HOURS = 6
 
 
 @dataclass
@@ -179,6 +200,76 @@ async def sync_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("赛程同步失败：%s", exc)
 
 
+async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """无人值守批量预测：把未来赛程的预测算好并落盘。
+
+    为什么必须独立成任务：
+        `build_predictions` 只在用户点按钮时跑，且只算当前选中的**一个**联赛。
+        结果是看板上「欧冠 9 场」全部显示未预测——机器人压根没为欧冠算过。
+        赛程页展示库里所有联赛，预测却只覆盖单联赛，两边永远对不上。
+
+    落盘的意义（这才是「进步型机器人」的地基）：
+        只有预测进了 predictions 表，赛果结算才会回写真实比分，
+        复盘才有样本可归因，回测才能回答「模型在变好还是变差」。
+        不落盘的话，每一次重启都从零开始，永远学不到任何东西。
+
+    ⚠️ 幂等：predictions 以 fixture_id 为主键、ON CONFLICT DO UPDATE，
+        重复执行只刷新概率，不产生重复行。
+    """
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    try:
+        ids = tuple(dict.fromkeys(
+            (int(service.settings.league_id),) + tuple(AUTO_PREDICT_EXTRA_LEAGUES)
+        ))
+        r = await service.auto_predict_store(ids, days=AUTO_PREDICT_DAYS)
+        log.info(
+            "自动预测落盘：%d 场（联赛 %s，窗口 %d 天）",
+            r["saved"], list(r["per_league"]), r["window_days"],
+        )
+        for err in r["errors"]:
+            log.warning("自动预测：%s", err)
+    except Exception as exc:  # 自动预测失败绝不能影响推送主流程
+        log.warning("自动预测失败（不影响主流程）：%s", exc)
+
+
+async def review_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """每日复盘：把「昨天推的准不准、准在哪」讲清楚并推送。
+
+    与 backtest_job 的分工：
+        回测 → 模型在**内置历史语料**上的表现（回答「方法对不对」）
+        复盘 → 模型在**线上真实预测**上的表现（回答「今天该不该信它」）
+    两者口径不同，不能互相替代。
+
+    ⚠️ 只读不改：本任务不调整任何模型参数。小样本下自动调参极易过拟合，
+        先把归因结论呈现出来，是否据此调参由人决定。
+    """
+    from review import daily_review, render_review
+
+    app = context.application
+    settings: Settings = app.bot_data["settings"]
+    service: PredictionService = app.bot_data["service"]
+    try:
+        rv = daily_review(getattr(service.settings, "db_path", None),
+                          since_days=REVIEW_WINDOW_DAYS)
+        text = render_review(rv)
+    except Exception as exc:
+        log.warning("复盘生成失败：%s", exc)
+        return
+    if rv.get("status") != "ok":
+        # 无样本时静默：每天发「暂无数据」是纯噪音，看板里能看到
+        log.info("复盘跳过：暂无已结算样本")
+        return
+    try:
+        await app.bot.send_message(
+            chat_id=settings.chat_target, text=normalize(text), parse_mode="HTML",
+        )
+        log.info("复盘推送完成：%d 场，命中率 %.2f%%",
+                 rv["settled"], rv["accuracy"] * 100)
+    except Exception as exc:
+        log.warning("复盘推送失败：%s", exc)
+
+
 async def history_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """回填历史赛季（付费套餐解锁），让库里真正积累起赛果。
 
@@ -262,14 +353,25 @@ def setup_scheduler(app, settings: Settings) -> int:
         backtest_job, interval=BACKTEST_INTERVAL_HOURS * 3600, first=1800,
         name=BACKTEST_JOB,
     )
-    registered = 3
+    # 无人值守预测：让「有赛程」和「有预测」是同一批比赛，
+    # 并为复盘/回测积累真实的赛前预测流水（不依赖用户手动点按钮）。
+    app.job_queue.run_repeating(
+        auto_predict_job, interval=AUTO_PREDICT_INTERVAL_HOURS * 3600, first=120,
+        name=AUTO_PREDICT_JOB,
+    )
+    # 赛果结算移出 chat_id 分支（此前误放进来，导致没配群号时一条都不结算）。
+    # 结算是数据闭环的地基：不结算就永远没有命中率样本，复盘与校准都是空的。
+    app.job_queue.run_repeating(
+        settle_job, interval=6 * 3600, first=300, name=SETTLE_JOB,
+    )
+    registered = 5
     if settings.chat_id:
         app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
-        # 每 6 小时同步一次赛果，保证命中率统计能及时更新
-        app.job_queue.run_repeating(
-            settle_job, interval=6 * 3600, first=300, name=SETTLE_JOB,
+        # 每日复盘：把「准在哪、不准在哪」讲清楚，是进步型机器人的反馈回路
+        app.job_queue.run_daily(
+            review_job, time=settings.review_time, name=REVIEW_JOB,
         )
         registered += 2
     else:
-        log.warning("未设置 CHAT_ID：定时推送已停用（仍可使用命令）")
+        log.warning("未设置 CHAT_ID：定时推送与复盘已停用（仍可使用命令）")
     return registered
