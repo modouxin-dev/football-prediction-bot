@@ -410,12 +410,15 @@ def test_refresh_clears_cache():
 
 
 def test_pagination_callback():
-    ctx, _ = make_ctx(TodayAPI(today_fixtures(7)))
+    # 场数按 FX_PER_PAGE 推导：只比一页多 2 场，保证一定存在第二页。
+    # 原先硬编码 7 场（假定每页 5 场），页大小一改就只剩一页、翻页按钮消失。
+    total = main.FX_PER_PAGE + 2
+    ctx, _ = make_ctx(TodayAPI(today_fixtures(total)))
     update, _ = query_update("menu:fixtures")
     run(main.on_menu(update, ctx))
     update, q = query_update("fxp:1")
     run(main.on_fixtures_page(update, ctx))
-    assert q.edits and "主队6" in q.edits[0][0]
+    assert q.edits and f"主队{total}" in q.edits[0][0]
     assert ctx.user_data["fx_page"] == 1
 
 

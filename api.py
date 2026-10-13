@@ -27,8 +27,9 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("api")
 
@@ -295,30 +296,79 @@ async def strength(competition: str | None = None) -> JSONResponse:
 
 
 @app.get("/fixtures")
-async def fixtures(date: str | None = None, limit: int = 100) -> JSONResponse:
-    """当日（或指定日期）赛程 + 已生成的预测，按联赛分组。
+async def fixtures(date: str | None = None, days: int = 1, limit: int = 100) -> JSONResponse:
+    """赛程 + 已生成的预测，按联赛分组，可一次取多天。
 
-    与 Telegram 看的是同一张 matches 表，因此机器人刷新后看板同步刷新，
-    不存在两套数据。日期格式 YYYY-MM-DD，默认今天（按 TIMEZONE 时区，默认 Asia/Shanghai）。
+    days=1 今天，3/7 表示含今天在内的未来几天。之所以要支持多天：联赛并非
+    每天都有比赛，只看「今天」时常整页空白，容易被误认为看板坏了。
+    日期格式 YYYY-MM-DD，默认今天（按 TIMEZONE 时区，默认 Asia/Shanghai）。
+
+    每支球队额外给出**近期战绩与实力分**：
+      · 近期战绩只统计区间**起始日之前**已完赛的比赛，因此区间内尚未开踢的
+        场次不会被算进任何一队的状态（无前视偏差）。
+      · 实力分/排名来自 elo_ratings，与 Telegram 实力榜同源。
+      · 两者都可能为 null（库未回填 / Elo 未计算）。此时前端显示「暂无」，
+        绝不能把「没有数据」显示成 0 分，否则看起来像一支极弱的队。
 
     未生成预测的比赛 `prediction` 为 null —— 表示「还没算」而非「算出来是 0」，
     前端必须区分这两种状态。
     """
     day = (date or "").strip() or _today()
+    days = max(1, min(int(days), 14))
     limit = max(1, min(int(limit), 300))
-    repo = _repo()
     try:
-        rows = repo.matches_with_predictions(day, limit=limit)
+        start = datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="日期格式须为 YYYY-MM-DD") from None
+    day_list = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
+
+    repo = _repo()
+    rows: list[dict[str, Any]] = []
+    try:
+        for d in day_list:
+            for r in repo.matches_with_predictions(d, limit=limit):
+                rows.append({**r, "date": d})
     except Exception as exc:
         log.exception("/fixtures 读取失败")
         raise HTTPException(status_code=500, detail=f"读取失败：{exc}") from exc
 
+    # 每个联赛只查一次 Elo / 战绩，避免逐场比赛打库。
+    meta: dict[str, dict[str, Any]] = {}
+    for comp in sorted({r.get("competition") or "" for r in rows}):
+        if not comp:
+            continue
+        ratings = {str(k): float(v) for k, v in repo.elo_ratings(comp).items()}
+        rank = {
+            str(tid): i
+            for i, (tid, _) in enumerate(
+                sorted(ratings.items(), key=lambda kv: kv[1], reverse=True), 1
+            )
+        }
+        meta[comp] = {"ratings": ratings, "rank": rank,
+                      "form": repo.recent_form(comp, day_list[0])}
+
+    def side(comp: str, team_id: object) -> dict[str, Any]:
+        m = meta.get(comp, {})
+        tid = str(team_id) if team_id else ""
+        info = m.get("form", {}).get(tid) or {}
+        rating = m.get("ratings", {}).get(tid)
+        return {
+            "form": info.get("form"),
+            "w": info.get("w"), "d": info.get("d"), "l": info.get("l"),
+            "gf": info.get("gf"), "ga": info.get("ga"),
+            "rating": round(float(rating), 1) if rating is not None else None,
+            "rank": m.get("rank", {}).get(tid),
+            "rank_total": len(m.get("ratings", {})),
+        }
+
     groups: dict[str, list[dict]] = {}
     for r in rows:
-        pred = r.get("prediction")
-        groups.setdefault(r.get("competition") or "", []).append({
+        comp = r.get("competition") or ""
+        groups.setdefault(comp, []).append({
             "fixture_id": r["fixture_id"],
+            "date": r["date"],
             "kickoff": r["kickoff"],
+            "matchday": r.get("matchday"),
             "status": r["status"],
             "home": r["home"],
             "away": r["away"],
@@ -328,7 +378,9 @@ async def fixtures(date: str | None = None, limit: int = 100) -> JSONResponse:
             "away_score": r["away_score"],
             "actual_home": r.get("actual_home"),
             "actual_away": r.get("actual_away"),
-            "prediction": pred,
+            "prediction": r.get("prediction"),
+            "home_team": side(comp, r.get("home_id")),
+            "away_team": side(comp, r.get("away_id")),
         })
     payload = [
         {
@@ -340,12 +392,27 @@ async def fixtures(date: str | None = None, limit: int = 100) -> JSONResponse:
         for code, items in sorted(groups.items())
     ]
     total = sum(g["count"] for g in payload)
+    message = ""
+    if not total:
+        try:
+            empty_db = repo.matches_count() == 0
+        except Exception:  # pragma: no cover - 库不可用时按「未回填」提示
+            empty_db = False
+        message = (
+            "库里还没有任何赛程：首次自动回填在机器人启动约 10 分钟后开始，请稍后刷新。"
+            if empty_db else
+            f"{day_list[0]} ～ {day_list[-1]} 区间内没有比赛，可把范围放宽到 7 天试试。"
+        )
     return JSONResponse({
         "status": "ok" if total else "empty",
         "version": _VERSION,
         "date": day,
+        "days": days,
+        "date_from": day_list[0],
+        "date_to": day_list[-1],
         "total": total,
         "leagues": payload,
+        "message": message,
     })
 
 

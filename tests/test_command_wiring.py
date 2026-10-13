@@ -22,16 +22,17 @@ def _module_scope_names(tree: ast.AST) -> set[str]:
     嵌套函数（如命令内部定义的辅助函数）同样合法，不能漏掉，否则会误报。
     """
     names: set[str] = set()
+    # 全部走 walk：局部名字（赋值/形参/for 目标/with as）被当成函数调用是
+    # 完全合法的，例如 `fn = getattr(...)` 之后 `await fn(...)`。
+    # 只看模块顶层会把这类写法误判成「调用了不存在的名字」，
+    # 于是正确代码过不了体检 —— 本检测的目标是 NameError，不是禁止局部函数变量。
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    names.add(target.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            names.add(target.id)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)          # 形参：def f(cb) 里的 cb 可被 cb() 调用
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)           # 任何被绑定的名字：赋值/注解/for/with/推导
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
                 names.add(alias.asname or alias.name.split(".")[0])
