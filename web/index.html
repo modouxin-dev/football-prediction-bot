@@ -93,7 +93,7 @@
 
 <div id="root"><div class="empty">初始化中…（若持续超过 10 秒无变化，说明页面脚本未运行）</div></div>
 
-<footer>数据来自本地 SQLite · 只读，不消耗 API 额度 · <b id="build">BUILD-2026-10-11-B</b></footer>
+<footer>数据来自本地 SQLite · 只读，不消耗 API 额度 · <b id="build">BUILD-</b></footer>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -433,6 +433,9 @@ async function load(){
       get('/backtest').catch(() => ({status:'empty', count:0, items:[]}))
     ]);
     $('ver').textContent = 'v' + (h.version || '?');
+    // 页脚版本取自 /health 的真实部署版本（RAILWAY_GIT_COMMIT_SHA），
+    // 不再硬编码 —— 否则改了代码却分不清线上跑的是哪一版，排查时全靠猜。
+    $('build').textContent = 'BUILD-' + (h.version || '?');
     const ok = h.status === 'ok';
     $('health').className = 'pill ' + (ok ? 'ok':'bad');
     $('health').textContent = ok ? (h.persistent ? '持久卷已挂载' : '⚠️ 非持久存储') : '异常';

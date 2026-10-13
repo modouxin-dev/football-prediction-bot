@@ -10,6 +10,7 @@ RUN apt-get update \
  fonts-noto-cjk \
  fontconfig \
  gosu \
+ bash \
  build-essential \
  pkg-config \
  libfreetype6-dev \

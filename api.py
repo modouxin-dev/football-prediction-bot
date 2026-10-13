@@ -4,11 +4,16 @@
 只做三件事：健康检查、统计读数、把 service 的能力暴露成 HTTP。
 刻意保持极简——它不复制业务逻辑，全部转发给 service / repository。
 
-为什么是可选依赖：
+为什么分成两个 requirements 文件：
     机器人本体（Telegram 长轮询 + 定时任务）完全不需要 FastAPI。
-    把它写进 requirements.txt 会让 Docker 镜像平白增大，
-    且给生产进程引入一个不用的攻击面。因此放在 requirements-web.txt，
-    只在确实要跑 Web 看板时安装。
+    把它写进 requirements.txt 会让只跑机器人的环境平白增大，
+    且引入一个不用的攻击面。因此 FastAPI 单独放在 requirements-web.txt。
+
+    但注意：Dockerfile 两个文件**都会安装**（`pip install -r requirements.txt
+    && pip install -r requirements-web.txt`）。因为看板必须与机器人跑在
+    同一个容器里 —— Railway 的 Volume 无法跨服务共享，拆成两个服务后
+    看板会拿到一个空卷，读不到机器人写的 football.db。所以"不写入
+    requirements.txt"是指不混进机器人依赖，不是指不进镜像。
 
 启动：
     pip install -r requirements-web.txt
@@ -294,7 +299,7 @@ async def fixtures(date: str | None = None, limit: int = 100) -> JSONResponse:
     """当日（或指定日期）赛程 + 已生成的预测，按联赛分组。
 
     与 Telegram 看的是同一张 matches 表，因此机器人刷新后看板同步刷新，
-    不存在两套数据。日期格式 YYYY-MM-DD，默认今天（UTC 日期）。
+    不存在两套数据。日期格式 YYYY-MM-DD，默认今天（按 TIMEZONE 时区，默认 Asia/Shanghai）。
 
     未生成预测的比赛 `prediction` 为 null —— 表示「还没算」而非「算出来是 0」，
     前端必须区分这两种状态。

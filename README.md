@@ -105,7 +105,6 @@ Telegram 足球量化预测机器人：泊松模型给出内部基准，赔率�
 备用源（football-data.org）免费层**没有额度查询端点**，所以只显示本地实测值，
 不再出现 `? / ?`。
 
-`MONGODB_URI` 目前没有被使用，可以在 Railway 里删除。
 
 ## 架构
 
@@ -160,8 +159,9 @@ Dixon-Coles 只修正低比分概率，**不改变强度值**，因此不存在�
 **样本不足时不画假图**：已结算 <20 场、或本地已完赛 <60 场时，
 对应卡片会明确显示「样本不足」而非画出看似可信的曲线。
 
-FastAPI **不写入** `requirements.txt`：机器人本体不需要它，装进去只会让
-Docker 镜像变大、多一个用不到的攻击面。需要时单独装 `requirements-web.txt`。
+FastAPI 列在 `requirements-web.txt`，不混进 `requirements.txt`（机器人本体
+不需要它）。但 Dockerfile 会**同时安装**两个文件 —— 看板与机器人必须同容器
+运行，才能共用 /data 上的同一个 SQLite（Railway Volume 无法跨服务共享）。
 
 ## 模板层结构
 

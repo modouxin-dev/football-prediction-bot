@@ -20,7 +20,12 @@ done
 # （"sudo: not found"），被误判成「不可写」，每次启动都打印一条假的 CRITICAL。
 # gosu 是镜像自带的降权工具，最后一步启动应用用的也是它。
 if ! gosu "$USER_NAME":"$USER_NAME" touch "$DATA_ROOT/.mount_test"; then
-    echo "[CRITICAL] $DATA_ROOT is NOT writable by $USER_NAME. Data will be lost on reboot!"
+    # 为什么直接退出而不是只警告：
+    # 继续启动时机器人会静默降级到内存库（repository 的 PermissionError 分支），
+    # /status 看着一切正常，但每次重启数据全丢 —— 比起不来更难发现。
+    # 这里 exit 1 让容器进入重启循环，问题在部署日志里立刻可见。
+    echo "[CRITICAL] $DATA_ROOT is NOT writable by $USER_NAME. Refusing to start." >&2
+    exit 1
 fi
 rm -f "$DATA_ROOT/.mount_test"
 
