@@ -455,9 +455,11 @@ class PredictionService:
         analysis = self.analyzer.predict_match(
             model, home["id"], away["id"], temperature=self.temperature,
         )
+        odds_error: str | None = None
         try:
             odds_response = await self.api.get_odds(fixture_id, fresh=fresh)
         except (APIError, DataSourceError) as exc:  # 赔率缺失不应阻断整条预测
+            odds_error = str(exc)
             log.warning("赔率获取失败（fixture=%s）：%s", fixture_id, exc)
             odds_response = []
         bookmakers = collect_1x2_odds(odds_response)
@@ -495,6 +497,9 @@ class PredictionService:
                 "has_home_data": home["id"] in (getattr(model, "teams", {}) or {}),
                 "has_away_data": away["id"] in (getattr(model, "teams", {}) or {}),
                 "odds_count": len(bookmakers),
+                # 赔率取不到时保留真实原因（套餐不含 / 未开盘 / 限流），
+                # 展示层据此如实说明，而不是笼统显示「暂无赔率数据」。
+                "odds_error": odds_error,
                 "kickoff": kickoff.isoformat() if kickoff else None,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             },
