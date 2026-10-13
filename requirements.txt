@@ -1,4 +1,4 @@
-python-telegram-bot[job-queue]==20.3
+python-telegram-bot[job-queue]==22.8
 # ⚠️ httpx 被 python-telegram-bot 20.3 硬锁定，不能单独升级。
 # 实测该版本包元数据：Requires-Dist: httpx (~=0.24.0)，等价 >=0.24.0,==0.24.*。
 # 升到 0.25+ 会让 pip 依赖解析失败 —— CI 在"装依赖"阶段就报红，pytest 从未启动。
