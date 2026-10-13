@@ -3,23 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>足球预测看板</title>/* ===== 美化覆盖 ===== */
-body{background:radial-gradient(1200px 600px at 50% -200px,#1b2536,var(--bg)) fixed}
-h1{font-size:20px;font-weight:700;letter-spacing:.3px}
-.card{box-shadow:0 6px 24px rgba(0,0,0,.25);transition:border-color .15s}
-.card:hover{border-color:#334056}
-.card h2{font-size:16px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--line)}
-.grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
-.stat{background:linear-gradient(160deg,#1a2030,#12151b);text-align:center}
-stat b{font-size:26px;color:var(--accent)}
-table{display:block;overflow-x:auto;white-space:nowrap}
-td,th{padding:9px 8px}
-tbody tr:nth-child(even){background:#14171e}
-tbody tr:hover{background:#1c2230}
-button{transition:background .15s}
-button:hover{background:#1f2430}
-.pill{font-weight:600}
-footer{margin-top:10px}<style>
+<title>足球预测看板</title>
+<style>
   :root{
     --bg:#0f1115; --card:#171a21; --line:#252a34; --text:#e6e8ee;
     --dim:#9aa3b2; --accent:#4da3ff; --good:#3ddc97; --bad:#ff6b6b;
@@ -67,6 +52,24 @@ footer{margin-top:10px}<style>
   .debug{background:#1d1f26;border:1px dashed var(--line);padding:12px;border-radius:8px;font-family:monospace;font-size:12px;color:var(--dim);margin-bottom:14px;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
   .debug-btn{font-size:12px;padding:4px 8px;margin-top:8px;background:var(--accent);color:#000;border:none;cursor:pointer;border-radius:4px}
   .debug-btn:hover{opacity:.8}
+
+  /* ===== 美化覆盖 ===== */
+  body{background:radial-gradient(1200px 600px at 50% -200px,#1b2536,var(--bg)) fixed}
+  h1{font-size:20px;font-weight:700;letter-spacing:.3px}
+  .card{box-shadow:0 6px 24px rgba(0,0,0,.25);transition:border-color .15s}
+  .card:hover{border-color:#334056}
+  .card h2{font-size:16px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--line)}
+  .grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  .stat{background:linear-gradient(160deg,#1a2030,#12151b);text-align:center}
+  .stat b{font-size:26px;color:var(--accent)}
+  table{display:block;overflow-x:auto;white-space:nowrap}
+  td,th{padding:9px 8px}
+  tbody tr:nth-child(even){background:#14171e}
+  tbody tr:hover{background:#1c2230}
+  button{transition:background .15s}
+  button:hover{background:#1f2430}
+  .pill{font-weight:600}
+  footer{margin-top:10px}
 </style>
 </head>
 <body>
@@ -209,7 +212,7 @@ async function get(url, timeoutMs){
 }
 
 function esc(s){
-  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
+  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
 /* ---------- SVG 折线图：Log Loss 趋势 ---------- */
@@ -475,4 +478,3 @@ setTimeout(function () {
 </script>
 </body>
 </html>
-
