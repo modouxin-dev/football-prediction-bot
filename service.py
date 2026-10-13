@@ -50,6 +50,10 @@ ST_NO_DATA = "no_data"        # 接口无数据或故障  # 今日无比赛时�
 
 _FINISHED = {"FT", "AET", "PEN"}  # 已完场的状态缩写
 
+# 赛果回溯天数：结算任务只取「今天」的赛程，隔夜比赛会永远匹配不上比分。
+# 这里限定最多回补最近几天——再往前要么没有预测流水，要么补了也白烧额度。
+SETTLE_BACKFILL_DAYS = 3
+
 
 def is_season_error(exc: BaseException) -> bool:
     """判断是否为「该赛季不可用」（套餐权限 / 赛季未开放），而不是 Key 无效或限流。"""
@@ -444,6 +448,71 @@ class PredictionService:
             self._remember(prediction)
             predictions.append(prediction)
         return predictions
+
+    async def auto_predict_store(
+        self, league_ids: tuple[int, ...], days: int = 2, cap: int = 60
+    ) -> dict[str, Any]:
+        """无人值守批量预测：对指定联赛的未来赛程逐场预测并落盘。
+
+        为什么要有这个方法：
+            `build_predictions` 是「用户点了才算」，只覆盖当前选中的那一个联赛。
+            于是看板会出现「欧冠 9 场全部未预测」——因为机器人从没为欧冠算过。
+            赛程页展示的是**库里所有联赛**，预测若只覆盖单联赛，两边永远对不上。
+            这里按联赛列表批量算，让「有赛程」和「有预测」是同一批比赛。
+
+        ⚠️ 幂等：predictions 以 fixture_id 为主键且 ON CONFLICT DO UPDATE，
+            重复跑只会刷新概率，不会产生重复行，也不会污染命中率统计。
+
+        ⚠️ 只算 PRE_MATCH 的比赛：已开赛的比赛再补预测毫无意义，
+            且会让「赛前预测」变成「事后诸葛亮」，直接毁掉复盘结论。
+
+        返回 {saved, skipped_season, errors, per_league}。
+        """
+        now = datetime.now(timezone.utc)
+        end = now + timedelta(days=max(1, int(days)))
+        stats: dict[str, Any] = {
+            "saved": 0, "errors": [], "per_league": {}, "window_days": days,
+        }
+        total = 0
+        for lid in dict.fromkeys(int(x) for x in league_ids):
+            if total >= cap:
+                break
+            try:
+                fixtures, season, note = await self._fetch_fixtures(
+                    now.date(), end.date(), league_id=lid)
+            except Exception as exc:
+                # 单联赛失败不能拖垮其他联赛；原因必须留痕，否则无从排查
+                stats["errors"].append(f"联赛 {lid} 赛程拉取失败：{exc}")
+                log.warning("自动预测：联赛 %s 赛程拉取失败：%s", lid, exc)
+                continue
+            upcoming = self._upcoming(fixtures, now, end)
+            if not upcoming:
+                stats["per_league"][lid] = {"saved": 0, "note": note or "窗口内无未开赛比赛"}
+                continue
+            models: dict[int, LeagueModel] = {}
+            if lid not in models:
+                try:
+                    models[lid] = await self._model_for(lid, models)
+                except Exception as exc:
+                    stats["errors"].append(f"联赛 {lid} 建模失败：{exc}")
+                    log.warning("自动预测：联赛 %s 建模失败：%s", lid, exc)
+                    continue
+            n = 0
+            for kickoff, fx in upcoming:
+                if total >= cap:
+                    break
+                try:
+                    prediction = await self._predict_one(models[lid], kickoff, fx)
+                except Exception as exc:
+                    log.warning("自动预测：fixture %s 失败：%s",
+                                (fx.get("fixture") or {}).get("id"), exc)
+                    continue
+                self._remember(prediction)
+                n += 1
+                total += 1
+            stats["per_league"][lid] = {"saved": n, "note": note}
+            stats["saved"] += n
+        return stats
 
     async def _predict_one(
         self, model: LeagueModel, kickoff: datetime, fx: dict[str, Any], fresh: bool = False
@@ -1124,6 +1193,34 @@ class PredictionService:
             log.info("概率温度校准已生效：T=%.4f（样本 %d 场）", self.temperature, len(samples))
         return self.temperature
 
+    def _missing_result_days(self, pending, by_id: dict) -> list[Any]:
+        """pending 中在今天窗口里没匹配上赛程的行，按开赛日期去重返回。
+
+        只回溯最近 SETTLE_BACKFILL_DAYS 天：再往前要么是历史遗留脏数据
+        （那时根本没有预测流水），要么补了也没意义，白白消耗额度。
+        """
+        from datetime import date as _date, timedelta as _td
+
+        cutoff = (datetime.now(timezone.utc) - _td(days=SETTLE_BACKFILL_DAYS)).date()
+        days: dict[str, Any] = {}
+        for row in pending:
+            fid = str(row["fixture_id"])
+            if fid in by_id:
+                continue
+            raw = row["kickoff"]
+            if not raw:
+                continue
+            try:
+                kd = datetime.fromisoformat(str(raw)).date()
+            except ValueError:
+                continue
+            if kd < cutoff or kd > datetime.now(timezone.utc).date():
+                continue
+            days.setdefault(kd.isoformat(), kd)
+        # 由近及远：最近的比赛最可能已完赛
+        out = sorted(days.values(), reverse=True)
+        return out[:SETTLE_BACKFILL_DAYS]
+
     async def sync_results(self, fixtures: list[dict[str, Any]] | None = None) -> int:
         """把已完场比赛的真实比分回写到数据库。返回本次结算条数。
 
@@ -1139,6 +1236,26 @@ class PredictionService:
                 log.warning("同步赛果时获取赛程失败：%s", exc)
                 return 0
         by_id = {str((fx.get("fixture") or {}).get("id")): fx for fx in fixtures}
+
+        # ── 回溯补取：只在「今天」窗口取数的历史缺陷 ──────────────────
+        # pending 返回的是**所有**未结算预测（含昨天、前天的），
+        # 但 get_today_fixtures 只拉「今天」的赛程。于是隔夜的比赛
+        # 永远匹配不上，比分永远回写不进去 —— 命中率统计因此长期缺失样本，
+        # 复盘与校准都成了无米之炊。
+        # 这里按 pending 实际缺失的日期补拉，且只补真正缺的那些天，
+        # 避免为无关日期白烧 API 额度。
+        missing_days = self._missing_result_days(pending, by_id)
+        for d in missing_days:
+            try:
+                extra = await self._fetch_all_by_date(d)
+            except Exception as exc:
+                log.warning("回溯赛果：%s 取数失败：%s", d, exc)
+                continue
+            for fx in extra or []:
+                fid = str((fx.get("fixture") or {}).get("id"))
+                if fid not in by_id:
+                    by_id[fid] = fx
+
         done = 0
         for row in pending:
             fx = by_id.get(str(row["fixture_id"]))
