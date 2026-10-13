@@ -1096,6 +1096,8 @@ class PredictionRepository:
             rows = list(conn.execute(
                 """SELECT m.id AS match_id, m.competition_code AS comp,
                           m.utc_date AS kickoff, m.status AS status,
+                          m.matchday AS matchday,
+                          m.home_team_id AS home_id, m.away_team_id AS away_id,
                           m.home_team_name AS home, m.away_team_name AS away,
                           m.home_score AS hs, m.away_score AS aws,
                           p.result AS pred_result, p.home_prob, p.draw_prob,
@@ -1127,6 +1129,9 @@ class PredictionRepository:
                 "fixture_id": str(r["match_id"]),
                 "competition": r["comp"],
                 "kickoff": r["kickoff"],
+                "matchday": r["matchday"],
+                "home_id": r["home_id"],
+                "away_id": r["away_id"],
                 "status": r["status"],
                 "home": r["home"],
                 "away": r["away"],
@@ -1136,6 +1141,64 @@ class PredictionRepository:
                 "actual_away": r["actual_away"],
                 "prediction": pred,
             })
+        return out
+
+    def recent_form(self, competition: str, before: str, *, per_team: int = 5) -> dict[str, dict[str, Any]]:
+        """各队在 before（YYYY-MM-DD）**之前**的最后 per_team 场战绩。
+
+        只统计已有比分的比赛，且严格早于 before —— 因此用它渲染未来赛程时，
+        区间内尚未开踢的比赛不会被算进任何一队的状态里（无前视偏差）。
+        比分缺失的场次整场跳过，不把 None 当成 0 参与统计。
+
+        返回 {team_id: {"form": [{"r": "W"/"D"/"L", "gf": int, "ga": int,
+                                  "home": bool, "date": str, "opp": str}],
+                        "w": int, "d": int, "l": int, "gf": int, "ga": int}}
+        form 按时间**由旧到新**排列；数据不足时列表更短，绝不补占位。
+        """
+        per_team = max(1, min(int(per_team), 20))
+        try:
+            conn = self._connect()
+            rows = list(conn.execute(
+                """SELECT home_team_id, home_team_name, away_team_id, away_team_name,
+                          home_score, away_score, utc_date
+                   FROM matches
+                   WHERE competition_code=?
+                     AND home_score IS NOT NULL AND away_score IS NOT NULL
+                     AND substr(utc_date,1,10) < ?
+                   ORDER BY utc_date, id""",
+                (str(competition), str(before)),
+            ))
+        except Exception as exc:
+            log.warning("读取近期战绩失败（competition=%s）：%s", competition, exc)
+            return {}
+        buf: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            hs, aws = r["home_score"], r["away_score"]
+            sides = (
+                (r["home_team_id"], hs, aws, True, r["away_team_name"]),
+                (r["away_team_id"], aws, hs, False, r["home_team_name"]),
+            )
+            for tid, gf, ga, is_home, opp in sides:
+                if not tid:
+                    continue
+                slot = buf.setdefault(str(tid), [])
+                slot.append({
+                    "r": "W" if gf > ga else ("L" if gf < ga else "D"),
+                    "gf": int(gf), "ga": int(ga), "home": bool(is_home),
+                    "date": (r["utc_date"] or "")[:10], "opp": opp or "?",
+                })
+                if len(slot) > per_team:
+                    del slot[0]
+        out: dict[str, dict[str, Any]] = {}
+        for tid, items in buf.items():
+            out[tid] = {
+                "form": items,
+                "w": sum(1 for x in items if x["r"] == "W"),
+                "d": sum(1 for x in items if x["r"] == "D"),
+                "l": sum(1 for x in items if x["r"] == "L"),
+                "gf": sum(x["gf"] for x in items),
+                "ga": sum(x["ga"] for x in items),
+            }
         return out
 
     def matches_count(self) -> int:

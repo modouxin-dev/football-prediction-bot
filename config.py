@@ -66,6 +66,11 @@ def parse_push_time(raw: str | None, default: time = time(8, 0)) -> time:
     return time(hour, minute)
 
 
+def _plus_hours(t: time, hours: int) -> time:
+    """时间加 N 小时（跨日回绕）。用于推导复盘推送的默认时刻。"""
+    return time((t.hour + hours) % 24, t.minute)
+
+
 def parse_id_list(raw: str | None) -> frozenset[int]:
     """解析以逗号/空格/分号分隔的数字 ID 列表。"""
     ids: set[int] = set()
@@ -90,6 +95,7 @@ class Settings:
     league_ids: tuple[int, ...]  # 全部启用联赛；league_ids[0] 恒等于 league_id
     season: int
     push_time: time
+    review_time: time  # 每日复盘推送时刻（REVIEW_TIME，默认比推送晚 1 小时）
     timezone: "BaseTzInfo"  # pytz 时区对象
     log_level: str
     max_matches: int
@@ -252,6 +258,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         league_id=_league_primary,  # 39 = 英超
         league_ids=_parse_league_ids(env, _league_primary),
         push_time=parse_push_time(push_raw),
+        # 复盘推送时间默认比每日推送晚 1 小时：复盘要读「昨晚已结算的赛果」，
+        # 与推送挤在同一时刻会读到尚未结算完的数据，结论必然偏低。
+        review_time=parse_push_time(_get(env, "REVIEW_TIME"),
+                                    default=_plus_hours(parse_push_time(push_raw), 1)),
         timezone=tz,
         log_level=level,
         # 默认必须能覆盖一个完整比赛日：五大联赛一天可达 30+ 场，
