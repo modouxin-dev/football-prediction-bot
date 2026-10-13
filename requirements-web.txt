@@ -1,4 +1,4 @@
 # Web 看板依赖 (FastAPI + Uvicorn 只需这3个)
 fastapi>=0.143.0
 uvicorn>=0.54.0
-aiofiles>=23.0.0
+aiofiles>=25.1.0
