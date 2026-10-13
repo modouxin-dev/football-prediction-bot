@@ -4,6 +4,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # httpx 被 python-telegram-bot 20.3 锁死在 ~=0.24.0（等价 >=0.24.0,==0.24.*）。
+      # 单独升级到 0.25+ 会让 pip 依赖解析失败，CI 在装依赖阶段就报红。
+      # 解除此 ignore 的前提：先升级 python-telegram-bot 到支持新 httpx 的版本。
+      - dependency-name: "httpx"
+        versions: [">=0.25.0"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
