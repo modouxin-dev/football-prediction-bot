@@ -98,6 +98,20 @@ class DataSourceRouter:
             return False
         return time.monotonic() < self._primary_cooldown_by_league.get(league_id, 0.0)
 
+    @property
+    def primary_cooldown_remaining(self) -> float:
+        """任一联赛的冷却剩余秒数（取最大值），0 表示未冷却。
+
+        冷却按联赛隔离存在字典里，而 _primary_cooling() 不传 league_id 时
+        恒返回 False —— 它只能回答"某个具体联赛是否冷却"，无法回答
+        "是否有任一联赛正在冷却"。诊断命令曾直接调用无参版本，于是永远
+        显示「未冷却」，而实际上主源正被冷却挡着一次都没调用，
+        排查方向被彻底误导。这里给出全局视图供诊断使用。
+        """
+        now = time.monotonic()
+        # 下界取 0：过期的冷却条目会算出负数，诊断会显示「剩余 -10 秒」。
+        return max(0.0, max((v - now for v in self._primary_cooldown_by_league.values()), default=0.0))
+
     def _mark_primary_down(
         self, reason: str, method: str = "", league_id: int | None = None, *, cooldown: bool = True
     ) -> None:

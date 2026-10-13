@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -91,10 +90,12 @@ async def diag_cmd(update, context) -> None:
     W = 12
     rows: list[tuple[str, str, str]] = []
 
-    # 冷却状态：冷却期内主源根本不会被调用，所以要先说明
-    if callable(getattr(router, "_primary_cooling", None)) and router._primary_cooling():
-        left = int(getattr(router, "_primary_down_until", 0) - time.monotonic())
-        rows.append(("🧊", "冷却状态", f"冷却中（剩余 {max(left, 0)} 秒，此期间主源不被调用）"))
+    # 冷却状态：冷却期内主源根本不会被调用，所以要先说明。
+    # 冷却是按联赛隔离的字典，_primary_cooling() 不传 league_id 恒返回 False，
+    # 曾导致这里永远显示「未冷却」——而主源其实正被冷却挡着没被调用过。
+    left = float(getattr(router, "primary_cooldown_remaining", 0) or 0)
+    if left > 0:
+        rows.append(("🧊", "冷却状态", f"冷却中（剩余 {int(left)} 秒，此期间主源不被调用）"))
     else:
         rows.append(("🧊", "冷却状态", "未冷却"))
 
@@ -122,11 +123,38 @@ async def diag_cmd(update, context) -> None:
             rows.append(("📋", "可用赛季", f"❌ {esc(describe_error(exc))}"))
 
     # 真实请求 2：按当前窗口拉赛程，参数与每日推送一致
+    fixtures: list[dict[str, Any]] = []
     try:
         fixtures = await primary.get_fixtures(settings.league_id, settings.season, d_from, d_to)
         rows.append(("🧪", "赛程请求", f"✅ {len(fixtures)} 场"))
     except Exception as exc:  # noqa: BLE001
         rows.append(("🧪", "赛程请求", f"❌ {esc(describe_error(exc))}"))
+
+    # 真实请求 3/4：直连主源探测赔率与伤停。
+    # 订阅了会员却显示「暂无赔率 / 未计入伤停」时，无法区分三种情况：
+    # 套餐不含该端点、该场尚未开盘、或压根没走主源。这里实测一次即可区分。
+    probe_id = next(
+        ((f.get("fixture") or {}).get("id") for f in fixtures if (f.get("fixture") or {}).get("id")),
+        None,
+    )
+    if probe_id is None:
+        rows.append(("💰", "赔率端点", "⚠️ 无可用比赛，跳过探测"))
+        rows.append(("🚑", "伤停端点", "⚠️ 无可用比赛，跳过探测"))
+    else:
+        for icon, label, method in (("💰", "赔率端点", "get_odds"), ("🚑", "伤停端点", "get_injuries")):
+            fn = getattr(primary, method, None)
+            if not callable(fn):
+                rows.append((icon, label, "❌ 主源客户端未实现该方法"))
+                continue
+            try:
+                res = await fn(probe_id)
+                n = len(res) if hasattr(res, "__len__") else 0
+                if n:
+                    rows.append((icon, label, f"✅ 返回 {n} 条（套餐支持）"))
+                else:
+                    rows.append((icon, label, "⚠️ 返回空：该场可能未开盘，或套餐不含此端点"))
+            except Exception as exc:  # noqa: BLE001 - 诊断要把原因显示出来
+                rows.append((icon, label, f"❌ {esc(describe_error(exc))}"))
 
     rows.append(("⚙️", "请求参数",
                  f"联赛 {settings.league_id} · 赛季 {settings.season} · {d_from} ~ {d_to}"))
