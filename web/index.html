@@ -103,6 +103,29 @@
   .plegend{display:flex;gap:10px;font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
   .plegend b{margin-left:auto;color:var(--text)}
   .fnote{font-size:12px;color:var(--dim);margin-top:10px}
+
+  /* ===== 分区导航 ===== */
+  .secnav{position:sticky;top:0;z-index:20;display:flex;gap:6px;overflow-x:auto;
+          padding:8px 0;margin:0 0 4px;background:#0f1115;border-bottom:1px solid var(--line);
+          -webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .secnav::-webkit-scrollbar{display:none}
+  .secnav button{flex:0 0 auto;font-size:12.5px;padding:5px 13px;border-radius:999px;color:var(--dim)}
+  .secnav button.on{background:var(--accent);color:#06121f;border-color:var(--accent);font-weight:600}
+
+  /* ===== 分区 ===== */
+  .sec{scroll-margin-top:52px;margin-bottom:24px}
+  .sechd{display:flex;align-items:center;gap:9px;margin:0 0 10px;padding-left:2px}
+  .sechd::before{content:'';flex:0 0 auto;width:3px;height:15px;border-radius:2px;background:var(--accent)}
+  .sechd b{font-size:14.5px;letter-spacing:.2px}
+  .sechd span{font-size:11.5px;color:var(--dim);margin-left:auto;text-align:right}
+  .secbody{display:flex;flex-direction:column;gap:12px}
+  .secbody .card{margin-bottom:0}
+  .cols{display:grid;grid-template-columns:1fr;gap:12px;align-items:start}
+  @media(min-width:900px){
+    .cols{grid-template-columns:1fr 1fr}
+    .cols-3{grid-template-columns:1fr 1fr}
+  }
+  .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 </style>
 </head>
 <body>
@@ -114,6 +137,14 @@
   <button onclick="load()">刷新</button>
   <button onclick="toggleDebug()">诊断</button>
 </header>
+
+<nav class="secnav" id="secnav">
+  <button data-sec="sec-fix" onclick="goSec('sec-fix')">📅 赛程</button>
+  <button data-sec="sec-model" onclick="goSec('sec-model')">📈 模型表现</button>
+  <button data-sec="sec-bt" onclick="goSec('sec-bt')">🧪 历史回测</button>
+  <button data-sec="sec-audit" onclick="goSec('sec-audit')">🔍 预测审计</button>
+  <button data-sec="sec-team" onclick="goSec('sec-team')">🏆 球队强度</button>
+</nav>
 
 <div id="debug-panel" style="display:none">
   <div class="card">
@@ -304,14 +335,33 @@ function calibChart(buckets){
   <div style="font-size:12px;color:var(--dim);margin-top:2px">绿色虚线 = 完美校准；点越贴近它越好，圆越大表示该区间样本越多。</div>`;
 }
 
+/* ---------- 分区容器 ----------
+   看板内容按「赛程 / 模型表现 / 回测 / 审计 / 强度」分组，
+   每组一个标题条 + 吸顶导航，避免十几张卡片平铺到底找不着重点。 */
+function section(id, icon, title, note, inner){
+  return `<section class="sec" id="${id}">`
+    + `<div class="sechd"><b>${icon} ${title}</b>${note ? `<span>${esc(note)}</span>` : ''}</div>`
+    + `<div class="secbody">${inner}</div></section>`;
+}
+
+function goSec(id){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.scrollIntoView({behavior:'smooth', block:'start'});
+  const btns = document.querySelectorAll('.secnav button');
+  for(let i=0;i<btns.length;i++){
+    btns[i].className = (btns[i].getAttribute('data-sec') === id) ? 'on' : '';
+  }
+}
+
 /* ---------- 渲染 ---------- */
 const LV = {high:'🟢 高', medium:'🟡 中', low:'🔴 低', unknown:'未知'};
 
-function statCard(health){
+function statCard(health, noHead){
   const acc = health.accuracy == null ? '—' : (health.accuracy*100).toFixed(1)+'%';
   const ll  = health.mean_log_loss == null ? '—' : health.mean_log_loss.toFixed(4);
   const ece = health.ece == null ? '—' : health.ece.toFixed(4);
-  return `<div class="card"><h2>总览</h2><div class="grid">
+  return `<div class="card">` + (noHead ? '' : '<h2>关键指标</h2>') + `<div class="grid">
     <div class="stat"><b>${health.settled ?? 0}</b><i>已结算场次</i></div>
     <div class="stat"><b>${acc}</b><i>命中率</i></div>
     <div class="stat"><b>${ll}</b><i>平均 Log Loss ↓</i></div>
@@ -350,8 +400,9 @@ function levelCard(health){
   return `<div class="card"><h2>信心等级命中率 <span>高信心应高于低信心</span></h2>${rows}</div>`;
 }
 
-function strengthCard(st){
-  const head = `<div class="card"><h2>球队强度榜 <span>模型在用的攻防强度</span></h2>`;
+function strengthCard(st, noHead){
+  const head = `<div class="card">`
+    + (noHead ? '' : '<h2>球队强度榜 <span>模型在用的攻防强度</span></h2>');
   if(st.status === 'insufficient' || st.status === 'error')
     return head + `<div class="empty">${esc(st.message || '暂不可用')}</div></div>`;
   const teams = st.teams || [];
@@ -369,8 +420,9 @@ function strengthCard(st){
   </div>`;
 }
 
-function backtestCard(bt){
-  const head = `<div class="card"><h2>历史回测结论 <span>Walk-Forward · 只用赛前数据，无前视偏差</span></h2>`;
+function backtestCard(bt, noHead){
+  const head = `<div class="card">`
+    + (noHead ? '' : '<h2>历史回测结论 <span>Walk-Forward · 只用赛前数据，无前视偏差</span></h2>');
   if(!bt || bt.status === 'empty' || !bt.count){
     return head + `<div class="empty">${esc(bt && bt.message ? bt.message : '尚无回测记录。')}</div></div>`;
   }
@@ -392,8 +444,9 @@ function backtestCard(bt){
     + `</div></div>`;
 }
 
-function auditCard(a){
-  const head = `<div class="card"><h2>预测审计 <span>预测 vs 实际</span></h2>`;
+function auditCard(a, noHead){
+  const head = `<div class="card">`
+    + (noHead ? '' : '<h2>预测审计 <span>预测 vs 实际</span></h2>');
   const items = a.items || [];
   if(!items.length) return head + `<div class="empty">暂无已结算的预测。</div></div>`;
   let rows = '';
@@ -476,13 +529,14 @@ function matchCard(m){
     ${bar}</div>`;
 }
 
-function fixturesCard(fx){
+function fixturesCard(fx, noHead){
   const btns = [1,3,7].map(n=>
     `<button class="rbtn${RANGE===n?' on':''}" onclick="setRange(${n})">${n===1?'今天':(n===3?'3 天':'7 天')}</button>`
   ).join('');
   const span = fx.date_to && fx.date_to !== fx.date_from
     ? `${esc(fx.date_from||'')} ~ ${esc(fx.date_to)}` : esc(fx.date_from || fx.date || '');
-  const head = `<div class="card"><h2>赛程与队伍状态 <span>${span} · 与 Telegram 同源</span></h2>`
+  const head = `<div class="card">`
+    + (noHead ? '' : `<h2>赛程与队伍状态 <span>${span} · 与 Telegram 同源</span></h2>`)
     + `<div class="rbtns">${btns}</div>`;
   const leagues = fx.leagues || [];
   if(!leagues.length){
@@ -528,11 +582,23 @@ async function load(){
     $('health').textContent = ok ? (h.persistent ? '持久卷已挂载' : '⚠️ 非持久存储') : '异常';
     if(h.warning) console.warn(h.warning);
 
+    const fxSpan = (fx.date_to && fx.date_to !== fx.date_from)
+      ? `${fx.date_from||''} ~ ${fx.date_to}` : (fx.date_from || fx.date || '');
+    const calib = calibCard(health);
     $('root').innerHTML =
-      backtestCard(bt)
-      + fixturesCard(fx)
-      + statCard(health) + trendCard(health) + calibCard(health) + levelCard(health)
-      + strengthCard(strength) + auditCard(audit);
+      section('sec-fix', '📅', '赛程与队伍状态', fxSpan + ' · 与 Telegram 同源',
+        fixturesCard(fx, true))
+      + section('sec-model', '📈', '模型表现', '只用已结算场次统计',
+          statCard(health, true)
+          + (calib ? '<div class="cols">' + trendCard(health) + calib + '</div>'
+                   : trendCard(health))
+          + levelCard(health))
+      + section('sec-bt', '🧪', '历史回测结论', 'Walk-Forward · 无前视偏差',
+          backtestCard(bt, true))
+      + section('sec-audit', '🔍', '预测审计', '最近已结算的预测 vs 实际',
+          auditCard(audit, true))
+      + section('sec-team', '🏆', '球队强度榜', '模型在用的攻防强度',
+          strengthCard(strength, true));
     addDebugLog('✅ 页面加载成功');
   }catch(err){
     $('health').className = 'pill bad';
