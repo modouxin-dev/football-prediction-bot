@@ -42,8 +42,8 @@ from service import (MODE_DATE, MODE_NEXT, MODE_TODAY, ST_NO_DATA, Prediction,
 from support import (GUARD_HINT, back_to_menu_markup, begin_task,
                      describe_error, edit_view, end_task, is_admin, reply_html,
                      set_panel_state)
-from templates import (PANEL_CLOSE_LABEL, PANEL_COLLAPSED, PANEL_EXPANDED,
-                       PANEL_HINTS, PANEL_OPEN_LABEL)
+from templates import (LEAGUE_NAMES, PANEL_CLOSE_LABEL, PANEL_COLLAPSED,
+                       PANEL_EXPANDED, PANEL_HINTS, PANEL_OPEN_LABEL)
 from tghtml import normalize
 from views.digest import DigestView
 
@@ -444,6 +444,12 @@ async def on_fixtures_league(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await show_fixtures(update, context, page=0)
 
 
+def standings_title(league_id: int, season: object) -> str:
+    """排行榜标题：用登记的联赛名，未登记的才回退「联赛 N」。"""
+    name = LEAGUE_NAMES.get(int(league_id)) or f"联赛 {league_id}"
+    return f"{name} · 赛季 {season}"
+
+
 async def show_standings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """🏆 联赛排名：渲染积分榜。"""
     query = update.callback_query
@@ -469,7 +475,8 @@ async def show_standings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = ui.format_standings_page(
             rows,
             settings.timezone,
-            league_name=f"联赛 {settings.league_id} · 赛季 {service.season_in_use}",
+            league_name=standings_title(
+                settings.league_id, service.season_in_use),
             updated=datetime.now(settings.timezone),
         )
         markup = ui.standings_keyboard()
