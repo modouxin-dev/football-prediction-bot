@@ -137,6 +137,7 @@ class Settings:
     prematch_tilt: float      # PREMATCH_TILT：阵型攻守倾向权重
     rating_strength: float    # RATING_STRENGTH：首发评分强度，0 = 不启用球员评估
     weather_strength: float   # WEATHER_STRENGTH：天气强度，默认 0（关闭）
+    signal_ab_enabled: bool   # SIGNAL_AB_ENABLED：赛前信号对照采集，默认开启
 
     @property
     def requested_season(self) -> int:
@@ -361,6 +362,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 log.warning("WEATHER_STRENGTH 越界 [%s, %s]，回退默认 %s：%r",
                             STRENGTH_MIN, STRENGTH_MAX, DEFAULT_WEATHER_STRENGTH, raw_ws)
 
+    # 赛前信号对照采集：**默认开启**。它只是旁路写库（每行几 KB 的三项概率），
+    #   不参与预测计算，关掉它就永远攒不出"信号到底有没有用"的证据，
+    #   权重就只能继续拍脑袋。真正要关的场景只有：库容量紧张、或确认不打算
+    #   做信号定标。注意它依赖 prematch_enabled —— 信号都没施加就没有对照可言。
+    signal_ab_enabled = parse_bool(_get(env, "SIGNAL_AB_ENABLED"), True)
+
     ensemble_learn = _get(env, "ENSEMBLE_LEARN", "").strip().lower() in (
         "1", "true", "yes", "on")
     ensemble_eta = DEFAULT_ETA
@@ -421,4 +428,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         prematch_tilt=prematch_tilt,
         rating_strength=rating_strength,
         weather_strength=weather_strength,
+        signal_ab_enabled=signal_ab_enabled,
     )

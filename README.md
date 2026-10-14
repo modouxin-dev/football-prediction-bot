@@ -457,6 +457,11 @@ xG 等实时数据），见下文「尚未考虑」。
 | `SIGNAL_STRONG_THRESHOLD` | `0.15` | 强信号阈值，主指标只统计达到该强度的场次 |
 | `SIGNAL_MIN_SAMPLES` | `30` | 复盘「样本不足」阈值，低于该值只报数量不报命中率 |
 
+**采集链路**：`service._predict_one` 在 `predict_match` **之后、市场融合之前**
+调用 `signal_capture.capture()` —— 必须卡在这个位置：再往下 `analysis` 就被
+换成市场口径了，采到的就不是模型口径。采集按信号类型**逐类独立 try**，
+某一类的反事实算不出来只标 `partial_failure`，不连累其他类。
+
 ### 已实现但未接入的两个模块（原因与证据）
 
 | 模块 | 回测结论 | 处置 |

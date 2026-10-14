@@ -62,6 +62,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 from datetime import datetime, timezone
 from typing import Any
 
@@ -235,3 +236,167 @@ def hit(probs: list[float] | None, idx: int | None) -> int | None:
     if probs is None or idx is None or sum(probs) <= 0:
         return None
     return 1 if max(range(3), key=lambda i: probs[i]) == idx else 0
+
+
+# ---- 统计口径 -------------------------------------------------------------
+# 两个口径必须分开存，混在一起会得出错误结论：
+#   all    该信号类型的**全部**对照行（含弱信号）
+#   strong 只统计强度达标的"强信号场"——弱信号本来就不该产生明显影响，
+#          把它们混进主指标只会稀释信噪比，故 strong 是**主指标**。
+#
+# Both views must be stored separately; merging them misleads. `strong` is the
+# headline metric: weak signals are not expected to move anything, so including
+# them only dilutes the signal-to-noise ratio.
+
+def _mean(values: list[float | None]) -> float | None:
+    clean = [v for v in values if v is not None]
+    return sum(clean) / len(clean) if clean else None
+
+
+def bootstrap_ci(pairs: list[tuple[float | None, float | None]],
+                 *, resamples: int = 2000, ci: float = 0.95,
+                 seed: int | None = None) -> tuple[float, float] | None:
+    """对「signal − base」的成对差值做 bootstrap，返回 (lo, hi)。
+
+    成对重采样（而不是分别对两组重采样）是因为两版预测来自同一场比赛，
+    不独立 —— 分开重采样会低估方差、给出过窄的置信区间。
+
+    差值 < 0 表示信号让指标**变好**（Log Loss / RPS 越低越准）。
+    区间跨 0 即"看不出差异"，此时不能宣称信号有效。
+    """
+    deltas = [s - b for b, s in pairs if b is not None and s is not None]
+    n = len(deltas)
+    if n < 2:
+        return None
+    rng = random.Random(seed)
+    means: list[float] = []
+    for _ in range(max(int(resamples), 1)):
+        total = 0.0
+        for _ in range(n):
+            total += deltas[rng.randrange(n)]
+        means.append(total / n)
+    means.sort()
+    alpha = (1.0 - ci) / 2.0
+    lo = means[int(math.floor(alpha * len(means)))]
+    hi = means[int(math.ceil((1.0 - alpha) * len(means))) - 1]
+    return (lo, hi)
+
+
+def _view(rows: list[dict[str, Any]], *, base_key: str, sig_key: str,
+          label: str, min_samples: int) -> dict[str, Any]:
+    """在给定行集合上算一个口径的全部指标。"""
+    pairs_ll: list[tuple[float | None, float | None]] = []
+    hits_b: list[int | None] = []
+    hits_s: list[int | None] = []
+    ll_b: list[float | None] = []
+    ll_s: list[float | None] = []
+    rps_b: list[float | None] = []
+    rps_s: list[float | None] = []
+    for row in rows:
+        idx = outcome_index(row.get("actual_home"), row.get("actual_away"))
+        if idx is None:
+            continue                       # 未结算的行不参与统计
+        base = _load_probs(row.get(base_key))
+        sig = _load_probs(row.get(sig_key))
+        pairs_ll.append((log_loss(base, idx), log_loss(sig, idx)))
+        hits_b.append(hit(base, idx))
+        hits_s.append(hit(sig, idx))
+        ll_b.append(log_loss(base, idx))
+        ll_s.append(log_loss(sig, idx))
+        rps_b.append(rps(base, idx))
+        rps_s.append(rps(sig, idx))
+    hb, hs = _mean(hits_b), _mean(hits_s)
+    lb, ls = _mean(ll_b), _mean(ll_s)
+    rb, rs_ = _mean(rps_b), _mean(rps_s)
+    n = len([p for p in pairs_ll if p[0] is not None and p[1] is not None])
+    return {
+        "label": label,
+        "n": n,
+        "hit_base": hb,
+        "hit_signal": hs,
+        "hit_delta": (hs - hb) if (hb is not None and hs is not None) else None,
+        "logloss_base": lb,
+        "logloss_signal": ls,
+        "logloss_delta": (ls - lb) if (lb is not None and ls is not None) else None,
+        "rps_base": rb,
+        "rps_signal": rs_,
+        "rps_delta": (rs_ - rb) if (rb is not None and rs_ is not None) else None,
+        "insufficient": n < max(int(min_samples), 1),
+        "ci_logloss": bootstrap_ci(pairs_ll),
+    }
+
+
+def summarise(rows: list[Any], *, strong_threshold: float = DEFAULT_STRONG_THRESHOLD,
+              min_samples: int = DEFAULT_MIN_SAMPLES,
+              seed: int | None = 20261014) -> dict[str, Any]:
+    """把对照行聚合成「每种信号有没有用」的结论。
+
+    rows 可以是 sqlite3.Row 或 dict；无法识别的形态返回空结论而不是报错
+    （复盘不能因为读不到对照数据就整个挂掉）。
+
+    主指标是 **strong 口径**（强信号场）；all 口径一并给出，但不能拿它
+    下结论 —— 弱信号本来就预期无效，混进来只会把真实效果稀释掉。
+
+    对照 baseline 用 **partial_baseline**（有其他信号、独缺本类），这才是
+    "这一类信号的增量价值"；pure_baseline 另给一列，用于看"所有信号合起来"。
+    """
+    parsed: list[dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            parsed.append(row)
+        else:
+            try:
+                parsed.append(dict(row))
+            except (TypeError, ValueError):
+                continue
+    if not parsed:
+        return {"total": 0, "by_signal": {}, "threshold": strong_threshold,
+                "min_samples": min_samples}
+
+    by_signal: dict[str, Any] = {}
+    types = sorted({str(r.get("signal_type")) for r in parsed
+                    if r.get("signal_type")})
+    for sig_type in types:
+        mine = [r for r in parsed if str(r.get("signal_type")) == sig_type]
+        strong = []
+        for r in mine:
+            strength = _finite_or_none(r.get("signal_strength"))
+            if strength is not None and abs(strength) >= strong_threshold:
+                strong.append(r)
+        by_signal[sig_type] = {
+            "all": _view(mine, base_key="partial_baseline",
+                         sig_key="signal_prediction", label="all",
+                         min_samples=min_samples),
+            "strong": _view(strong, base_key="partial_baseline",
+                            sig_key="signal_prediction", label="strong",
+                            min_samples=min_samples),
+            "vs_pure": _view(mine, base_key="pure_baseline",
+                             sig_key="signal_prediction", label="vs_pure",
+                             min_samples=min_samples),
+            "n_rows": len(mine),
+            "n_strong": len(strong),
+        }
+    return {"total": len(parsed), "by_signal": by_signal,
+            "threshold": strong_threshold, "min_samples": min_samples}
+
+
+def verdict(entry: dict[str, Any]) -> str:
+    """把一种信号的统计结论翻译成一句话。样本不足时**明确说不足**。
+
+    刻意不做自动调参：样本少时自动调参会把偶然波动当成规律，越学越差。
+    这里只负责把结论说清楚，改不改由人决定。
+    """
+    strong = entry.get("strong") or {}
+    n = strong.get("n") or 0
+    if n < max(int(entry.get("min_samples", DEFAULT_MIN_SAMPLES) or 0), 1):
+        return f"样本不足（{n} 场），暂不评估"
+    delta = strong.get("logloss_delta")
+    ci = strong.get("ci_logloss")
+    if delta is None:
+        return f"样本不足（{n} 场有效），暂不评估"
+    if ci and ci[0] <= 0 <= ci[1]:
+        return f"无显著差异（{n} 场，Log Loss Δ={delta:+.4f}，置信区间跨 0）"
+    better = "更好" if delta < 0 else "更差"
+    hit_d = strong.get("hit_delta")
+    hit_txt = "" if hit_d is None else f"，命中率 {hit_d * 100:+.1f}pp"
+    return f"信号使预测{better}（{n} 场，Log Loss Δ={delta:+.4f}{hit_txt}）"

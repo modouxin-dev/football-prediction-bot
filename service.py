@@ -26,6 +26,7 @@ from context import (context_factors, merge_factors, player_ratings,
                      squad_positions, weighted_absence_load)
 from data_source import DataSourceError
 from repository import PredictionRepository
+from signal_capture import capture as capture_signal_ab, split_factors
 from templates import LEAGUE_ORDER
 from weather import WeatherClient
 
@@ -581,6 +582,19 @@ class PredictionService:
             stats["saved"] += n
         return stats
 
+    def _signal_ab_snapshot(self) -> dict[str, Any]:
+        """当前关键配置快照，随每条对照记录一起存。
+
+        半年后要回答"为什么那段时间对照结果长那样"，光看代码不够 ——
+        代码里只有今天的默认值，而当时的强度、融合权重、温度可能完全不同。
+        没有这个快照，历史对照数据就废了一半。
+        """
+        s = self.settings
+        keys = ("prematch_enabled", "prematch_strength", "prematch_tilt",
+                "rating_strength", "weather_strength", "market_weight",
+                "temperature")
+        return {k: getattr(s, k, None) for k in keys}
+
     async def _prematch_factors(
         self,
         fixture_id: Any,
@@ -589,11 +603,16 @@ class PredictionService:
         away_id: Any,
         city: str | None = None,
         season: int | None = None,
+        split_out: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """合成全部赛前信号（伤停 / 首发阵容 / 球员评估 / 天气）修正因子。
 
         返回 None 表示「不修正」，此时模型行为与接入前**逐位一致**：
         未启用、拿不到任何信号、或修正量本身为零，都属于这种情况。
+
+        `split_out` 传入一个空 dict 时，会把**四类信号各自独立**的因子填进去，
+        供 `signal_capture.capture` 计算三版对照预测。它是旁路输出：
+        填充分裂因子的失败只告警，不影响返回的 merged 与实际预测。
         """
         settings = getattr(self, "settings", None)
         if not getattr(settings, "prematch_enabled", False):
@@ -652,6 +671,22 @@ class PredictionService:
         merged = merge_factors(factors, context)
         if merged is None:
             return None
+        # 旁路：把四类信号各自独立的因子交给采集器算对照。失败只告警 ——
+        # 对照是为了以后能变好，不能因为它挂了影响本次预测。
+        if split_out is not None:
+            try:
+                split_out.update(split_factors(
+                    home_id, away_id,
+                    injuries=injuries, lineups=lineups, loads=loads or None,
+                    start_xi=start_xi or None, ratings=ratings or None,
+                    weather_sample=weather,
+                    prematch_strength=getattr(settings, "prematch_strength", 0.5),
+                    prematch_tilt=getattr(settings, "prematch_tilt", 0.0),
+                    rating_strength=rating_strength,
+                    weather_strength=weather_strength,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("分裂赛前信号因子失败（fixture=%s）：%s", fixture_id, exc)
         # 修正量全为零（例如只有存疑伤停且强度为 0）时同样视为不修正
         if all(abs(merged[side][k] - 1.0) < 1e-12
                for side in ("home", "away") for k in ("attack", "concede")):
@@ -749,12 +784,25 @@ class PredictionService:
         season = self._season_by_league.get(league_id, self.season_in_use) \
             if league_id is not None else self.season_in_use
         city = ((fx.get("fixture") or {}).get("venue") or {}).get("city")
+        split_out: dict[str, Any] = {}
         prematch = await self._prematch_factors(
-            fixture_id, kickoff, home["id"], away["id"], city=city, season=season)
+            fixture_id, kickoff, home["id"], away["id"], city=city, season=season,
+            split_out=split_out)
         analysis = self.analyzer.predict_match(
             model, home["id"], away["id"], temperature=self.temperature,
             prematch=prematch,
         )
+        # 对照采集紧跟在 predict_match 之后：此时 analysis 还是"刚算出"的状态，
+        # 再往下就会被市场融合改写，采到的就不是模型口径了。
+        # 采集失败只告警（capture 内部已保证），不影响本次预测。
+        if (getattr(self.settings, "signal_ab_enabled", False)
+                and prematch and split_out):
+            capture_signal_ab(
+                self.repo, fixture_id=fixture_id, analyzer=self.analyzer,
+                model=model, home_id=home["id"], away_id=away["id"],
+                by_signal=split_out, temperature=self.temperature,
+                config_snapshot=self._signal_ab_snapshot(),
+            )
         odds_error: str | None = None
         try:
             odds_response = await self.api.get_odds(fixture_id, fresh=fresh)
