@@ -249,6 +249,36 @@ CREATE TABLE IF NOT EXISTS signal_weight_log (
 );
 CREATE INDEX IF NOT EXISTS idx_swl_type ON signal_weight_log(signal_type, created_at);
 
+-- 发布级配置快照：每次发布记录当时的关键配置。半年后回答"那时对照结果
+-- 为什么长那样"必须靠它 —— 代码里只有今天的默认值，而当时的强度/阈值
+-- /融合权重可能完全不同，没有快照历史数据就废了一半。
+CREATE TABLE IF NOT EXISTS config_snapshot (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    version     TEXT,             -- 代码版本（commit SHA 或 release tag）
+    payload     TEXT NOT NULL,    -- JSON：各信号权重、阈值、融合权重等
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cfg_snap_created
+    ON config_snapshot(created_at);
+
+-- 对照数据的只读视图：把 JSON 概率列展开成数值列，导出/外部分析直接查它，
+-- 不用在每个脚本里重复解析 JSON（重复解析迟早会有一处漏掉口径）。
+CREATE VIEW IF NOT EXISTS v_signal_ab AS
+SELECT id, fixture_id, signal_type, signal_strength, signal_strength_norm,
+       change_type, status, error, actual_home, actual_away,
+       CAST(json_extract(pure_baseline,    '$.home') AS REAL) AS pure_home,
+       CAST(json_extract(pure_baseline,    '$.draw') AS REAL) AS pure_draw,
+       CAST(json_extract(pure_baseline,    '$.away') AS REAL) AS pure_away,
+       CAST(json_extract(partial_baseline, '$.home') AS REAL) AS partial_home,
+       CAST(json_extract(partial_baseline, '$.draw') AS REAL) AS partial_draw,
+       CAST(json_extract(partial_baseline, '$.away') AS REAL) AS partial_away,
+       CAST(json_extract(signal_prediction,'$.home') AS REAL) AS signal_home,
+       CAST(json_extract(signal_prediction,'$.draw') AS REAL) AS signal_draw,
+       CAST(json_extract(signal_prediction,'$.away') AS REAL) AS signal_away,
+       human_note, config_snapshot, is_test, is_archived,
+       created_at, updated_at
+FROM signal_ab;
+
 -- 迁移完成标记：补列脚本必须幂等，且跑过一次后不必每次启动都扫全表。
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name        TEXT PRIMARY KEY,
@@ -1611,6 +1641,57 @@ class PredictionRepository:
         except Exception as exc:
             log.warning("读取权重历史失败：%s", exc)
             return []
+
+
+    def save_config_snapshot(self, *, version: str, payload: Any,
+                             created_at: str) -> bool:
+        """记录发布级配置快照。只追加，永不覆盖。"""
+        try:
+            text = payload if isinstance(payload, str) else json.dumps(
+                payload, ensure_ascii=False)
+            conn = self._connect()
+            conn.execute(
+                "INSERT INTO config_snapshot(version, payload, created_at) "
+                "VALUES(?,?,?)", (version, text, created_at))
+            conn.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("写入配置快照失败：%s", exc)
+            return False
+
+    def config_snapshots(self, limit: int = 50) -> list[sqlite3.Row]:
+        try:
+            conn = self._connect()
+            return list(conn.execute(
+                "SELECT * FROM config_snapshot ORDER BY id DESC LIMIT ?",
+                (int(limit),)))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("读取配置快照失败：%s", exc)
+            return []
+
+    def signal_ab_view(self, *, signal_type: str | None = None,
+                       include_test: bool = False,
+                       limit: int = 5000) -> list[sqlite3.Row]:
+        """读 v_signal_ab 视图（概率已展开成数值列，供导出与外部分析）。
+
+        视图不存在时（极老的库）回退到直接查表，绝不因为视图缺失就失败。
+        """
+        try:
+            conn = self._connect()
+            sql = "SELECT * FROM v_signal_ab WHERE 1=1"
+            args: list[Any] = []
+            if not include_test:
+                sql += " AND is_test=0"
+            if signal_type:
+                sql += " AND signal_type=?"
+                args.append(signal_type)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            args.append(int(limit))
+            return list(conn.execute(sql, args))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("读取对照视图失败，回退查表：%s", exc)
+            return self.signal_ab_rows(signal_type=signal_type,
+                                       include_test=include_test, limit=limit)
 
 
 def _stable_id(raw: str) -> int:

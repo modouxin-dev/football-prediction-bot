@@ -138,6 +138,9 @@ class Settings:
     rating_strength: float    # RATING_STRENGTH：首发评分强度，0 = 不启用球员评估
     weather_strength: float   # WEATHER_STRENGTH：天气强度，默认 0（关闭）
     signal_ab_enabled: bool   # SIGNAL_AB_ENABLED：赛前信号对照采集，默认开启
+    signal_ab_write_enabled: bool
+    # SIGNAL_AB_WRITE_ENABLED：**默认关闭**。只有显式开启才允许改信号权重，
+    # 线上服务不给写权限 —— 这样任何代码 bug 都不可能意外改掉权重。
 
     @property
     def requested_season(self) -> int:
@@ -368,6 +371,11 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     #   做信号定标。注意它依赖 prematch_enabled —— 信号都没施加就没有对照可言。
     signal_ab_enabled = parse_bool(_get(env, "SIGNAL_AB_ENABLED"), True)
 
+    # 权重写权限：**默认关闭**。改权重是本项目唯一会真实改变预测结果的操作，
+    #   比改代码更危险（代码错了测试会失败，权重错了只是悄悄变差）。
+    #   线上服务只开读权限，调权重走 signal_admin.apply_weight 并二次确认。
+    signal_ab_write_enabled = parse_bool(_get(env, "SIGNAL_AB_WRITE_ENABLED"), False)
+
     ensemble_learn = _get(env, "ENSEMBLE_LEARN", "").strip().lower() in (
         "1", "true", "yes", "on")
     ensemble_eta = DEFAULT_ETA
@@ -429,4 +437,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         rating_strength=rating_strength,
         weather_strength=weather_strength,
         signal_ab_enabled=signal_ab_enabled,
+        signal_ab_write_enabled=signal_ab_write_enabled,
     )

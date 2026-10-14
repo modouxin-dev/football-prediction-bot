@@ -456,6 +456,33 @@ xG 等实时数据），见下文「尚未考虑」。
 | `SIGNAL_AB_ENABLED` | 开启 | 关闭后不再写入对照记录（预测行为不变） |
 | `SIGNAL_STRONG_THRESHOLD` | `0.15` | 强信号阈值，主指标只统计达到该强度的场次 |
 | `SIGNAL_MIN_SAMPLES` | `30` | 复盘「样本不足」阈值，低于该值只报数量不报命中率 |
+| `SIGNAL_AB_WRITE_ENABLED` | 关闭 | 权重**写**权限，默认只读；开启后才允许改信号权重 |
+
+### 权重治理：先模拟、再确认、只追加
+
+调权重是本项目**唯一会真实改变预测结果**的操作，比改代码更危险 —— 代码错了
+测试会失败，权重错了只是悄悄变差。故设三道关：
+
+1. **默认只读**：`SIGNAL_AB_WRITE_ENABLED` 默认关闭，线上服务不给写权限，
+   任何代码 bug 都不可能意外改掉权重。
+2. **先模拟**：`signal_admin.simulate_weight()` 算出"如果应用新权重，过去 N 场
+   会怎样"，看过模拟结果再决定。⚠️ 模拟是**线性近似**（没存 λ，只能按
+   `partial + (signal − partial) · w_new/w_cur` 缩放），只能判断方向，不能当最终数值。
+3. **二次确认 + 只追加**：`apply_weight(confirm=True)` 才真正写入；每次变更
+   （含"仅建议"）都进 `signal_weight_log`，旧值永久保留。
+
+### 排查与导出
+
+| 工具 | 用途 |
+| --- | --- |
+| `python signal_ab_cli.py <match_id>` | 打印该场全部对照记录与三版概率增量 |
+| `python signal_ab_cli.py --stats` | 按信号类型汇总"有没有用" |
+| `python signal_ab_cli.py --simulate injury 0.8` | 模拟把某类信号强度改成 0.8 |
+| `python signal_ab_cli.py --export out.csv` | 导出对照数据（视图 `v_signal_ab` 已把 JSON 概率展开成数值列） |
+| `signal_admin.export_csv / rows_to_jsonl` | 程序化导出，供外部做统计检验 |
+
+配置快照存 `config_snapshot` 表 —— 半年后回答"那时对照结果为什么长那样"
+必须靠它，代码里只有今天的默认值。
 
 **采集链路**：`service._predict_one` 在 `predict_match` **之后、市场融合之前**
 调用 `signal_capture.capture()` —— 必须卡在这个位置：再往下 `analysis` 就被
