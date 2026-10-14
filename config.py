@@ -16,6 +16,12 @@ import pytz
 
 from paths import DB_PATH
 
+from analyzer import (
+    DEFAULT_MARKET_WEIGHT,
+    MARKET_WEIGHT_MAX,
+    MARKET_WEIGHT_MIN,
+)
+
 log = logging.getLogger(__name__)
 
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
@@ -109,6 +115,7 @@ class Settings:
     data_source_mode: str  # "auto" / "api-football" / "football-data"
     db_path: str  # 预测落盘路径（SQLite）；目录不可写时自动回退内存存储
     web_url: str  # 网页看板地址（WEB_URL）；为空时 /web 提示未部署
+    market_weight: float  # 市场锚定权重 w：0=纯模型，1=纯市场（见 analyzer 模块说明）
 
     @property
     def requested_season(self) -> int:
@@ -242,6 +249,25 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     # 未配置时 /web 会明确提示未部署，而不是给出一条打不开的链接。
     web_url = (_get(env, "WEB_URL") or "").strip().rstrip("/")
 
+    # 市场锚定权重：P_final = w·市场 + (1−w)·模型。
+    # 非法值（非数字 / 越界）一律回退默认，绝不因为配错就把预测算废。
+    market_weight = DEFAULT_MARKET_WEIGHT
+    raw_w = _get(env, "MARKET_BLEND_WEIGHT")
+    if raw_w:
+        try:
+            parsed_w = float(raw_w)
+        except ValueError:
+            log.warning("MARKET_BLEND_WEIGHT 不是数字，回退默认 %s：%r",
+                        DEFAULT_MARKET_WEIGHT, raw_w)
+        else:
+            if MARKET_WEIGHT_MIN <= parsed_w <= MARKET_WEIGHT_MAX:
+                market_weight = parsed_w
+            else:
+                log.warning(
+                    "MARKET_BLEND_WEIGHT 越界 [%s, %s]，回退默认 %s：%r",
+                    MARKET_WEIGHT_MIN, MARKET_WEIGHT_MAX,
+                    DEFAULT_MARKET_WEIGHT, raw_w)
+
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
     if push_raw is None and (_get(env, "SCHEDULED_HOUR") or _get(env, "SCHEDULED_MINUTE")):
@@ -277,4 +303,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         data_source_mode=data_source_mode,
         db_path=db_path,
         web_url=web_url,
+        market_weight=market_weight,
     )
