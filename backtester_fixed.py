@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import paths
+from analyzer import DEFAULT_MARKET_WEIGHT
 from backtest import (DEFAULT_MIN_HISTORY, WalkForwardBacktester, compare,
                       level_monotonic)
 from football_data import LEAGUE_ID_TO_CODE
@@ -52,18 +53,30 @@ class BacktesterFixed:
         db_path: str | Path | None = None,
         variant: str = "poisson",
         min_history: int | None = None,
+        market_weight: float | None = None,
     ) -> None:
         """
         :param league_id: 联赛 ID，39=英超（默认）。见 LEAGUE_ID_TO_CODE。
         :param season:    只回测该赛季；None（默认）= 全部可用赛季。
         :param db_path:   SQLite 路径，默认取 paths.DB_PATH。
-        :param variant:   "poisson"（默认，与线上口径一致）/ "elo" / "dc"。
+        :param variant:   "poisson"（默认）/ "elo" / "dc" / "blended"。
         :param min_history: 预热场次数，少于此值不计入评估（默认 30）。
+        :param market_weight: 市场锚定融合权重 w（0~1）。None = 不启用市场口径。
+            "blended" 变体等价于 w=0.75，与线上 ``MARKET_WEIGHT`` 默认一致。
+
+        口径对齐说明：线上推送走的是 ``service.apply_market_adjustment``，
+        即 **w·市场 + (1−w)·模型** 的融合口径（默认 w=0.75），不是纯泊松。
+        因此要看线上真实表现，必须显式启用市场口径；默认仍为纯泊松，
+        因为基线/挑战者对照需要纯模型一侧，且历史回测分数要保持可比。
         """
         self.league_id = int(league_id)
         self.season = season
         self.db_path = str(db_path) if db_path is not None else str(paths.DB_PATH)
         self.variant = variant
+        # 变体 "blended" 是融合口径的快捷写法，权重取线上默认值。
+        if market_weight is None and variant == "blended":
+            market_weight = DEFAULT_MARKET_WEIGHT
+        self.market_weight = market_weight
         self.min_history = (
             DEFAULT_MIN_HISTORY if min_history is None else int(min_history)
         )
@@ -131,14 +144,21 @@ class BacktesterFixed:
 
         use_elo = self.variant == "elo"
         use_dc = self.variant == "dc"
+        # 市场融合口径：与线上 blend_with_market 同逻辑。
+        # 无赔率的场次由 WalkForwardBacktester 内部回落纯泊松，行为与生产一致。
+        use_market = self.market_weight is not None
 
-        # 基线恒为纯泊松：线上 service.py 调 predict_match() 不传 Elo，
-        # 即线上跑的就是纯泊松，基线必须与之对齐才有对照意义。
+        # 基线恒为纯泊松，作为对照的一侧。
+        # 注意：这**不等于**线上口径 —— 线上是市场融合（w=0.75）。
+        # 早期注释误写为「线上跑的就是纯泊松」，只考虑了 Elo 维度、
+        # 漏掉了市场融合维度，导致回测长期用错尺子。此处保留纯泊松是刻意的
+        # 对照设计，但看线上真实表现要看 challenger（且须传 market_weight）。
         baseline = WalkForwardBacktester(
             min_history=self.min_history, use_elo=False, use_dc=False,
         ).run(matches)
         challenger_tester = WalkForwardBacktester(
             min_history=self.min_history, use_elo=use_elo, use_dc=use_dc,
+            use_market=use_market, market_weight=self.market_weight,
         )
         challenger = challenger_tester.run(matches)
         comparison = compare(baseline, challenger)
@@ -170,6 +190,11 @@ class BacktesterFixed:
             "rho": challenger_tester.rho if use_dc else None,
             "corpus": self.corpus_info,
             "variant": self.variant,
+            # 口径标签：让看板能区分「纯泊松」与「市场融合 w=0.75」，
+            # 避免再看错尺子 —— 早期回测表清一色 poisson 却以为代表线上。
+            "scheme": ("market" if self.market_weight is None
+                       else f"blend-{self.market_weight:.2f}"),
+            "market_weight": self.market_weight,
             "min_history": self.min_history,
         })
         return out

@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 仅类型检查用；运行时本模块已依赖 pytz
     from pytz.tzinfo import BaseTzInfo
@@ -511,3 +511,53 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         prematch_push_lead_minutes=prematch_push_lead_minutes,
         prematch_push_force_minutes=prematch_push_force_minutes,
     )
+
+
+# ============================================================================
+# 配置自检
+# ============================================================================
+# 事故复盘：赛前信号（prematch_* / rating_strength）曾长期"解析了却没传进
+# Settings"，线上恒取默认 False/0，整个信号链路是死代码，而日志一片正常。
+# 根因是**没有任何地方打印实际生效值** —— 大家以为配了就是配了。
+#
+# 因此启动时必须把关键字段的真实生效值打出来，并在"环境变量写了、
+# 生效值却不一致"时告警。这不是调试便利，是防死代码复发的护栏。
+#
+# 只列真实存在的字段；不存在的用 getattr 兜底为 None，绝不凭印象编名字。
+
+AUDIT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("PREMATCH_ENABLED", "prematch_enabled"),
+    ("PREMATCH_STRENGTH", "prematch_strength"),
+    ("PREMATCH_TILT", "prematch_tilt"),
+    ("RATING_STRENGTH", "rating_strength"),
+    ("WEATHER_STRENGTH", "weather_strength"),
+    ("MARKET_WEIGHT", "market_weight"),
+    ("PREMATCH_REFRESH_MINUTES", "prematch_refresh_minutes"),
+    ("PREMATCH_PUSH_ENABLED", "prematch_push_enabled"),
+    ("SIGNAL_AB_ENABLED", "signal_ab_enabled"),
+)
+
+
+def audit_settings(settings: Any, env: Mapping[str, str] | None = None
+                   ) -> tuple[list[str], list[str]]:
+    """返回 (生效值行, 告警行)。
+
+    告警规则：环境变量显式设置了、但 Settings 上的生效值为假值
+    （False / 0）—— 这正是"解析了没传进去"的典型症状。
+    """
+    src: Mapping[str, str] = os.environ if env is None else env
+    lines: list[str] = []
+    warnings: list[str] = []
+    for env_name, attr in AUDIT_FIELDS:
+        value = getattr(settings, attr, None)
+        lines.append(f"  {env_name}={value!r}")
+        raw = src.get(env_name)
+        if raw is None or str(raw).strip() == "":
+            continue
+        # 显式配置却没生效 —— 八成是漏传字段或解析回退到了默认值
+        if value is None or value is False or value == 0:
+            warnings.append(
+                f"[CONFIG_WARNING] {env_name} 已设为 {raw!r}，"
+                f"但生效值是 {value!r}（疑似未接入 Settings）"
+            )
+    return lines, warnings

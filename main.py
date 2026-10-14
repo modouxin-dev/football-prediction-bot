@@ -30,7 +30,7 @@ from commands import CommandRuntime, build_dispatcher
 from commands.adapters import FakeUpdate
 from commands.admin import storage_cmd
 from commands.basic import toggle_panel_message
-from config import ConfigError, Settings, load_settings
+from config import ConfigError, Settings, audit_settings, load_settings
 from data_source import DataSourceRouter
 from football_data import FootballDataAPI
 from keyboards import Keyboards
@@ -1101,6 +1101,12 @@ def main() -> None:
         settings.api_provider,
         len(settings.admin_ids),
     )
+    # 配置自检：打印**实际生效值**，而不是"我以为配了什么"。
+    # 赛前信号曾因漏传字段长期是死代码，日志却完全正常 —— 护栏就从这里开始。
+    audit_lines, audit_warnings = audit_settings(settings)
+    log.info("[CONFIG_AUDIT] 实际生效配置：\n%s", "\n".join(audit_lines))
+    for line in audit_warnings:
+        log.warning(line)
     # 持久卷自检：未挂载时 Elo 评分与命中率统计会在重启后清零，必须提前暴露
     warn = paths.persistence_warning()
     if warn:

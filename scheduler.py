@@ -426,9 +426,13 @@ async def backtest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     app = context.application
     service: PredictionService = app.bot_data["service"]
     try:
+        # 口径必须显式对齐线上：线上推送是 w·市场+(1−w)·模型 的融合口径，
+        # 不传 market_weight 就退化成纯泊松，回测分数代表不了线上真实表现。
+        # 这里用 settings 的真实生效值，而不是写死 0.75 —— 改了配置必须跟着变。
         bt = BacktesterFixed(
             league_id=service.settings.league_id,
             db_path=getattr(service.settings, "db_path", None),
+            market_weight=getattr(service.settings, "market_weight", None),
         )
         result = await bt.backtest()
         run_id = service.repo.save_backtest_run(
