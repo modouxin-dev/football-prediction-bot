@@ -188,6 +188,72 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_bt_comp_created
     ON backtest_runs(competition, created_at);
+
+-- 赛前信号对照：一行 = 一场比赛 × 一种信号类型（见 signal_ab 模块顶部说明）。
+-- 同一场可能同时触发伤停与阵容，混在一行就没法拆开评估每种信号的价值。
+CREATE TABLE IF NOT EXISTS signal_ab (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    fixture_id            TEXT NOT NULL,
+    signal_type           TEXT NOT NULL,   -- 字符串而非枚举：新增类型不改表
+    signal_strength       REAL,            -- 原始值（归一化逻辑会变，原始值不会）
+    signal_strength_norm  REAL,            -- 归一化值，仅展示参考
+    change_type           TEXT NOT NULL DEFAULT 'applied',  -- applied / revoked
+    pure_baseline         TEXT,            -- 无任何赛前信号的预测（JSON）
+    partial_baseline      TEXT,            -- 有他类信号、独缺本类的预测（JSON）
+    signal_prediction     TEXT,            -- 施加本信号后的预测（JSON）
+    human_note            TEXT,            -- human readable，复盘时一眼看懂
+    status                TEXT NOT NULL DEFAULT 'ok',      -- ok / partial_failure
+    error                 TEXT,
+    actual_home           INTEGER,
+    actual_away           INTEGER,
+    settled_at            TEXT,
+    is_processed          INTEGER NOT NULL DEFAULT 0,
+    is_archived           INTEGER NOT NULL DEFAULT 0,  -- 预留：将来归档不用改表
+    is_test               INTEGER NOT NULL DEFAULT 0,  -- 测试污染必须能过滤掉
+    config_snapshot       TEXT,            -- 当时的关键配置，半年后回溯靠它
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+-- 复盘查询按 (fixture_id, signal_type) 聚合；重新预测时 UPDATE 同一行，
+-- 而不是 INSERT 新行 —— 否则同一场会有多条记录，复盘不知道该用哪条。
+CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_ab
+    ON signal_ab(fixture_id, signal_type);
+CREATE INDEX IF NOT EXISTS idx_signal_ab_processed
+    ON signal_ab(is_processed);
+CREATE INDEX IF NOT EXISTS idx_signal_ab_type
+    ON signal_ab(signal_type, is_processed);
+
+-- 信号类型注册表：新增类型先在这里登记，避免在代码里硬编码散落各处。
+CREATE TABLE IF NOT EXISTS signal_registry (
+    signal_type  TEXT PRIMARY KEY,
+    label        TEXT NOT NULL,
+    description  TEXT,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL
+);
+
+-- 权重变更历史：只追加、永不覆盖。旧权重必须永久保留，否则没法回答
+-- "某段时间表现差是不是因为权重不好"。
+CREATE TABLE IF NOT EXISTS signal_weight_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_type   TEXT NOT NULL,
+    old_weight    REAL,
+    new_weight    REAL,
+    applied       INTEGER NOT NULL DEFAULT 0,   -- 0=仅建议/模拟，1=已真正应用
+    sample_from   TEXT,
+    sample_to     TEXT,
+    n_samples     INTEGER,
+    metric        TEXT,
+    reason        TEXT,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swl_type ON signal_weight_log(signal_type, created_at);
+
+-- 迁移完成标记：补列脚本必须幂等，且跑过一次后不必每次启动都扫全表。
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name        TEXT PRIMARY KEY,
+    applied_at  TEXT NOT NULL
+);
 """
 
 QUOTA_SCHEMA = """
@@ -372,6 +438,82 @@ class PredictionRepository:
             conn.commit()
         except Exception as exc:  # 补列失败不能拖垮启动
             log.warning("补建比赛统计列失败：%s", exc)
+        self._ensure_signal_ab_columns()
+        self._seed_signal_registry()
+
+    # 旧库补列必须幂等：跑两次不能报错、不能重复补。
+    # 完成后写一条迁移标记，下次启动先查标记，避免每次扫全表。
+    SIGNAL_AB_COLUMNS = {
+        "signal_strength_norm": "REAL",
+        "partial_baseline": "TEXT",
+        "human_note": "TEXT",
+        "is_archived": "INTEGER NOT NULL DEFAULT 0",
+        "is_test": "INTEGER NOT NULL DEFAULT 0",
+        "config_snapshot": "TEXT",
+    }
+
+    def _migration_done(self, name: str) -> bool:
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE name=?", (name,)).fetchone()
+        except Exception:
+            return False
+        return row is not None
+
+    def _mark_migration(self, name: str) -> None:
+        try:
+            conn = self._connect()
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations(name, applied_at) VALUES(?,?)",
+                (name, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            conn.commit()
+        except Exception as exc:
+            log.warning("写入迁移标记失败（%s）：%s", name, exc)
+
+    def _ensure_signal_ab_columns(self) -> None:
+        """为早期版本的 signal_ab 表补列；已跑过则直接跳过（幂等）。"""
+        name = "signal_ab_extra_columns_v1"
+        if self._migration_done(name):
+            return
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='signal_ab'").fetchall()
+            if not rows:
+                # 表不存在说明本次启动的 executescript 会建好，无需补列
+                self._mark_migration(name)
+                return
+            existing = {r["name"] for r in conn.execute("PRAGMA table_info(signal_ab)")}
+            for col, ddl in self.SIGNAL_AB_COLUMNS.items():
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE signal_ab ADD COLUMN {col} {ddl}")
+            conn.commit()
+        except Exception as exc:  # 补列失败不能拖垮启动
+            log.warning("补建 signal_ab 列失败：%s", exc)
+            return
+        self._mark_migration(name)
+
+    def _seed_signal_registry(self) -> None:
+        """把已注册的信号类型写进注册表；已存在的不覆盖（保留自定义描述）。"""
+        from signal_ab import SIGNAL_REGISTRY, utc_now_iso
+        name = "signal_registry_seed_v1"
+        if self._migration_done(name):
+            return
+        try:
+            conn = self._connect()
+            now = utc_now_iso()
+            for sig_type, label, desc in SIGNAL_REGISTRY:
+                conn.execute(
+                    "INSERT OR IGNORE INTO signal_registry"
+                    "(signal_type, label, description, enabled, created_at) "
+                    "VALUES(?,?,?,1,?)", (sig_type, label, desc, now))
+            conn.commit()
+        except Exception as exc:
+            log.warning("初始化信号注册表失败：%s", exc)
+            return
+        self._mark_migration(name)
 
     @property
     def persistent(self) -> bool:
@@ -1274,6 +1416,200 @@ class PredictionRepository:
                 "SELECT * FROM sync_log ORDER BY id DESC LIMIT ?", (limit,)
             ))
         except Exception:
+            return []
+
+    # ---- 赛前信号对照（signal_ab）------------------------------------------
+    # 设计要点见 signal_ab 模块顶部：一行 = 一场比赛 × 一种信号类型，
+    # 重复触发 UPDATE 同一行，信号消失标 revoked，算不出 signal 版标
+    # partial_failure。写入失败一律只告警，绝不阻断预测主流程。
+    def save_signal_ab(
+        self,
+        *,
+        fixture_id: Any,
+        signal_type: str,
+        pure_baseline: Any = None,
+        signal_prediction: Any = None,
+        partial_baseline: Any = None,
+        signal_strength: Any = None,
+        signal_strength_norm: Any = None,
+        change_type: str = "applied",
+        human_note: str = "",
+        error: str | None = None,
+        config_snapshot: Any = None,
+        is_test: bool = False,
+    ) -> bool:
+        """写入/更新一条对照记录（按 fixture_id + signal_type 唯一）。
+
+        返回是否成功。任何异常都被吞掉并告警 —— 对照是为了以后能变好，
+        不能因为它挂了导致今天的预测发不出去。
+        """
+        from signal_ab import (STATUS_OK, STATUS_PARTIAL_FAILURE, VALID_CHANGE_TYPES,
+                               VALID_STATUSES, _dump_probs, utc_now_iso)
+        try:
+            if change_type not in VALID_CHANGE_TYPES:
+                change_type = "applied"
+            status = STATUS_OK if error is None else STATUS_PARTIAL_FAILURE
+            if status not in VALID_STATUSES:
+                status = STATUS_OK
+            now = utc_now_iso()
+            snap = config_snapshot
+            if snap is not None and not isinstance(snap, str):
+                try:
+                    snap = json.dumps(snap, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    snap = None
+            conn = self._connect()
+            conn.execute(
+                """INSERT INTO signal_ab
+                   (fixture_id, signal_type, signal_strength, signal_strength_norm,
+                    change_type, pure_baseline, partial_baseline, signal_prediction,
+                    human_note, status, error, is_processed, is_archived, is_test,
+                    config_snapshot, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?)
+                   ON CONFLICT(fixture_id, signal_type) DO UPDATE SET
+                     signal_strength=excluded.signal_strength,
+                     signal_strength_norm=excluded.signal_strength_norm,
+                     change_type=excluded.change_type,
+                     pure_baseline=excluded.pure_baseline,
+                     partial_baseline=excluded.partial_baseline,
+                     signal_prediction=excluded.signal_prediction,
+                     human_note=excluded.human_note,
+                     status=excluded.status,
+                     error=excluded.error,
+                     is_test=excluded.is_test,
+                     config_snapshot=excluded.config_snapshot,
+                     updated_at=excluded.updated_at""",
+                (str(fixture_id), str(signal_type), signal_strength,
+                 signal_strength_norm, change_type,
+                 _dump_probs(pure_baseline), _dump_probs(partial_baseline),
+                 _dump_probs(signal_prediction), human_note or "",
+                 status, error, 1 if is_test else 0, snap, now, now),
+            )
+            conn.commit()
+            return True
+        except Exception as exc:
+            log.warning("写入信号对照失败（fixture=%s type=%s）：%s",
+                        fixture_id, signal_type, exc)
+            return False
+
+    def signal_ab_rows(self, *, settled_only: bool = False,
+                       signal_type: str | None = None,
+                       include_test: bool = False,
+                       include_archived: bool = False,
+                       limit: int = 5000) -> list[sqlite3.Row]:
+        """读取对照记录。默认过滤测试数据与已归档数据。"""
+        try:
+            conn = self._connect()
+            sql = "SELECT * FROM signal_ab WHERE 1=1"
+            args: list[Any] = []
+            if not include_test:
+                sql += " AND is_test=0"
+            if not include_archived:
+                sql += " AND is_archived=0"
+            if settled_only:
+                sql += " AND actual_home IS NOT NULL AND actual_away IS NOT NULL"
+            if signal_type:
+                sql += " AND signal_type=?"
+                args.append(signal_type)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            args.append(int(limit))
+            return list(conn.execute(sql, args))
+        except Exception as exc:
+            log.warning("读取信号对照失败：%s", exc)
+            return []
+
+    def signal_ab_for_fixture(self, fixture_id: Any,
+                              include_test: bool = False) -> list[sqlite3.Row]:
+        """某场比赛的全部对照记录（调试用：一场比赛会触发多种信号）。"""
+        try:
+            conn = self._connect()
+            sql = "SELECT * FROM signal_ab WHERE fixture_id=?"
+            args: list[Any] = [str(fixture_id)]
+            if not include_test:
+                sql += " AND is_test=0"
+            sql += " ORDER BY signal_type"
+            return list(conn.execute(sql, args))
+        except Exception as exc:
+            log.warning("读取单场信号对照失败（fixture=%s）：%s", fixture_id, exc)
+            return []
+
+    def settle_signal_ab(self, rows: list[tuple[Any, int, int]]) -> int:
+        """回填真实比分。rows = [(fixture_id, home, away), ...]。
+
+        只更新尚未结算的记录，返回实际更新行数。回填失败不抛异常。
+        """
+        if not rows:
+            return 0
+        from signal_ab import utc_now_iso
+        now = utc_now_iso()
+        updated = 0
+        try:
+            conn = self._connect()
+            for fixture_id, home, away in rows:
+                try:
+                    h, a = int(home), int(away)
+                except (TypeError, ValueError):
+                    continue
+                cur = conn.execute(
+                    "UPDATE signal_ab SET actual_home=?, actual_away=?, "
+                    "settled_at=?, is_processed=1 "
+                    "WHERE fixture_id=? AND actual_home IS NULL",
+                    (h, a, now, str(fixture_id)))
+                updated += cur.rowcount or 0
+            conn.commit()
+        except Exception as exc:
+            log.warning("回填信号对照比分失败：%s", exc)
+        return updated
+
+    def unsettled_signal_ab(self, limit: int = 500) -> list[sqlite3.Row]:
+        """待回填的对照记录（用于重试队列）。"""
+        try:
+            conn = self._connect()
+            return list(conn.execute(
+                "SELECT * FROM signal_ab WHERE is_test=0 AND is_archived=0 "
+                "AND (actual_home IS NULL OR actual_away IS NULL) "
+                "ORDER BY updated_at DESC LIMIT ?", (int(limit),)))
+        except Exception as exc:
+            log.warning("读取待回填对照失败：%s", exc)
+            return []
+
+    def log_signal_weight(self, *, signal_type: str, old_weight: Any,
+                          new_weight: Any, applied: bool,
+                          sample_from: str | None = None,
+                          sample_to: str | None = None,
+                          n_samples: int | None = None,
+                          metric: str | None = None,
+                          reason: str = "") -> bool:
+        """追加一条权重变更审计日志。只追加、永不覆盖已有记录。"""
+        from signal_ab import utc_now_iso
+        try:
+            conn = self._connect()
+            conn.execute(
+                "INSERT INTO signal_weight_log"
+                "(signal_type, old_weight, new_weight, applied, sample_from, "
+                " sample_to, n_samples, metric, reason, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (str(signal_type), old_weight, new_weight, 1 if applied else 0,
+                 sample_from, sample_to, n_samples, metric, reason, utc_now_iso()))
+            conn.commit()
+            return True
+        except Exception as exc:
+            log.warning("写入权重审计日志失败：%s", exc)
+            return False
+
+    def signal_weight_history(self, signal_type: str | None = None,
+                              limit: int = 100) -> list[sqlite3.Row]:
+        try:
+            conn = self._connect()
+            if signal_type:
+                return list(conn.execute(
+                    "SELECT * FROM signal_weight_log WHERE signal_type=? "
+                    "ORDER BY id DESC LIMIT ?", (signal_type, int(limit))))
+            return list(conn.execute(
+                "SELECT * FROM signal_weight_log ORDER BY id DESC LIMIT ?",
+                (int(limit),)))
+        except Exception as exc:
+            log.warning("读取权重历史失败：%s", exc)
             return []
 
 
