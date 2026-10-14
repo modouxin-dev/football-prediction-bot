@@ -712,8 +712,12 @@ def market_gap(model_probs: dict, odds: dict | None) -> dict[str, float]:
     }
 
 
-def apply_market_adjustment(analysis: dict, odds: dict | None,
-                         blend_weight: float | None = None) -> dict:
+def apply_market_adjustment(
+    analysis: dict,
+    odds: dict | None,
+    blend_weight: float | None = None,
+    target_probs: dict | None = None,
+) -> dict:
     """用去水市场概率替换胜平负，并按结果块等比缩放比分矩阵。
 
     为什么必须同步缩放矩阵，而不只替换三项概率：
@@ -724,6 +728,13 @@ def apply_market_adjustment(analysis: dict, odds: dict | None,
 
     泊松结果原样保留在 poisson_probs 中作为内部基准；
     无赔率或去水失败时 market_used=False，行为与改造前完全一致。
+
+    target_probs（多模型集成路径）：
+        由 ensemble.EnsemblePredictor 融合多路后给出的最终概率
+        {"home","draw","away"}。给定该参数时**跳过**从赔率反推，
+        直接拿它作为缩放目标 —— 这样比分矩阵会与集成结果自洽，
+        不会出现「最可能比分 1-0」却「客胜概率最高」的矛盾。
+        不传时行为完全不变（向后兼容）。
     """
     result = dict(analysis)
     result["poisson_probs"] = {
@@ -731,16 +742,37 @@ def apply_market_adjustment(analysis: dict, odds: dict | None,
         "draw": analysis.get("draw_prob", 0.0),
         "away": analysis.get("loss_prob", 0.0),
     }
-    market = implied_probabilities(odds)
-    if not market:
-        result["market_used"] = False
-        result["market_probs"] = None
-        return result
+    if target_probs:
+        # 集成路径：概率已由集成器算好，只做合法性校验与归一化。
+        # 这里刻意不再碰 blend_weight —— 市场该占多少权重是集成器的职责，
+        # 在这之后再叠加一次融合等于把同一件事做两遍。
+        try:
+            tp = {
+                "home": float(target_probs.get("home", 0.0)),
+                "draw": float(target_probs.get("draw", 0.0)),
+                "away": float(target_probs.get("away", 0.0)),
+            }
+        except (TypeError, ValueError):
+            tp = None
+        tp_sum = sum(tp.values()) if tp else 0.0
+        if not tp or tp_sum <= 0:
+            result["market_used"] = False
+            result["market_probs"] = None
+            return result
+        market = {k: v / tp_sum for k, v in tp.items()}
+        result["ensemble_used"] = True
+    else:
+        market = implied_probabilities(odds)
+        if not market:
+            result["market_used"] = False
+            result["market_probs"] = None
+            return result
 
     # 市场锚定融合：blend_weight 非 None 时，缩放目标从「纯市场」改为
     # w·市场 + (1−w)·模型。矩阵仍按结果块等比缩放，因此最可能比分、
     # 大小球与三项概率保持自洽（不会出现「最可能比分 1-0」与「客胜最高」并存）。
-    if blend_weight is not None:
+    # 集成路径下 target_probs 已含融合结果，此处必须跳过（见上方注释）。
+    if blend_weight is not None and not target_probs:
         model_p = (
             float(analysis.get("win_prob", 0.0) or 0.0),
             float(analysis.get("draw_prob", 0.0) or 0.0),
