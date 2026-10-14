@@ -373,19 +373,22 @@ def test_menu_analysis_shows_fixtures_to_choose():
     assert q.edits and "今日赛程" in q.edits[0][0]
 
 
-def test_standings_highlights_top_three():
-    """前三名必须是「队名+积分」卡片并带副行，不能和其余行一样挤成表格。"""
+def test_standings_rank_column_uses_number_emoji():
+    """名次列必须是 1️⃣~🔟 的符号列：纵向成列，且不再混用奖牌破坏一致性。
+
+    旧格式前三用 🥇🥈🥉、其余用数字，同一列里两套符号，视觉上不成列。
+    """
     rows = [
         {"team": {"name": f"T{i}"}, "rank": i, "points": 30 - i * 2,
          "all": {"win": 10 - i, "draw": 0, "lose": i}}
         for i in range(1, 6)
     ]
     text = BotUI.format_standings_page(rows, SETTINGS.timezone, league_name="英超 · 2026")
-    assert "🥇" in text and "🥈" in text and "🥉" in text
+    for mark in ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"):
+        assert mark in text
+    # 奖牌已不再使用（留着会让名次列出现两套符号）
+    assert "🥇" not in text and "🥈" not in text and "🥉" not in text
     assert "28分" in text  # 榜首积分
-    assert "└" in text  # 前三副行战绩
-    # 前三之外不再用奖牌，改用紧凑序号
-    assert text.count("🥇") == 1
 
 
 def test_standings_omits_bare_unit_when_points_missing():

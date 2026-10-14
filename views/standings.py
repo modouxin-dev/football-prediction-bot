@@ -5,15 +5,23 @@
 
 from __future__ import annotations
 
-from formatkit import BLANK, _row_summary, esc, team_name
-from templates import DISCLAIMER, NO_DATA, SEP, THIN_SEP
+from formatkit import (_row_summary, align_cjk, esc, pad_cjk, rank_marker,
+                       team_short_name)
+from templates import DISCLAIMER, NO_DATA, SEP
 from views.common import CommonView
+
+# 列宽：队名最长 14 列（7 个汉字），其余按内容定宽。
+# 战绩取 6 列：胜平负都可能是两位数（12-2-1），给 5 列会被截成 12-2… —— 丢数据。
+# 整行 = 名次 2 + 间隔 1 + 队名 14 + 1 + 积分 4 + 1 + 战绩 6 + 1 + 净胜 4 = 34 列，
+# 小于 MOBILE_MAX_COLS(36)，手机上不会折行（有测试锁死）。
+TEAM_W = 14
+PTS_W, REC_W, DIFF_W = 4, 6, 4
 
 
 class StandingsView:
     @staticmethod
     def format_standings_page(rows: list[dict], tz, limit: int = 20, league_name: str = "", updated=None) -> str:
-        """联赛排名：前 3 名做成数据卡片突出重点，其余用紧凑单行，避免 20 行糊成一片。
+        """联赛排名：整表进等宽块做列对齐，排头用 1️⃣~🔟 让名次纵向成列。
 
         参数名用 league_name 而非 league_label：后者是 formatkit 导出的**函数**，
         同名会在本作用域内把它遮蔽掉（pyflakes W0404 场景），
@@ -33,39 +41,30 @@ class StandingsView:
             return "\n".join(lines)
 
         shown = rows[:limit]
-        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        # 表头 + 每行同进 <code> 等宽块：Telegram 正文是比例字体，只有等宽块里
+        # pad_cjk 按显示宽度补的空格才是「真正的列」（见 formatkit.kv_line）。
+        # 排头符号用 1️⃣~🔟/两位数字，宽度恒为 2 列，纵向自然成列。
+        lines.append(
+            f"<code>{'  '} {pad_cjk('球队', TEAM_W)} {pad_cjk('积分', PTS_W)}"
+            f" {pad_cjk('战绩', REC_W)} {pad_cjk('净胜', DIFF_W)}</code>"
+        )
         for i, row in enumerate(shown, start=1):
             summary = _row_summary(row)
-            name = esc(team_name((row.get("team") or {}).get("name")))
+            name = esc(team_short_name((row.get("team") or {}).get("name")))
             rank = (summary or {}).get("rank") or i
             pts = (summary or {}).get("points")
-            points = f"{pts}分" if pts is not None else "-"  # 无积分时不显示孤立的「分」字
+            # 无积分时只显示「-」，不显示孤立的「分」字
+            points = align_cjk(f"{int(pts)}分" if pts is not None else "-", PTS_W, "right")
             record = f"{summary['win']}-{summary['draw']}-{summary['lose']}" if summary else "-"
-            avg_for = f"{summary['avg_for']:.2f}" if summary and summary["avg_for"] is not None else "-"
-            avg_against = (
-                f"{summary['avg_against']:.2f}"
-                if summary and summary["avg_against"] is not None else "-"
+            # 净胜球：优先用 API 的 goalsDiff，缺了就用场均进失球 × 场次反推
+            gd = row.get("goalsDiff")
+            if gd is None and summary and summary["avg_for"] is not None \
+                    and summary["avg_against"] is not None:
+                gd = round((summary["avg_for"] - summary["avg_against"]) * summary["played"])
+            diff_txt = align_cjk("-" if gd is None else f"{int(gd):+d}", DIFF_W, "right")
+            lines.append(
+                f"<code>{rank_marker(rank)} {pad_cjk(name, TEAM_W)} {points}"
+                f" {align_cjk(record, REC_W)} {diff_txt}</code>"
             )
-            if i <= 3:
-                # 前三：两行卡片，卡片之间留空行——三张卡挤在一起时
-                # 视觉上会连成一整块，分不清哪里是第二名的开始。
-                if i > 1:
-                    lines.append(BLANK)
-                # 战绩保留 6-0-1 紧凑式（这是对外承诺的格式，有测试断言），
-                # 场均进失球作为补充信息追加在后面。
-                lines.append(f"{medals[i]} <b>{name}</b>　<b>{points}</b>")
-                # summary 可能为 None（积分榜行缺字段），此时只显示占位符，
-                # 不能去下标取值——那会让整条 /standings 崩掉
-                detail = f"{record} · 场均 {avg_for} / {avg_against}" if summary else "战绩数据缺失"
-                lines.append(f"└ <code>{esc(detail)}</code>")
-            else:
-                # 前三与其余之间空一行：两块视觉上分开，不会读成连续的一列
-                if i == 4:
-                    lines.append(THIN_SEP)
-                # 其余：紧凑单行。序号用等宽 2 位补位（个位数与两位数才不会错开）；
-                # 队名长度不一，不对它做列对齐——比例字体下补空格无效。
-                lines.append(
-                    f"<code>{str(rank):>2}</code> {name}　<code>{points} · {record}</code>"
-                )
         lines += [SEP, DISCLAIMER]
         return "\n".join(lines)

@@ -371,6 +371,14 @@ def display_width(text: str) -> int:
             width += 2
             i = j
             continue
+        # 数字符号表情（1️⃣ = 数字 + VS16 + U+20E3）渲染成一个字形（2 列）。
+        # 逐字符累加会算成 3 列，而 🔟 是单个字符只算 2 列 —— 同一列里
+        # 混用两者时（排名 1~20）每行的起点就会错开 1 列，表格对不齐。
+        if i + 2 < len(text) and ch.isdigit() and text[i + 1] == "️" \
+                and text[i + 2] == "⃣":
+            width += 2
+            i += 3
+            continue
         width += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
         i += 1
     return width
@@ -466,6 +474,25 @@ STATUS_EMOJI = {
 def status_emoji(short: str) -> str:
     """比赛状态短码 → 图标；未收录返回 ⚪。"""
     return STATUS_EMOJI.get(str(short or "").upper(), "⚪")
+
+
+KEYCAP_DIGITS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣",
+                 "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟")
+
+
+def rank_marker(rank: int) -> str:
+    """名次 → 固定 2 列的排头符号，用于积分榜这类需要纵向对齐的表格。
+
+    1~10 用数字符号表情，11 名起用普通数字补到 2 列 —— 两者显示宽度都是
+    2 列（见 display_width 对键帽序列的处理），混排时列首不会错开。
+    """
+    try:
+        n = int(rank)
+    except (TypeError, ValueError):
+        return "--"
+    if 1 <= n <= 10:
+        return KEYCAP_DIGITS[n - 1]
+    return f"{n:>2}" if 0 <= n < 100 else "--"
 
 
 def split_html_blocks(text: str, limit: int = 3500) -> list[str]:
