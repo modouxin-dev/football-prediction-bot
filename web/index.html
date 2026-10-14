@@ -126,6 +126,7 @@
     .cols-3{grid-template-columns:1fr 1fr}
   }
   .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .tblwrap>table{min-width:680px}
 </style>
 </head>
 <body>
@@ -413,9 +414,9 @@ function strengthCard(st, noHead){
       <td class="num">${t.played}</td><td class="num">${t.attack.toFixed(2)}</td>
       <td class="num">${t.defense.toFixed(2)}</td><td class="num"><b>${t.overall.toFixed(2)}</b></td></tr>`;
   });
-  return head + `<table>
+  return head + `<div class="tblwrap"><table>
     <thead><tr><th>#</th><th>球队</th><th class="num">场次</th><th class="num">进攻</th><th class="num">防守</th><th class="num">综合</th></tr></thead>
-    <tbody>${rows}</tbody></table>
+    <tbody>${rows}</tbody></table></div>
     <div style="font-size:12px;color:var(--dim);margin-top:8px">进攻越大越强；防守越大表示失球越多（越差）。综合 = 进攻 − 防守。</div>
   </div>`;
 }
@@ -436,9 +437,9 @@ function backtestCard(bt, noHead){
       + `<td class="num">${acc}</td><td class="num">${ll}</td><td class="num">${rps}</td>`
       + `<td class="num">${dbc}/${cvc}</td><td>${esc(r.verdict||'')}</td></tr>`;
   }).join('');
-  return head + `<table><thead><tr><th>时间</th><th>口径</th><th class="num">场次</th>`
+  return head + `<div class="tblwrap"><table><thead><tr><th>时间</th><th>口径</th><th class="num">场次</th>`
     + `<th class="num">命中率</th><th class="num">Log Loss</th><th class="num">RPS</th>`
-    + `<th class="num">库内/语料</th><th>判定</th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<th class="num">库内/语料</th><th>判定</th></tr></thead><tbody>${rows}</tbody></table></div>`
     + `<div style="font-size:12px;color:var(--dim);margin-top:8px">`
     + `共 ${bt.count} 条记录 · 「库内/语料」说明结论基于多少真实赛果，库内越多越贴近线上`
     + `</div></div>`;
@@ -458,9 +459,9 @@ function auditCard(a, noHead){
       <td class="num">${esc(it.score)}</td>
       <td class="${it.hit?'hit':'miss'}">${it.hit?'✓':'✗'}</td></tr>`;
   });
-  return head + `<table>
+  return head + `<div class="tblwrap"><table>
     <thead><tr><th>日期</th><th>比赛</th><th>预测</th><th class="num">比分</th><th>结果</th></tr></thead>
-    <tbody>${rows}</tbody></table></div>`;
+    <tbody>${rows}</tbody></table></div></div>`;
 }
 
 /* ---------- 今日赛程：与 Telegram 推送同源 ---------- */
