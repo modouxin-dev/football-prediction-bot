@@ -22,7 +22,7 @@ from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
 from repository import BRIER_RANDOM, quota_today
 from scheduler import DAILY_JOB, run_push
 from support import describe_error
-from templates import LEAGUE_SHORT
+from templates import LEAGUE_SHORT, resolve_league
 from tghtml import normalize
 
 from . import CommandDispatcher
@@ -568,53 +568,118 @@ def _calibration_section(st: dict[str, Any], level_names: dict[str, str]) -> lis
     return blocks
 
 
-async def stats_cmd(update, context) -> None:
-    """/stats — 命中率统计（基于落盘的预测记录）。"""
-    service = context.application.bot_data["service"]
-    await _typing(update)
-    st = service.stats()
+# 联赛表现的小样本守门：低于此场次的联赛只在区块末尾统一提示一次，
+# 不逐条打标——逐条打标会把列表撑成一片 ⚠️，提示本身变成噪音。
+MIN_LEAGUE_SAMPLE = 20
+
+# 联赛表现最多列几行。超出折成「其余 N 个联赛」，既防 Telegram 4096 硬限，
+# 也避免二十几行的长列表把整体表现挤出首屏。
+LEAGUE_ROWS_LIMIT = 15
+
+# 预测方向 → 图标。顺序固定 主胜→平局→客胜，与概率三连的阅读顺序一致；
+# 用元组而不是 dict 遍历，是为了保证这个顺序不被 dict 插入序意外改变。
+DIRECTION_META: tuple[tuple[str, str], ...] = (
+    ("主胜", "🟢"), ("平局", "🟡"), ("客胜", "🔴"),
+)
+
+LEVEL_NAMES = {"high": "🟢 高", "medium": "🟡 中", "low": "🔴 低", "unknown": "⚪ 未知"}
+
+
+def render_stats(st: dict[str, Any]) -> str:
+    """/stats 正文：整体表现 → 分类准确率 → 联赛表现 → 信心分级。
+
+    抽成纯函数是为了能直接做渲染测试——只测 stats() 数据层时，键名拼错
+    导致整块内容消失的情况完全测不出来，而那正是用户唯一能感知的故障。
+
+    为什么分「按方向」和「按联赛」两个维度：只有总命中率看不出模型偏在
+    哪。主胜准而平局不准时，总分被拉成中间值，使用者既不知道该信哪类，
+    也不知道该改哪类。
+    """
+    total = st["total"]
     rate = st["rate"]
     W = 12
     # 命中率用等宽条 + 百分比：数字看大小，条看比例，两者缺一都不直观
     rate_value = f"{hbar(rate or 0.0)} {rate:.1%}" if rate is not None else "—"
-    overview = [
-        ("✅", "已结算", f"{st['total']} 场"),
-        ("🎯", "命中", f"{st['hit']} 场"),
-        ("📊", "命中率", rate_value),
-        ("⏳", "待结算", f"{st['pending']} 场"),
-        ("💾", "存储", "✅ 已落盘（重启不丢）" if st["persistent"] else "⚠️ 内存回退（重启会丢）"),
+
+    blocks: list[list[str]] = [
+        ["📊 <b>预测准确率统计</b>", BLANK],
+        section(
+            "📈", "整体表现",
+            kv_line("✅", "已结算", f"<code>{total}</code> 场", W),
+            kv_line("🎯", "命中", f"<code>{st['hit']}</code> 场", W),
+            kv_line("📊", "命中率", rate_value, W),
+            kv_line("⏳", "待结算", f"<code>{st['pending']}</code> 场", W),
+        ),
     ]
-    blocks = [
-        ["📈 <b>预测命中率</b>", BLANK],
-        section("🧾", "总览", *[kv_line(i, k, v, W) for i, k, v in overview]),
-    ]
-    if st["total"] == 0:
-        blocks.append(section("🕐", "等待首场结算", "暂无已结算的预测，赛果会在比赛结束后自动同步。"))
-    else:
-        streak = st["streak"]
-        tail = f"🔥 连续命中 {streak} 场" if streak > 0 else (
-            f"🧊 连续未中 {-streak} 场" if streak < 0 else "")
-        level_rows = []
-        level_names = {"high": "🟢 高", "medium": "🟡 中", "low": "🔴 低", "unknown": "⚪ 未知"}
-        if st["by_level"]:
-            names = level_names
-            for key in ("high", "medium", "low", "unknown"):
-                slot = st["by_level"].get(key)
-                if not slot:
-                    continue
-                r = slot["hit"] / slot["total"] if slot["total"] else 0
-                # 等级名与计数各自等宽：🟢 高 / ⚪ 未知 宽度不同，不补位会错开
-                level_rows.append(
-                    f"<code>{pad_cjk(names.get(key, key), 8)}</code>"
-                    f"<code>{hbar(r)}</code> <code>{r:>3.0%}</code>"
-                    f" <code>{slot['hit']}/{slot['total']}</code>"
-                )
-        extra = ([tail] if tail else []) + level_rows
-        if extra:
-            blocks.append(section("🏅", "按信心等级", *extra))
-        blocks.extend(_calibration_section(st, level_names))
+
+    if total == 0:
+        blocks.append(section(
+            "🕐", "等待首场结算", "暂无已结算的预测，赛果会在比赛结束后自动同步。"))
+        return normalize(section_join(blocks))
+
+    # ── 分类准确率（按预测方向）────────────────────────────────────────
+    by_result = st.get("by_result") or {}
+    dir_rows: list[str] = []
+    for label, icon in DIRECTION_META:
+        slot = by_result.get(label)
+        if not slot or not slot.get("total"):
+            continue
+        r = slot.get("rate")
+        pct = f"<code>{r:.1%}</code>" if r is not None else "—"
+        dir_rows.append(f"{icon} {esc(label)}预测 {pct}（{slot['total']} 场）")
+    if dir_rows:
+        blocks.append(section("🔍", "分类准确率", *dir_rows))
+
+    # ── 联赛表现 ───────────────────────────────────────────────────────
+    by_league = st.get("by_league") or {}
+    if by_league:
+        # 按场次降序：样本多的排前面，用户先看可信度高的那几行
+        ordered = sorted(by_league.items(), key=lambda kv: -kv[1]["total"])
+        rows: list[str] = []
+        for raw, slot in ordered[:LEAGUE_ROWS_LIMIT]:
+            flag, name, _lid = resolve_league(raw)
+            r = slot.get("rate")
+            pct = f"<code>{r:.1%}</code>" if r is not None else "—"
+            rows.append(f"{flag} {esc(name)} {pct}（{slot['total']} 场）")
+        hidden = len(ordered) - len(rows)
+        tail: list[str] = []
+        if hidden > 0:
+            tail.append(f"… 其余 {hidden} 个联赛，样本较小未列出")
+        # 只在确实存在小样本联赛时提示：提示本身也是噪音，不该常驻
+        if any(s["total"] < MIN_LEAGUE_SAMPLE for _, s in ordered):
+            tail.append(f"💡 样本量 &lt; {MIN_LEAGUE_SAMPLE} 的联赛仅供参考")
+        blocks.append(section("🏆", "联赛表现", *rows, *tail))
+
+    # ── 信心分级 ───────────────────────────────────────────────────────
+    streak = st.get("streak") or 0
+    tail = (f"🔥 连续命中 {streak} 场" if streak > 0
+            else f"🧊 连续未中 {-streak} 场" if streak < 0 else "")
+    level_rows: list[str] = []
+    by_level = st.get("by_level") or {}
+    for key in ("high", "medium", "low", "unknown"):
+        slot = by_level.get(key)
+        if not slot:
+            continue
+        r = slot["hit"] / slot["total"] if slot["total"] else 0
+        # 等级名与计数各自等宽：🟢 高 / ⚪ 未知 宽度不同，不补位会错开
+        level_rows.append(
+            f"<code>{pad_cjk(LEVEL_NAMES.get(key, key), 8)}</code>"
+            f"<code>{hbar(r)}</code> <code>{r:>3.0%}</code>"
+            f" <code>{slot['hit']}/{slot['total']}</code>"
+        )
+    extra = ([tail] if tail else []) + level_rows
+    if extra:
+        blocks.append(section("🏅", "按信心等级", *extra))
+    blocks.extend(_calibration_section(st, LEVEL_NAMES))
+    return normalize(section_join(blocks))
+
+
+async def stats_cmd(update, context) -> None:
+    """/stats — 命中率统计（基于落盘的预测记录）。"""
+    service = context.application.bot_data["service"]
+    await _typing(update)
     await update.effective_message.reply_text(
-        normalize(section_join(blocks)), parse_mode="HTML", disable_web_page_preview=True
+        render_stats(service.stats()), parse_mode="HTML", disable_web_page_preview=True
     )
 
 

@@ -1003,11 +1003,16 @@ class PredictionRepository:
         return [dict(r) for r in rows]
 
     def stats(self) -> dict[str, Any]:
-        """命中率统计：总命中、连胜/连败、各信心等级命中率。"""
+        """命中率统计：总命中、连胜/连败、各信心等级 / 预测方向 / 联赛命中率。
+
+        by_result 与 by_league 是后加的两个细分维度：只有总命中率看不出模型
+        偏在哪（主胜准而平局不准时，总分会被拉到中间值）。两者恒定存在——
+        空库时是空字典而不是缺失键，调用方不必做 hasattr 防御。
+        """
         try:
             conn = self._connect()
             rows = list(conn.execute(
-                "SELECT level_key, result, actual_home, actual_away, kickoff, "
+                "SELECT level_key, result, league, actual_home, actual_away, kickoff, "
                 "home_prob, draw_prob, away_prob "
                 "FROM predictions WHERE actual_home IS NOT NULL AND actual_away IS NOT NULL "
                 "ORDER BY kickoff"
@@ -1015,6 +1020,7 @@ class PredictionRepository:
         except Exception as exc:
             log.warning("统计命中率失败：%s", exc)
             return {"total": 0, "hit": 0, "rate": None, "streak": 0, "by_level": {},
+                    "by_result": {}, "by_league": {},
                     "pending": 0, "persistent": self.persistent,
                     "brier": None, "logloss": None, "scored": 0}
 
@@ -1024,6 +1030,8 @@ class PredictionRepository:
         brier_sum = 0.0
         logloss_sum = 0.0
         by_level: dict[str, dict[str, Any]] = {}
+        by_result: dict[str, dict[str, Any]] = {}
+        by_league: dict[str, dict[str, Any]] = {}
         for r in rows:
             actual = _outcome(r["actual_home"], r["actual_away"])
             if actual is None:
@@ -1035,6 +1043,17 @@ class PredictionRepository:
                 streak = streak + 1 if streak >= 0 else 1
             else:
                 streak = -1 if streak >= 0 else streak - 1
+            # 预测方向维度：result 为空（老记录/降级路径）时不计入，
+            # 但这场仍计入总场次——宁可方向维度少一场，也不能总数对不上。
+            if r["result"]:
+                slot_r = by_result.setdefault(r["result"], {"total": 0, "hit": 0})
+                slot_r["total"] += 1
+                slot_r["hit"] += 1 if ok else 0
+            # 联赛维度：缺失归「其它」而不是丢弃，理由同上（各项之和须等于总数）
+            lg = (r["league"] or "").strip() or "其它"
+            slot_l = by_league.setdefault(lg, {"total": 0, "hit": 0})
+            slot_l["total"] += 1
+            slot_l["hit"] += 1 if ok else 0
             lv = r["level_key"] or "unknown"
             slot = by_level.setdefault(
                 lv, {"total": 0, "hit": 0, "scored": 0, "brier_sum": 0.0, "logloss_sum": 0.0})
@@ -1070,12 +1089,19 @@ class PredictionRepository:
         except Exception:
             pending = 0
 
+        # 两个细分维度补 rate：与顶层 rate 同一口径（0~1 小数），
+        # 让视图层不必再自己算一遍除法。
+        for slot in list(by_result.values()) + list(by_league.values()):
+            slot["rate"] = (slot["hit"] / slot["total"]) if slot["total"] else None
+
         return {
             "total": total,
             "hit": hit,
             "rate": (hit / total) if total else None,
             "streak": streak,
             "by_level": by_level,
+            "by_result": by_result,
+            "by_league": by_league,
             "pending": pending,
             "persistent": self.persistent,
             "scored": scored,

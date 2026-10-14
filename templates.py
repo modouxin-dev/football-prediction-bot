@@ -118,6 +118,58 @@ LEAGUE_SHORT: dict[int, str] = {
     1: "世界杯", 4: "欧洲杯",
 }
 
+# predictions.league 存的是**数据源给的联赛名字符串**（service 里是
+# league=league.get("name")），不是数字 ID。按联赛聚合命中率时拿到的键
+# 是 "Premier League" / "PL" 这类字符串，直接显示既不统一也不好看——
+# 同一个联赛因主备源命名不同会裂成两行。这里做归一：别名 → 联赛 ID，
+# 再复用 LEAGUE_SHORT / LEAGUE_FLAGS 出中文短名与旗帜。
+#
+# 键统一小写比较，避免 "Premier League" 与 "premier league" 裂成两项。
+# 已知歧义：巴甲(71) 与意甲(135) 在主源里都可能叫 "Serie A"，这里取意甲
+# （项目默认启用且更常用）；巴甲靠 football-data 的 code "BSA" 区分。
+# 歧义只在名字完全相同时出现，不影响按 ID 聚合的路径。
+LEAGUE_ALIASES: dict[str, int] = {
+    # football-data.org 的 competition code（备用源口径）
+    "pl": 39, "elc": 40, "fl1": 61, "bsa": 71, "bl1": 78,
+    "ded": 88, "ppl": 94, "sa": 135, "pd": 140, "cl": 2,
+    "cli": 2, "el": 3, "ecl": 848,
+    # api-football 的 league.name（主源口径）
+    "premier league": 39, "efl championship": 40, "championship": 40,
+    "ligue 1": 61, "serie a": 135,
+    "brasileirao": 71, "brasileirao serie a": 71,
+    "campeonato brasileiro serie a": 71, "serie a brasileiro": 71,
+    "bundesliga": 78, "eredivisie": 88,
+    "primeira liga": 94, "liga portugal": 94,
+    "primera division": 140, "laliga": 140, "la liga": 140,
+    "uefa champions league": 2, "champions league": 2,
+    "uefa europa league": 3, "europa league": 3,
+    "uefa europa conference league": 848, "conference league": 848,
+}
+
+
+def resolve_league(raw) -> tuple[str, str, int | None]:
+    """联赛字段 → (旗帜, 展示名, 联赛 ID)。
+
+    未登记的原样返回名称本身（ID 为 None）：宁可显示一个陌生名字，
+    也不能让这批比赛从统计里消失——用户拿「各项之和 ≠ 总场次」来质疑
+    统计，比分组难看严重得多。
+    """
+    text = (str(raw) or "").strip() if raw is not None else ""
+    if not text:
+        return "⚽", "其它", None
+    # 先按数字 ID 解析：早期记录或迁移数据可能直接存了 ID 字符串
+    try:
+        lid: int | None = int(text)
+    except ValueError:
+        lid = LEAGUE_ALIASES.get(text.lower())
+    if lid is not None:
+        return (
+            LEAGUE_FLAGS.get(lid, "⚽"),
+            LEAGUE_SHORT.get(lid) or LEAGUE_NAMES.get(lid) or text,
+            lid,
+        )
+    return "⚽", text, None
+
 # 汇总页的联赛展示顺序：五大联赛在前（与主流观赛习惯一致），
 # 欧战与其余联赛随后。未登记的联赛排最后并按 ID 升序（见 views/digest.py
 # 的 _league_sort_key）。顺序只影响观感，不影响任何查询或落库。
