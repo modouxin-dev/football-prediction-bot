@@ -100,6 +100,26 @@ def _group_by_league(items: list[dict], tz) -> list[dict]:
     return sorted(items, key=lambda f: (_league_sort_key(_league_of(f)), _kickoff_key(f, tz)))
 
 
+def _balance_rows(btns: list, per_row: int = 4) -> list[list]:
+    """把按钮均分成若干行，避免出现独占一行的孤按钮。
+
+    按固定切片（[i:i+4]）切 5 个按钮会得到 4+1：最后那一个被客户端拉满
+    整行，变成一条又宽又空的长条，比正文还宽——「按钮比输出框宽」的观感
+    就来自这里。均分后 5 个是 3+2、7 个是 4+3，行与行只差一个。
+    """
+    if not btns:
+        return []
+    rows_n = max(1, -(-len(btns) // per_row))
+    base, extra = divmod(len(btns), rows_n)
+    rows: list[list] = []
+    start = 0
+    for i in range(rows_n):
+        size = base + (1 if i < extra else 0)
+        rows.append(btns[start:start + size])
+        start += size
+    return rows
+
+
 def _league_rows(all_items: list[dict], active_lid):
     """联赛筛选按钮：每个有比赛的联赛一个，当前选中的打勾。
 
@@ -122,8 +142,9 @@ def _league_rows(all_items: list[dict], active_lid):
         if active_lid is not None and lid == active_lid:
             label = f"✅{label}"
         btns.append(InlineKeyboardButton(label, callback_data=f"fxl:{lid}"))
-    # 每行 4 个：再多手机上会换行挤压成两列窄条，短名也会被截断
-    rows = [btns[i:i + 4] for i in range(0, len(btns), 4)]
+    # 每行最多 4 个：再多手机上会换行挤压成两列窄条，短名也会被截断。
+    # 数量不能整除时均分，不留下独占一行的孤按钮。
+    rows = _balance_rows(btns, per_row=4)
     if active_lid is not None:
         rows.append([InlineKeyboardButton("↩️ 全部联赛", callback_data="fxl:all")])
     return rows
@@ -189,6 +210,15 @@ class FixturesView:
         随之重排——否则点了「预测 3」会落到另一场完全不相干的比赛上。
         """
         pool = list(all_items if all_items is not None else items)
+        stale_lid = None
+        if league_filter is not None and not any(
+            _league_of(f) == league_filter for f in pool
+        ):
+            # 筛选的联赛在这批比赛里一场都没有：多半是切了日期或模式后旧
+            # 筛选残留。联赛按钮本就是从当前这批比赛生成的，点了却空空如也
+            # 比报错更让人困惑——回退到全部，并说明是哪个联赛本时段没球。
+            stale_lid = league_filter
+            league_filter = None
         if league_filter is not None:
             items = [f for f in pool if _league_of(f) == league_filter]
         elif not multi_day:
@@ -218,6 +248,11 @@ class FixturesView:
             f" · 🌍 <code>{esc(tz.zone)}</code>",
             SEP,
         ]
+        if stale_lid is not None:
+            lname = (LEAGUE_SHORT.get(stale_lid)
+                     or LEAGUE_NAMES.get(stale_lid) or f"联赛 {stale_lid}")
+            lines.append(f"🔎 <b>{esc(lname)}</b> 本时段无比赛，已显示全部联赛")
+            lines.append(THIN_SEP)
         rows: list[list[InlineKeyboardButton]] = []
         if not chunk:
             # 空状态要说清三件事：没比赛、查了哪段时间、数据源是否正常。

@@ -109,9 +109,14 @@ def test_reply_menu_keyboard_matches_menu_items():
     # 展开态：全部功能按钮 + 末行「收起面板」，故比 MENU_ITEMS 多一个
     assert len(flat) == len(MENU_ITEMS) + 1
     assert all(isinstance(b, KeyboardButton) for b in flat)
-    assert labels[:-1] == [label for _, label in MENU_ITEMS]
+    # 底部面板按内容定宽，文案已补到等宽（全角空格）；比较时去掉填充，
+    # 比的是「是否同源 MENU_ITEMS」，不是比字节。
+    norm = lambda s: s.strip("\u3000 ")
+    assert [norm(x) for x in labels[:-1]] == [label for _, label in MENU_ITEMS]
     assert labels[-1] == PANEL_CLOSE_LABEL  # 收起按钮独占末行，避免被误当功能
-    assert labels[:-1] == [b.text for row in main.ui.menu_keyboard().inline_keyboard for b in row]
+    assert [norm(x) for x in labels[:-1]] == [
+        norm(b.text) for row in main.ui.menu_keyboard().inline_keyboard for b in row
+    ]
 
 
 def test_format_menu_shows_league_season_timezone():

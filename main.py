@@ -380,6 +380,8 @@ async def on_fixtures_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     context.user_data["fx_mode"] = raw
     context.user_data["fx_page"] = 0
+    # 与切日期同理：换模式后旧联赛筛选多半已经不适用，留着只会渲染空页
+    context.user_data.pop("fx_league", None)
     # 清空缓存，强制按新模式重新查询（不同模式查询区间不同，不能复用）
     await context.application.bot_data["cache_manager"].clear("fx_cache")
     await show_fixtures(update, context, page=0)
@@ -404,6 +406,10 @@ async def on_fixtures_day(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data["fx_mode"] = MODE_DATE
     context.user_data["fx_date"] = day
     context.user_data["fx_page"] = 0
+    # 换日期必须清掉联赛筛选：昨天筛英超、明天没有英超，筛选留着就会渲染
+    # 出一个空页——而联赛按钮是从明天的比赛生成的，看起来就成了「点了联赛
+    # 按钮却没有比赛」。
+    context.user_data.pop("fx_league", None)
     await context.application.bot_data["cache_manager"].clear("fx_cache")
     await show_fixtures(update, context, page=0)
 

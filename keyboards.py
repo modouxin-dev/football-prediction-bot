@@ -8,7 +8,34 @@ from __future__ import annotations
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove)
 
+from formatkit import display_width
 from templates import MENU_ITEMS, PANEL_CLOSE_LABEL, TABS
+
+# 底部面板（ReplyKeyboardMarkup）的按钮宽度由内容决定：文案长的按钮就比
+# 同行宽一截。实测 MENU_ITEMS 九个标签显示宽度为 11/15/11/11/11/11/11/9/11
+# ——「生成今日预测」比「网页端」宽 6 列，九个按钮排下来高矮不齐。
+# 补位只能用全角空格：半角空格落在行尾会被客户端 trim 掉，补了等于没补。
+#
+# 只补底部面板，不补 Inline 键盘：Inline 每行按钮由客户端均分宽度，本来
+# 就等宽，而按钮文字是居中渲染的——再补右侧会让文字整体偏左，反而更歪。
+PANEL_FILL = "\u3000"
+
+
+def _even_width(labels: list[str]) -> list[str]:
+    """把一组按钮文案补到相同显示宽度。
+
+    奇数余数补一个半角空格，且放在全角空格之前：让行尾字符始终是
+    全角空格，避免半角空格留在末尾被 trim 掉。
+    """
+    if not labels:
+        return []
+    target = max(display_width(x) for x in labels)
+    out = []
+    for x in labels:
+        pad = target - display_width(x)
+        out.append(x + (" " if pad % 2 else "") + PANEL_FILL * (pad // 2))
+    return out
+
 
 # 主菜单每行按钮数。
 # 实测：MENU_ITEMS 现有 8 项，按每行 2 个排是 4 行，底部面板连同「收起」
@@ -174,7 +201,7 @@ class Keyboards:
         """
         if not expanded:
             return ReplyKeyboardRemove()
-        labels = [label for _, label in MENU_ITEMS]
+        labels = _even_width([label for _, label in MENU_ITEMS])
         # 每行 MENU_PER_ROW 个，跟随 MENU_ITEMS 自动适配数量
         rows = [
             [KeyboardButton(x) for x in labels[i:i + MENU_PER_ROW]]

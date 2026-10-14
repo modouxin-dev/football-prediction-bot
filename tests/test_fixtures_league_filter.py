@@ -102,19 +102,25 @@ def test_league_button_callback_carries_league_id():
     assert data[:3] == ["fxl:39", "fxl:128", "fxl:71"]
 
 
-def test_filtered_empty_states_which_league_and_offers_upcoming():
-    """该联赛今天没球要说清楚，并给出去看它近期赛程的出口。
+def test_filtered_empty_falls_back_to_all_and_names_the_league():
+    """筛选的联赛本时段没球：回退显示全部，并点名是哪个联赛。
 
-    只显示「暂无比赛」会被当成机器人坏了——用户不知道是无球还是坏了。
+    此前只渲染一个空页（「暂无比赛 + 该联赛本时段无比赛」）。但联赛按钮
+    本来就是从当前这批比赛里生成的，点了却空空如也，用户只会理解成按钮坏
+    了——既然别的联赛有球，就直接渲染出来，同时说明为什么没按筛选显示。
     """
     items = _items()
     text, markup, _, _ = FixturesView.format_fixtures_page(
         items, TZ, per_page=10, day_label="2026-10-04",
         all_items=items, league_filter=140)  # 西甲：本批数据里没有
     plain = _plain(text)
-    assert "西甲" in plain and "该联赛本时段无比赛" in plain
+    assert "西甲" in plain and "本时段无比赛" in plain
+    # 回退后别的联赛必须真的渲染出来，否则只是换了个说法的空页
+    for team in ("利物浦", "切尔西", "飓风队", "帕尔梅拉斯"):
+        assert team in plain, team
+    # 联赛按钮仍然可用，用户可以直接点另一个联赛
     data = [b.callback_data for b in _buttons(markup)]
-    assert "fxm:upcoming" in data
+    assert any(d.startswith("fxl:") for d in data)
 
 
 def test_no_filter_shows_every_league():
