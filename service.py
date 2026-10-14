@@ -8,6 +8,7 @@ if TYPE_CHECKING:  # 仅类型检查时导入，避免运行时循环依赖
 
 import asyncio
 import logging
+import math
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -16,7 +17,8 @@ from datetime import date, datetime, timedelta, timezone
 from analyzer import (LeagueModel, MatchAnalyzer, TeamStrength,
                       apply_market_adjustment, build_league_model,
                       calculate_prediction_level, collect_1x2_odds,
-                      consensus_odds)
+                      consensus_odds, implied_probabilities)
+from ensemble import FALLBACK_PROBS, EnsemblePredictor
 from api_client import APIError, FootballAPI
 from config import Settings
 from data_source import DataSourceError
@@ -176,6 +178,35 @@ def h2h_stats(matches: list[dict[str, Any]], home_id: int) -> dict:
     }
 
 
+def _model_probs_of(analysis: dict) -> list[float] | None:
+    """从 analysis 取模型原始（未融合市场）概率 (主胜, 平, 客胜)。
+
+    apply_market_adjustment 会把融合前的概率留在 poisson_probs；
+    没有该键（未融合 / 老版本）时回退当前三项概率。
+    任一概率缺失或和 ≤ 0 时返回 None，由调用方按「无样本」处理。
+    """
+    if not isinstance(analysis, dict):
+        return None
+    src = analysis.get("poisson_probs")
+    keys: tuple[str, ...]
+    if isinstance(src, dict):
+        keys = ("home", "draw", "away")
+        vals = [src.get(k) for k in keys]
+    else:
+        keys = ("win_prob", "draw_prob", "loss_prob")
+        vals = [analysis.get(k) for k in keys]
+    out: list[float] = []
+    for v in vals:
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(f) or f < 0:
+            return None
+        out.append(f)
+    return out if sum(out) > 0 else None
+
+
 @dataclass
 class Prediction:
     # 主源 API-Football 是数字 ID；备用源 football-data.org 一律加 "fd-" 前缀
@@ -272,6 +303,13 @@ class PredictionService:
         self.settings = settings
         self.api = api
         self.analyzer = analyzer or MatchAnalyzer()
+        # 多模型集成器：三路 (统计模型 / 市场 / 联赛基线)，缺失自动重归一化。
+        # ENSEMBLE_LEARN=1 时权重随实测表现动态调整；默认固定权重，行为确定。
+        self.ensemble = EnsemblePredictor(
+            models=("model", "market", "prior"),
+            eta=getattr(settings, "ensemble_eta", 200.0),
+            learn=bool(getattr(settings, "ensemble_learn", False)),
+        )
         self.season_in_use: int = settings.season
         # 每个联赛各自解析出的赛季：多联赛下各联赛可用赛季未必相同，
         # 建模必须用「该场比赛所属联赛」的赛季，不能统一套主联赛的。
@@ -542,8 +580,35 @@ class PredictionService:
         # 市场锚定融合：w·市场 + (1−w)·模型，w 由 MARKET_BLEND_WEIGHT 配置
         # （默认 0.75）。矩阵同步缩放，故最可能比分与三项概率仍自洽。
         # 模型原始概率已由 apply_market_adjustment 存入 poisson_probs 供复盘对比。
+        # ---- 多模型集成（ensemble 模块）----
+        # 三路：统计模型 / 市场赔率 / 联赛基线。缺失的路自动重归一化，
+        # 全缺时由集成器回落到经验值 —— 保证任何情况下都出得来结论。
+        # 这里必须在 evaluate_outcomes 之后：edge 要用泊松口径算，
+        # 换成集成口径后 edge 会系统性趋近负抽水，价值投注功能就废了。
+        model_p = (
+            float(analysis.get("win_prob") or 0.0),
+            float(analysis.get("draw_prob") or 0.0),
+            float(analysis.get("loss_prob") or 0.0),
+        )
+        market_raw = implied_probabilities(odds)
+        market_p = None
+        if market_raw:
+            market_p = (market_raw["home"], market_raw["draw"], market_raw["away"])
+        ens_out = self.ensemble.predict({
+            "model": model_p,
+            "market": market_p,
+            "prior": FALLBACK_PROBS,
+        })
+        final_p = ens_out["probs"]
         analysis = apply_market_adjustment(
-            analysis, odds, blend_weight=self.settings.market_weight)
+            analysis, odds,
+            target_probs={"home": final_p[0], "draw": final_p[1],
+                          "away": final_p[2]})
+        analysis["ensemble"] = {
+            "used": ens_out["used"],
+            "weights": {k: round(v, 4) for k, v in ens_out["weights"].items()},
+            "fallback": ens_out["fallback"],
+        }
         best = max(outcomes.items(), key=lambda kv: kv[1]["edge"]) if outcomes else None
         league = fx.get("league") or {}
 
@@ -570,6 +635,14 @@ class PredictionService:
                 "has_home_data": home["id"] in (getattr(model, "teams", {}) or {}),
                 "has_away_data": away["id"] in (getattr(model, "teams", {}) or {}),
                 "odds_count": len(bookmakers),
+                # 模型原始（未融合）概率：温度校准必须用这个口径。
+                # home_prob 存的是融合后的展示概率，市场占 w（默认 0.75）——
+                # 拿它拟合温度等于在校准市场，而实测市场已校准良好
+                # （校准后 Δlogloss=0、ΔECE=0），泊松才是过度自信的那一方
+                # （泊松+温度：Δlogloss −0.0034、ΔECE −0.0126）。
+                # 两者混用会让 T 被市场成分稀释到 ≈1.0，泊松的偏差得不到修正。
+                "model_probs": _model_probs_of(analysis),
+                "market_blended": bool(analysis.get("market_blended")),
                 # 赔率取不到时保留真实原因（套餐不含 / 未开盘 / 限流），
                 # 展示层据此如实说明，而不是笼统显示「暂无赔率数据」。
                 "odds_error": odds_error,

@@ -27,7 +27,8 @@ from typing import Any, Sequence
 from analyzer import (DEFAULT_AVG_AWAY_GOALS, DEFAULT_AVG_HOME_GOALS,
                       DEFAULT_RHO, MatchAnalyzer, apply_temperature,
                       build_league_model, calculate_prediction_level, fit_rho,
-                      fit_temperature, implied_probabilities)
+                      fit_temperature, implied_probabilities,
+                      blend_with_market, DEFAULT_MARKET_WEIGHT)
 from elo import DEFAULT_RATING
 from elo import elo_multiplier as elo_multiplier
 
@@ -256,8 +257,16 @@ class WalkForwardBacktester:
                  competition: str = "BT", prior_games: int | None = None,
                  use_dsa: bool = False, use_dsa_clamp: bool = False,
                  use_sot: bool = False, use_calib: bool = False,
-                 use_market: bool = False) -> None:
+                 use_market: bool = False,
+                 market_weight: float | None = None) -> None:
         self.min_history = max(0, int(min_history))
+        # 市场锚定融合权重：None → 纯市场（历史口径）；0~1 → w·市场+(1−w)·模型。
+        # 生产是融合口径（service 传 MARKET_BLEND_WEIGHT，默认 0.75），
+        # 回测若只测纯市场就与上线行为不一致，结论无法指导调参。
+        self.market_weight = (
+            None if market_weight is None
+            else min(max(float(market_weight), 0.0), 1.0)
+        )
         # 概率温度校准：修正泊松模型系统性过度自信（见 analyzer.fit_temperature）。
         # 默认关闭以保持历史口径；开启后温度只用**截至当时**的已评估样本滚动
         # 拟合，绝不引入未来信息。
@@ -448,7 +457,8 @@ class WalkForwardBacktester:
         elif self.use_elo:
             label = "elo"
         if self.use_market:
-            label = "market"
+            label = (f"market-blend-{self.market_weight:.2f}"
+                     if self.market_weight is not None else "market")
         report = BacktestReport(label=label)
         for m in matches:
             try:
@@ -496,7 +506,14 @@ class WalkForwardBacktester:
                         # 无赔率时回落泊松，与生产回落行为一致。
                         mk = implied_probabilities(m.get("odds"))
                         if mk:
-                            probs = (mk["home"], mk["draw"], mk["away"])
+                            mk_t = (mk["home"], mk["draw"], mk["away"])
+                            if self.market_weight is None:
+                                probs = mk_t
+                            else:
+                                # 融合口径：与生产 blend_with_market 同逻辑。
+                                # 无赔率时 blend 原样返回模型概率，回落行为一致。
+                                probs = blend_with_market(
+                                    probs, mk_t, self.market_weight)
                     actual = outcome_index(hs, as_)
                     pred = favorite_index(probs)
                     hit = accuracy(pred, actual)

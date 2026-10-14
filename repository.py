@@ -685,13 +685,19 @@ class PredictionRepository:
     def settled_samples(self, limit: int = 2000) -> list[tuple[Any, ...]]:
         """已结算且三项概率齐全的样本，供温度校准拟合。
 
+        **取的是模型原始概率，不是展示概率**。predictions 表里的
+        home_prob/draw_prob/away_prob 是市场融合后的展示口径
+        （市场占 w，默认 0.75），拿它拟合温度等于在校准市场——
+        而实测市场本身已校准良好（校准后 Δlogloss=0），泊松才是过度自信方。
+        因此优先读 inputs.model_probs（融合前留档），读不到才回退展示概率。
+
         返回 [(probs, actual_index), ...]，actual_index 为 0/1/2（主胜/平局/客胜）。
         任何异常都退化为空列表——拟合不出来就保持不校准，绝不猜测。
         """
         try:
             conn = self._connect()
             rows = list(conn.execute(
-                "SELECT home_prob, draw_prob, away_prob, actual_home, actual_away "
+                "SELECT home_prob, draw_prob, away_prob, actual_home, actual_away, inputs "
                 "FROM predictions WHERE actual_home IS NOT NULL AND actual_away IS NOT NULL "
                 "AND home_prob IS NOT NULL AND draw_prob IS NOT NULL AND away_prob IS NOT NULL "
                 "ORDER BY kickoff DESC LIMIT ?",
@@ -703,13 +709,42 @@ class PredictionRepository:
         out: list[tuple[Any, ...]] = []
         for r in rows:
             try:
-                probs = [float(r["home_prob"]), float(r["draw_prob"]), float(r["away_prob"])]
                 hs, as_ = int(r["actual_home"]), int(r["actual_away"])
             except (TypeError, ValueError, KeyError):
                 continue
+            probs = self._model_probs_from_inputs(r["inputs"])
+            if probs is None:
+                # 老数据没有留档：回退展示概率（那时尚未启用市场融合）
+                try:
+                    probs = [float(r["home_prob"]), float(r["draw_prob"]),
+                             float(r["away_prob"])]
+                except (TypeError, ValueError, KeyError):
+                    continue
             if sum(probs) <= 0:
                 continue
             out.append((probs, 0 if hs > as_ else (1 if hs == as_ else 2)))
+        return out
+
+    @staticmethod
+    def _model_probs_from_inputs(raw: Any) -> list[float] | None:
+        """从 inputs JSON 取模型原始概率；缺失/损坏返回 None。"""
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        vals = data.get("model_probs")
+        if not isinstance(vals, (list, tuple)) or len(vals) < 3:
+            return None
+        try:
+            out = [float(v) for v in vals[:3]]
+        except (TypeError, ValueError):
+            return None
+        if any(not math.isfinite(v) or v < 0 for v in out) or sum(out) <= 0:
+            return None
         return out
 
     # ---- 回测留档 ----------------------------------------------------------

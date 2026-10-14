@@ -48,6 +48,145 @@ def _outcome(hs: int, as_: int) -> str:
     return "平局"
 
 
+# ============================================================================
+# 一·五、Brier 的 Murphy 分解（REL − RES + UNC）
+# ============================================================================
+# 命中率只回答「猜对几场」，答不了「失分失在哪」。Murphy 分解把多分类
+# Brier 拆成三项，让每日复盘能直接指出今天该修什么：
+#
+#   REL（可靠性 / calibration）
+#       预测说 60% 的那些场次，实际是不是真有 60% 发生。
+#       **越低越好**，只靠概率重标定就能降（代价极低）。
+#   RES（区分度 / resolution）
+#       预测有没有把「高概率场次」和「低概率场次」真正分开。
+#       **越高越好**，只能靠引入新信息提升（加特征、换信号源）。
+#   UNC（不确定性）
+#       赛果本身的随机性，与模型无关，是这块的天花板。
+#       平局多的联赛 UNC 天然更高。
+#
+# 恒等式：Brier_binned = REL − RES + UNC
+#
+# 为什么是 Brier_binned 而不是原始 Brier（重要，别用错口径）：
+#   分解要求箱内预测概率恒定。把箱内每个样本的预测换成箱内均值 p̄_k 后，
+#   箱内离差 δ=0，三项之和**精确等于**分箱口径的 Brier，不再是近似。
+#   原始 Brier 与它的差（within_bin）是模型在箱内的细粒度区分，
+#   属于「多说出来的信息」，不是失分，因此不进 REL/RES/UNC。
+#
+#   诊断归因看 brier/REL/RES/UNC；和历史数字横向对比看 brier_raw。
+#   两者混用会导致「三项加起来对不上」的假故障。
+#
+# 为什么按 top 概率分箱而不是三项各分：
+#   三项各自分箱会得到互相重叠的样本，REL/RES 无法加总回 Brier。
+MURPHY_BINS = 10
+MURPHY_MIN_PER_BIN = 5     # 箱内样本太少时该箱不参与（频率本身不可信）
+
+
+def murphy_decomposition(items: list[dict],
+                         bins: int = MURPHY_BINS) -> dict | None:
+    """对一批已结算预测做 Brier 的 Murphy 分解。
+
+    items 需含 probs=(主胜,平,客胜) 与 actual ∈ _OUTCOMES。
+    样本不足（为空 / 有效箱 < 2）返回 None——不猜、不补零。
+    """
+    if not items:
+        return None
+    n_bins = max(2, int(bins))
+    buckets: list[list[dict]] = [[] for _ in range(n_bins)]
+    for it in items:
+        top = max(it["probs"])
+        # top 可能略微越界（浮点/脏数据），夹住避免 IndexError
+        idx = min(int(top * n_bins), n_bins - 1)
+        idx = max(0, idx)
+        buckets[idx].append(it)
+
+    n_total = 0
+    rel = 0.0
+    res = 0.0
+    used_bins = 0
+    # 全局实际频率 ō_j
+    global_freq = {
+        name: sum(1 for it in items if it["actual"] == name) / len(items)
+        for name in _OUTCOMES
+    }
+    per_bin: list[dict] = []
+    for b in buckets:
+        n_k = len(b)
+        if n_k < MURPHY_MIN_PER_BIN:
+            continue
+        used_bins += 1
+        n_total += n_k
+        # 箱内平均预测 p̄_kj 与实际频率 ō_kj
+        mean_pred = [sum(it["probs"][j] for it in b) / n_k for j in range(3)]
+        obs_freq = [sum(1 for it in b if it["actual"] == _OUTCOMES[j]) / n_k
+                    for j in range(3)]
+        rel += n_k * sum((mean_pred[j] - obs_freq[j]) ** 2 for j in range(3))
+        res += n_k * sum((obs_freq[j] - global_freq[_OUTCOMES[j]]) ** 2
+                         for j in range(3))
+        # 该箱的「说得多准」：平均 top 概率 vs 实际命中率。
+        # 正 = 预测比实际更自信（过度自信），负 = 低估。
+        mean_top = sum(max(it["probs"]) for it in b) / n_k
+        hit_rate = sum(1 for it in b if it["hit"]) / n_k
+        per_bin.append({
+            "n": n_k,
+            "mean_pred": mean_pred,
+            "obs_freq": obs_freq,
+            "mean_top": mean_top,
+            "hit_rate": hit_rate,
+            "bias": mean_top - hit_rate,
+        })
+    if used_bins < 2 or n_total == 0:
+        return None
+
+    rel /= n_total
+    res /= n_total
+    unc = sum(global_freq[name] * (1 - global_freq[name]) for name in _OUTCOMES)
+
+    # 恒等式成立的对象是**分箱后**的 Brier，不是原始 Brier。
+    # 把箱内每个样本的预测替换成箱内均值 p̄_k 后，箱内 δ=0，
+    # 于是 Brier_binned = REL − RES + UNC 精确成立（不再是近似）。
+    binned_brier = rel - res + unc
+    raw_brier = sum(
+        sum((it["probs"][j] - (1.0 if it["actual"] == _OUTCOMES[j] else 0.0)) ** 2
+            for j in range(3))
+        for it in items
+    ) / len(items)
+
+    return {
+        "n": len(items),
+        "bins_used": used_bins,
+        # 分箱口径：三项之和恰等于它，用于归因
+        "brier": binned_brier,
+        # 原始口径：逐场概率直接算，用于横向对比（与 backtest.brier 同口径）
+        "brier_raw": raw_brier,
+        "reliability": rel,
+        "resolution": res,
+        "uncertainty": unc,
+        # 箱内变异：模型在箱内的细粒度区分。这部分**不是失分**，
+        # 是模型比「箱内均值」多说出来的信息，因此不计入 REL/RES/UNC。
+        "within_bin": raw_brier - binned_brier,
+        "global_freq": global_freq,
+        "per_bin": per_bin,
+    }
+
+
+def murphy_verdict(dec: dict | None,
+                   rel_threshold: float = 0.02) -> str | None:
+    """把分解结果翻译成一句可执行的结论。
+
+    返回 None 表示样本不足，不下结论。
+    """
+    if not dec:
+        return None
+    rel, res = dec["reliability"], dec["resolution"]
+    if rel >= rel_threshold:
+        return ("⚠️ 失分主要来自<b>标定偏差</b>（REL 偏高）——"
+                "概率没说真话，重标定即可改善，代价最低")
+    if res <= 0.001:
+        return ("⚠️ 失分主要来自<b>区分度不足</b>（RES 过低）——"
+                "概率没把强弱分开，只能靠引入新信息改善")
+    return "✅ 标定与区分度都在正常区间，暂无单点瓶颈"
+
+
 def _hit_rate(hits: int, total: int) -> float | None:
     """命中率；样本不足返回 None（不报数字比报错觉的数字更诚实）。"""
     return hits / total if total else None
@@ -243,6 +382,8 @@ def daily_review(db_path: str, since_days: int = 7) -> dict:
         "hits": hits,
         "accuracy": overall,
         "baselines": base,
+        # Brier 分解：回答「失分失在哪」，而不是只报命中率
+        "murphy": murphy_decomposition(items),
         "edge_vs_home": overall - base["always_home"],
         "edge_vs_freq": overall - base["best_freq"],
         "by_league": by_league,
@@ -309,6 +450,28 @@ def render_review(rv: dict) -> str:
         lines.append("<b>按口径</b>")
         for g in src:
             lines.append(f"· {_fmt_group(g)}")
+
+    # Brier 分解：命中率答不了「为什么不准」，这块给出可执行的归因
+    dec = rv.get("murphy")
+    if dec:
+        lines.append("")
+        lines.append("<b>失分归因（Brier 分解）</b>")
+        lines.append(
+            f"· 标定 REL {dec['reliability']:.4f} · "
+            f"区分 RES {dec['resolution']:.4f} · "
+            f"固有 UNC {dec['uncertainty']:.4f}"
+        )
+        verdict = murphy_verdict(dec)
+        if verdict:
+            lines.append(f"· {verdict}")
+        # 过度自信最严重的箱：直接指出「哪档概率在吹牛」
+        worst = max(dec["per_bin"], key=lambda b: b["bias"], default=None)
+        if worst and worst["bias"] > 0.05:
+            lines.append(
+                f"· 最过度自信档：预测 {worst['mean_top'] * 100:.0f}% "
+                f"实际只中 {worst['hit_rate'] * 100:.0f}%"
+                f"（{worst['n']} 场）"
+            )
 
     lines.append("")
     if rv["confidence_meaningful"] is True:

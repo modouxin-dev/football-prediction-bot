@@ -16,6 +16,7 @@ import pytz
 
 from paths import DB_PATH
 
+from ensemble import DEFAULT_ETA
 from analyzer import (
     DEFAULT_MARKET_WEIGHT,
     MARKET_WEIGHT_MAX,
@@ -116,6 +117,8 @@ class Settings:
     db_path: str  # 预测落盘路径（SQLite）；目录不可写时自动回退内存存储
     web_url: str  # 网页看板地址（WEB_URL）；为空时 /web 提示未部署
     market_weight: float  # 市场锚定权重 w：0=纯模型，1=纯市场（见 analyzer 模块说明）
+    ensemble_learn: bool  # 集成器是否开启动态权重学习（ENSEMBLE_LEARN）
+    ensemble_eta: float   # 动态权重学习率 η（ENSEMBLE_ETA，见 ensemble 模块说明）
 
     @property
     def requested_season(self) -> int:
@@ -268,6 +271,27 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                     MARKET_WEIGHT_MIN, MARKET_WEIGHT_MAX,
                     DEFAULT_MARKET_WEIGHT, raw_w)
 
+    # 多模型集成（ensemble 模块）：
+    #   ENSEMBLE_LEARN=1 → 权重按各路实测表现动态调整（η 越大越倾向强者）。
+    #   默认关闭 → 用固定经验权重（市场 0.75），行为完全确定、便于回归测试。
+    #   实测（英超三赛季 1140 场走前）：动态模式 η=200 时市场权重收敛到 0.842。
+    ensemble_learn = _get(env, "ENSEMBLE_LEARN", "").strip().lower() in (
+        "1", "true", "yes", "on")
+    ensemble_eta = DEFAULT_ETA
+    raw_eta = _get(env, "ENSEMBLE_ETA")
+    if raw_eta:
+        try:
+            parsed_eta = float(raw_eta)
+        except ValueError:
+            log.warning("ENSEMBLE_ETA 不是数字，回退默认 %s：%r",
+                        DEFAULT_ETA, raw_eta)
+        else:
+            if parsed_eta >= 0:
+                ensemble_eta = parsed_eta
+            else:
+                log.warning("ENSEMBLE_ETA 为负，回退默认 %s：%r",
+                            DEFAULT_ETA, raw_eta)
+
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
     if push_raw is None and (_get(env, "SCHEDULED_HOUR") or _get(env, "SCHEDULED_MINUTE")):
@@ -304,4 +328,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         db_path=db_path,
         web_url=web_url,
         market_weight=market_weight,
+        ensemble_learn=ensemble_learn,
+        ensemble_eta=ensemble_eta,
     )
