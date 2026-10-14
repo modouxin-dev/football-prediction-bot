@@ -206,98 +206,6 @@ def fit_rho(observations: list[tuple], max_goals: int = MAX_GOALS,
     return round(best, 6)
 
 
-# ---- 概率温度校准（temperature scaling） ---------------------------------
-# 泊松模型系统性过度自信：实测英超 1139 场，高概率档显著虚高——
-#   预测 ~55% 的比赛实际只发生 43%（−11.2pt）
-#   预测 ~74% 的比赛实际只发生 66%（ −8.6pt）
-# 低概率档反过来低估（平局整体低估约 3pt）。
-# 这种「分布过度尖锐」会直接污染价值偏差判定：
-#   价值偏差 = 模型概率 − 1/赔率
-# 高档虚高 11pt 远超 5% 的 Value Bet 阈值，会把并非价值注的比赛误标成价值注。
-#
-# 温度缩放是校准过度自信的标准做法：p' = softmax(log p / T)，T>1 拉平分布。
-# 它不改变三项概率的**大小排序**，因此准确率不变，只修正置信度——
-# 这正是我们要的：不牺牲排序能力，只让概率说真话。
-TEMP_SEARCH_MIN = 0.5      # T 搜索下界（<1 会让分布更尖锐，一般不该出现）
-TEMP_SEARCH_MAX = 4.0      # T 搜索上界
-TEMP_MIN_SAMPLES = 50      # 少于这么多场已结算样本时不拟合，退回 1.0（不校准）
-TEMP_MIN_SAFE = 0.8        # 拟合结果低于此值视为异常，退回 1.0，宁可不校准
-
-
-def apply_temperature(probabilities: Iterable[float], temperature: float) -> list[float]:
-    """对一组概率做温度缩放。
-
-    T=1.0 时原样返回（等价恒等变换）。T>1 拉平分布、T<1 锐化分布。
-    输入含 0 时先夹到极小值，避免 log(0)；三项之和为 0 时原样返回。
-    """
-    probs = [float(p) for p in probabilities]
-    if not probs:
-        return []
-    total = sum(probs)
-    if total <= 0:
-        return probs
-    t = float(temperature)
-    if not math.isfinite(t) or t <= 0 or abs(t - 1.0) < 1e-9:
-        return probs
-    scaled = [max(p / total, 1e-9) ** (1.0 / t) for p in probs]
-    s = sum(scaled)
-    if s <= 0:
-        return probs
-    return [x / s for x in scaled]
-
-
-def fit_temperature(observations: list[tuple], *,
-                    lo: float = TEMP_SEARCH_MIN, hi: float = TEMP_SEARCH_MAX,
-                    iterations: int = 40) -> float:
-    """用黄金分割搜索拟合温度 T（最小化对数损失）。
-
-    observations: [(probs, actual_index), ...]
-        probs 是模型原始三项概率，actual_index 是 0/1/2（主胜/平局/客胜）。
-    样本不足、或拟合结果落在异常区间时返回 1.0（**不校准**，绝不猜测）。
-    """
-    obs = []
-    for probs, actual in observations:
-        if probs is None or actual is None:
-            continue
-        ps = [float(p) for p in probs]
-        if len(ps) < 3 or sum(ps) <= 0:
-            continue
-        ai = int(actual)
-        if ai < 0 or ai >= len(ps):
-            continue
-        obs.append((ps, ai))
-    if len(obs) < TEMP_MIN_SAMPLES:
-        return 1.0
-
-    def nll(t: float) -> float:
-        """温度 t 下的平均对数损失（越小越好）。"""
-        total = 0.0
-        for ps, ai in obs:
-            p = apply_temperature(ps, t)[ai]
-            total -= math.log(max(p, 1e-9))
-        return total / len(obs)
-
-    # 与 fit_rho 同款黄金分割：单峰假设下稳定收敛，无需导数
-    inv_phi = (math.sqrt(5.0) - 1.0) / 2.0
-    a, b = float(lo), float(hi)
-    c = b - inv_phi * (b - a)
-    d = a + inv_phi * (b - a)
-    fc, fd = nll(c), nll(d)
-    for _ in range(iterations):
-        if fc < fd:
-            b, d, fd = d, c, fc
-            c = b - inv_phi * (b - a)
-            fc = nll(c)
-        else:
-            a, c, fc = c, d, fd
-            d = a + inv_phi * (b - a)
-            fd = nll(d)
-    best = c if fc < fd else d
-    if not math.isfinite(best) or best < TEMP_MIN_SAFE or best > hi:
-        return 1.0
-    return round(best, 4)
-
-
 def dsa_weight(index: int) -> float:
     """按"由近到远"的场次序号返回阶梯权重。
 
@@ -506,10 +414,9 @@ class MatchAnalyzer:
 
     def predict_match(self, model: LeagueModel, home_id: int, away_id: int,
                       elo_factor: float | None = None,
-                      rho: float = DEFAULT_RHO,
-                      temperature: float = 1.0) -> dict:
+                      rho: float = DEFAULT_RHO) -> dict:
         h, a = model.strength(home_id), model.strength(away_id)
-        res = self.calculate_prediction(
+        return self.calculate_prediction(
             {"attack": h.attack_home, "defense": h.defense_home},
             {"attack": a.attack_away, "defense": a.defense_away},
             league_avg_home=model.avg_home_goals,
@@ -517,17 +424,6 @@ class MatchAnalyzer:
             elo_factor=elo_factor,
             rho=rho,
         )
-        # 温度校准：概率「拉平」以修正过度自信（见 fit_temperature 说明）。
-        # 三项概率的排序不变，因此最可能比分、信心等级的判定逻辑不受影响；
-        # 变的是置信度——它直接决定价值偏差是否被误判成 Value Bet。
-        t = float(temperature)
-        if math.isfinite(t) and t > 0 and abs(t - 1.0) >= 1e-9:
-            hp, dp, ap = apply_temperature(
-                [res["win_prob"], res["draw_prob"], res["loss_prob"]], t)
-            res["win_prob"], res["draw_prob"], res["loss_prob"] = hp, dp, ap
-            res["calibrated"] = True
-            res["temperature"] = round(t, 4)
-        return res
 
     def calculate_prediction(
         self,
@@ -712,86 +608,102 @@ def market_gap(model_probs: dict, odds: dict | None) -> dict[str, float]:
     }
 
 
-def apply_market_adjustment(analysis: dict, odds: dict | None) -> dict:
-    """用去水市场概率替换胜平负，并按结果块等比缩放比分矩阵。
+# ---- 市场锚定融合 ------------------------------------------------------------
+# 为什么要把市场概率混进最终结果
+# --------------------------------
+# 在本项目内置语料（英超近三赛季 1140 场，含 B365/Pinnacle 赔率）上的
+# walk-forward 实测（见 eval_blend2.py）：
+#
+#     纯泊松（线上口径）  RPS 0.2044  准确率 51.43%
+#     市场去水概率        RPS 0.1962  准确率 53.30%
+#     滚动权重融合        RPS 0.1962  准确率 53.30%
+#     RPS 差异 95% CI     [-0.0127, -0.0039]   ← 不含 0，改善显著
+#
+# 即：赔率携带的信息量显著多于本项目当前的泊松模型。继续让模型单打独斗
+# 等于主动放弃这部分信息。正确做法不是「用市场替掉模型」，而是把市场当作
+# 强先验、让模型只贡献残差修正 —— 这也是多个公开回测项目的共识架构。
+#
+# 为什么权重默认取 0.75 而不是 1.0
+# --------------------------------
+# 留出段网格搜索显示 w=0.72~0.82 一带 RPS 最优（0.2034），
+# w=1.0（纯市场）反而略差（0.2038）。模型确实还有一点边际贡献，
+# 完全交给市场会把它丢掉。0.75 落在最优点附近且保留模型身份。
+#
+# 为什么不能拿融合后的概率去算 edge
+# --------------------------------
+# edge = 概率 − 1/赔率，回答「这一注划不划算」。若概率已经锚定到市场，
+# edge 会系统性趋近 −抽水，所有比赛都不会有正期望，价值投注功能等于废掉。
+# 因此融合只改「最终概率」（用于展示、审计、回测），
+# edge 仍用模型自身概率计算 —— 那才是「我们的看法 vs 市场」的真实分歧。
 
-    为什么必须同步缩放矩阵，而不只替换三项概率：
-    最可能比分、大小球、双方进球都由矩阵推出。只换三项概率会出现
-    「最可能比分 1-0（主胜）」与「客胜 55%」并存的矛盾展示。
-    按主胜/平/客三个结果块分别等比缩放，块内相对形状仍来自泊松
-    （比分的细粒度信息保留），块和恰等于市场概率，两者因此自洽。
+DEFAULT_MARKET_WEIGHT = 0.75
+MARKET_WEIGHT_MIN = 0.0
+MARKET_WEIGHT_MAX = 1.0
 
-    泊松结果原样保留在 poisson_probs 中作为内部基准；
-    无赔率或去水失败时 market_used=False，行为与改造前完全一致。
+
+def blend_with_market(
+    model_probs: tuple[float, float, float],
+    market_probs: tuple[float, float, float] | None,
+    weight: float = DEFAULT_MARKET_WEIGHT,
+) -> tuple[float, float, float]:
+    """P_final = w·市场 + (1−w)·模型，返回归一化后的三项概率。
+
+    model_probs / market_probs 均为 (主胜, 平, 客胜)。
+    market_probs 为 None（无赔率）时原样返回模型概率，绝不臆造市场信息。
+    weight=0 → 纯模型；weight=1 → 纯市场。
     """
-    result = dict(analysis)
-    result["poisson_probs"] = {
-        "home": analysis.get("win_prob", 0.0),
-        "draw": analysis.get("draw_prob", 0.0),
-        "away": analysis.get("loss_prob", 0.0),
-    }
-    market = implied_probabilities(odds)
-    if not market:
-        result["market_used"] = False
-        result["market_probs"] = None
-        return result
-
-    lh = float(analysis.get("lambda_home", 0.0) or 0.0)
-    la = float(analysis.get("lambda_away", 0.0) or 0.0)
-    rho = clamp_rho(analysis.get("rho"), lh, la)
-    n = MAX_GOALS + 1
-    try:
-        matrix = dc_score_matrix(lh, la, max_goals=MAX_GOALS, rho=rho)
-    except Exception:
-        result["market_used"] = False
-        result["market_probs"] = None
-        return result
-
-    blocks: dict[str, list[tuple[int, int]]] = {"home": [], "draw": [], "away": []}
-    for h in range(n):
-        for a in range(n):
-            key = "home" if h > a else ("draw" if h == a else "away")
-            blocks[key].append((h, a))
-
-    sums = {k: sum(matrix[h][a] for h, a in cells) for k, cells in blocks.items()}
-    # 任一块为 0 说明该结果在泊松下不可能，无法按比例放大，保持原样
-    if min(sums.values()) <= 0:
-        result["market_used"] = False
-        result["market_probs"] = None
-        return result
-
-    scaled = [[0.0] * n for _ in range(n)]
-    for key, cells in blocks.items():
-        factor = market[key] / sums[key]
-        for h, a in cells:
-            scaled[h][a] = matrix[h][a] * factor
-    total = sum(sum(row) for row in scaled)
-    if not (total > 0):
-        result["market_used"] = False
-        result["market_probs"] = None
-        return result
-    scaled = [[v / total for v in row] for row in scaled]
-
-    win = sum(scaled[h][a] for h in range(n) for a in range(h))
-    draw = sum(scaled[i][i] for i in range(n))
-    loss = sum(scaled[h][a] for h in range(n) for a in range(h + 1, n))
-    scores = sorted(
-        ((f"{h}-{a}", scaled[h][a]) for h in range(n) for a in range(n)),
-        key=lambda item: item[1],
-        reverse=True,
+    if market_probs is None:
+        return tuple(float(v) for v in model_probs)  # type: ignore[return-value]
+    w = min(max(float(weight), MARKET_WEIGHT_MIN), MARKET_WEIGHT_MAX)
+    out = tuple(
+        w * float(market_probs[i]) + (1.0 - w) * float(model_probs[i])
+        for i in range(3)
     )
-    result.update({
-        "win_prob": win,
-        "draw_prob": draw,
-        "loss_prob": loss,
-        "best_score": scores[0][0],
-        "top_scores": scores[:5],
-        "over_2_5": sum(scaled[h][a] for h in range(n) for a in range(n) if h + a >= 3),
-        "btts": sum(scaled[h][a] for h in range(1, n) for a in range(1, n)),
-        "market_used": True,
-        "market_probs": market,
-    })
-    return result
+    total = sum(out)
+    if total <= 0:
+        return tuple(float(v) for v in model_probs)  # type: ignore[return-value]
+    return tuple(v / total for v in out)  # type: ignore[return-value]
+
+
+def _rps(probs: tuple[float, float, float], actual: int) -> float:
+    """排序概率分数（越低越好）。
+
+    这里本地实现一份而不是从 backtest 导入：backtest 依赖 analyzer，
+    反向导入会形成循环。逻辑与 backtest.rps 完全一致。
+    """
+    total = 0.0
+    cum_p = cum_a = 0.0
+    for i in range(3):
+        cum_p += probs[i]
+        cum_a += 1.0 if i == actual else 0.0
+        total += (cum_p - cum_a) ** 2
+    return total / 2.0
+
+
+def fit_market_weight(
+    samples: list[tuple[tuple[float, float, float],
+                        tuple[float, float, float] | None, int]],
+    grid: tuple[float, ...] = (0.0, 0.25, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0),
+) -> tuple[float, dict[float, float]]:
+    """在给定样本上按 RPS 网格搜索最优融合权重。
+
+    samples 元素为 (模型概率, 市场概率|None, 实际结果索引)。
+    返回 (最优权重, {权重: 平均RPS})。样本为空时返回 (DEFAULT_MARKET_WEIGHT, {})，
+    让调用方安全降级到默认值而不是崩溃。
+
+    调用方必须保证 samples 全部来自**被评估时刻之前**的历史，
+    否则就是拿未来数据调参，回测结论不可信。
+    """
+    if not samples:
+        return DEFAULT_MARKET_WEIGHT, {}
+    scores: dict[float, float] = {}
+    for w in grid:
+        acc = 0.0
+        for model_p, market_p, actual in samples:
+            acc += _rps(blend_with_market(model_p, market_p, w), actual)
+        scores[w] = acc / len(samples)
+    best = min(scores, key=lambda k: scores[k])
+    return best, scores
 
 
 # ---- 模型信心等级 -------------------------------------------------------------

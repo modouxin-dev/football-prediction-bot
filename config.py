@@ -7,14 +7,15 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, time
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # 仅类型检查用；运行时本模块已依赖 pytz
-    from pytz.tzinfo import BaseTzInfo
-
-import pytz
 
 from paths import DB_PATH
+import pytz
+
+from analyzer import (
+    DEFAULT_MARKET_WEIGHT,
+    MARKET_WEIGHT_MAX,
+    MARKET_WEIGHT_MIN,
+)
 
 log = logging.getLogger(__name__)
 
@@ -60,15 +61,10 @@ def parse_push_time(raw: str | None, default: time = time(8, 0)) -> time:
         hour, minute = int(m.group(1)), int(m.group(2) or 0)
     elif re.fullmatch(r"\d{4}", text):
         hour, minute = int(text[:2]), int(text[2:])
-    if hour is None or minute is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
+    if hour is None or not (0 <= hour <= 23 and 0 <= minute <= 59):
         log.warning("PUSH_TIME=%r 无法解析，改用默认值 %s", raw, default.strftime("%H:%M"))
         return default
     return time(hour, minute)
-
-
-def _plus_hours(t: time, hours: int) -> time:
-    """时间加 N 小时（跨日回绕）。用于推导复盘推送的默认时刻。"""
-    return time((t.hour + hours) % 24, t.minute)
 
 
 def parse_id_list(raw: str | None) -> frozenset[int]:
@@ -95,8 +91,7 @@ class Settings:
     league_ids: tuple[int, ...]  # 全部启用联赛；league_ids[0] 恒等于 league_id
     season: int
     push_time: time
-    review_time: time  # 每日复盘推送时刻（REVIEW_TIME，默认比推送晚 1 小时）
-    timezone: "BaseTzInfo"  # pytz 时区对象
+    timezone: object  # pytz 时区对象
     log_level: str
     max_matches: int
     lookahead_hours: int
@@ -109,6 +104,7 @@ class Settings:
     data_source_mode: str  # "auto" / "api-football" / "football-data"
     db_path: str  # 预测落盘路径（SQLite）；目录不可写时自动回退内存存储
     web_url: str  # 网页看板地址（WEB_URL）；为空时 /web 提示未部署
+    market_weight: float  # 市场锚定权重 w：0=纯模型，1=纯市场（见 analyzer 模块说明）
 
     @property
     def requested_season(self) -> int:
@@ -242,6 +238,25 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     # 未配置时 /web 会明确提示未部署，而不是给出一条打不开的链接。
     web_url = (_get(env, "WEB_URL") or "").strip().rstrip("/")
 
+    # 市场锚定权重：P_final = w·市场 + (1−w)·模型。
+    # 非法值（非数字 / 越界）一律回退默认，绝不因为配错就把预测算废。
+    market_weight = DEFAULT_MARKET_WEIGHT
+    raw_w = _get(env, "MARKET_BLEND_WEIGHT")
+    if raw_w:
+        try:
+            parsed_w = float(raw_w)
+        except ValueError:
+            log.warning("MARKET_BLEND_WEIGHT 不是数字，回退默认 %s：%r",
+                        DEFAULT_MARKET_WEIGHT, raw_w)
+        else:
+            if MARKET_WEIGHT_MIN <= parsed_w <= MARKET_WEIGHT_MAX:
+                market_weight = parsed_w
+            else:
+                log.warning(
+                    "MARKET_BLEND_WEIGHT 越界 [%s, %s]，回退默认 %s：%r",
+                    MARKET_WEIGHT_MIN, MARKET_WEIGHT_MAX,
+                    DEFAULT_MARKET_WEIGHT, raw_w)
+
     # 推送时间：优先 PUSH_TIME；兼容 v2.0 引入的 SCHEDULED_HOUR / SCHEDULED_MINUTE
     push_raw = _get(env, "PUSH_TIME")
     if push_raw is None and (_get(env, "SCHEDULED_HOUR") or _get(env, "SCHEDULED_MINUTE")):
@@ -258,10 +273,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         league_id=_league_primary,  # 39 = 英超
         league_ids=_parse_league_ids(env, _league_primary),
         push_time=parse_push_time(push_raw),
-        # 复盘推送时间默认比每日推送晚 1 小时：复盘要读「昨晚已结算的赛果」，
-        # 与推送挤在同一时刻会读到尚未结算完的数据，结论必然偏低。
-        review_time=parse_push_time(_get(env, "REVIEW_TIME"),
-                                    default=_plus_hours(parse_push_time(push_raw), 1)),
         timezone=tz,
         log_level=level,
         # 默认必须能覆盖一个完整比赛日：五大联赛一天可达 30+ 场，
@@ -277,4 +288,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         data_source_mode=data_source_mode,
         db_path=db_path,
         web_url=web_url,
+        market_weight=market_weight,
     )

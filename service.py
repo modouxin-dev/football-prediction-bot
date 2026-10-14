@@ -1,11 +1,6 @@
 """业务层：把赛程 / 积分榜 / 赔率拼成预测，并保存最近的预测供按钮回调使用。"""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:  # 仅类型检查时导入，避免运行时循环依赖
-    from elo import EloEngine
-
 import asyncio
 import logging
 import re
@@ -13,14 +8,21 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
-from analyzer import (LeagueModel, MatchAnalyzer, TeamStrength,
-                      apply_market_adjustment, build_league_model,
-                      calculate_prediction_level, collect_1x2_odds,
-                      consensus_odds)
-from api_client import APIError, FootballAPI
-from config import Settings
-from data_source import DataSourceError
 from repository import PredictionRepository
+from analyzer import (
+    LeagueModel,
+    MatchAnalyzer,
+    TeamStrength,
+    build_league_model,
+    calculate_prediction_level,
+    collect_1x2_odds,
+    consensus_odds,
+    blend_with_market,
+    implied_probabilities,
+)
+from api_client import APIError, FootballAPI
+from data_source import DataSourceError
+from config import Settings
 from templates import LEAGUE_ORDER
 
 log = logging.getLogger(__name__)
@@ -50,10 +52,6 @@ ST_NO_DATA = "no_data"        # 接口无数据或故障  # 今日无比赛时�
 
 _FINISHED = {"FT", "AET", "PEN"}  # 已完场的状态缩写
 
-# 赛果回溯天数：结算任务只取「今天」的赛程，隔夜比赛会永远匹配不上比分。
-# 这里限定最多回补最近几天——再往前要么没有预测流水，要么补了也白烧额度。
-SETTLE_BACKFILL_DAYS = 3
-
 
 def is_season_error(exc: BaseException) -> bool:
     """判断是否为「该赛季不可用」（套餐权限 / 赛季未开放），而不是 Key 无效或限流。"""
@@ -63,13 +61,13 @@ def is_season_error(exc: BaseException) -> bool:
     return ("do not have access to this season" in text) or ("season" in text and "plan" in text)
 
 
-def _is_finished(m: dict[str, Any]) -> bool:
+def _is_finished(m: dict) -> bool:
     """只统计已完场的比赛；状态字段缺失时按已完场处理（兼容精简数据）。"""
     short = ((m.get("fixture") or {}).get("status") or {}).get("short")
     return True if not short else short in _FINISHED
 
 
-def _side(m: dict[str, Any], team_id: int) -> tuple[int | None, int | None, bool]:
+def _side(m: dict, team_id: int) -> tuple[int | None, int | None, bool]:
     """返回 (本队进球, 对手进球, 是否主场)；数据不全时返回 (None, None, ...)。"""
     teams, goals = m.get("teams") or {}, m.get("goals") or {}
     hg, ag = goals.get("home"), goals.get("away")
@@ -79,18 +77,18 @@ def _side(m: dict[str, Any], team_id: int) -> tuple[int | None, int | None, bool
     return (hg if is_home else ag), (ag if is_home else hg), is_home
 
 
-async def _no_injuries() -> list[dict[str, Any]]:
+async def _no_injuries() -> list[dict]:
     """数据源未提供伤停接口时的空实现（保持 gather 结构不变）。"""
     return []
 
 
-def injuries_stats(raw: list[dict[str, Any]], home_id: int, away_id: int) -> dict:
+def injuries_stats(raw: list[dict], home_id: int, away_id: int) -> dict:
     """伤停名单按主客队分组。
 
     只做整理，不做判断：名单为空时上层显示「暂无伤停信息」，
     不伪造、也不据此调整模型（当前模型未使用伤停信号）。
     """
-    out: dict[str, Any] = {"home": [], "away": []}
+    out: dict = {"home": [], "away": []}
     for item in raw or []:
         player = item.get("player") or {}
         team = item.get("team") or {}
@@ -105,7 +103,7 @@ def injuries_stats(raw: list[dict[str, Any]], home_id: int, away_id: int) -> dic
     return out
 
 
-def form_stats(matches: list[dict[str, Any]], team_id: int) -> dict:
+def form_stats(matches: list[dict], team_id: int) -> dict:
     """近期战绩统计：胜平负、进失球、主客场表现。数据不足时 played=0，由上层显示“暂无”。"""
     rows, w = [], {"win": 0, "draw": 0, "lose": 0}
     home, away = {"win": 0, "draw": 0, "lose": 0}, {"win": 0, "draw": 0, "lose": 0}
@@ -114,7 +112,7 @@ def form_stats(matches: list[dict[str, Any]], team_id: int) -> dict:
         if not _is_finished(m):  # 未开赛/进行中不算进“近期状态”（状态缺失时按已完场处理）
             continue
         our, their, is_home = _side(m, team_id)
-        if our is None or their is None:
+        if our is None:
             continue
         gf, ga = gf + our, ga + their
         key = "win" if our > their else "draw" if our == their else "lose"
@@ -146,7 +144,7 @@ def form_stats(matches: list[dict[str, Any]], team_id: int) -> dict:
     }
 
 
-def h2h_stats(matches: list[dict[str, Any]], home_id: int) -> dict:
+def h2h_stats(matches: list[dict], home_id: int) -> dict:
     """历史交锋统计（以主队视角）。"""
     finished = []
     win = draw = loss = gf = ga = 0
@@ -154,7 +152,7 @@ def h2h_stats(matches: list[dict[str, Any]], home_id: int) -> dict:
         if not _is_finished(m):
             continue
         our, their, _ = _side(m, home_id)
-        if our is None or their is None:
+        if our is None:
             continue
         gf, ga = gf + our, ga + their
         if our > their:
@@ -178,32 +176,28 @@ def h2h_stats(matches: list[dict[str, Any]], home_id: int) -> dict:
 
 @dataclass
 class Prediction:
-    # 主源 API-Football 是数字 ID；备用源 football-data.org 一律加 "fd-" 前缀
-    # （football_data.py:217/229/230），所以这三类 ID 实际都可能是字符串。
-    # 此前注解写死 int，与 _predict_one 里「保持数据源原类型」的注释自相矛盾，
-    # 会误导维护者写出对 str ID 不成立的代码。
-    fixture_id: int | str
+    fixture_id: int
     league: str
     round_label: str
     venue: str
     home: str
     away: str
-    home_id: int | str
-    away_id: int | str
+    home_id: int
+    away_id: int
     kickoff: datetime
-    analysis: dict[str, Any]
+    analysis: dict
     home_strength: TeamStrength
     away_strength: TeamStrength
     model: LeagueModel
-    fixture: dict[str, Any]
-    bookmakers: list[dict[str, Any]] = field(default_factory=list)
-    odds: dict[str, Any] | None = None
-    outcomes: dict[str, Any] = field(default_factory=dict)
-    best: tuple[str, dict[str, Any]] | None = None
+    fixture: dict
+    bookmakers: list[dict] = field(default_factory=list)
+    odds: dict | None = None
+    outcomes: dict = field(default_factory=dict)
+    best: tuple[str, dict] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "API-Football"
     # 输入数据快照：预测可追溯，事后能回答「这个结论是基于什么算出来的」
-    inputs: dict[str, Any] = field(default_factory=dict)
+    inputs: dict = field(default_factory=dict)
     season: int = 0  # 实际使用的赛季（降级后可能不同于配置的赛季），展示给用户  # 实际使用的数据源（主源或备用源），必须如实展示
 
     @property
@@ -224,7 +218,7 @@ class Prediction:
         return "部分" if self.low_sample else "完整"
 
     @property
-    def level(self) -> dict[str, Any]:
+    def level(self) -> dict:
         """信心等级：只由概率计算，不允许手工指定。"""
         return calculate_prediction_level({
             "home_win": self.analysis["win_prob"],
@@ -282,21 +276,12 @@ class PredictionService:
         self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
         self.truncated_count: int = 0  # 最近一次预测被上限砍掉的场数（0 表示未截断）
-        # 键统一为 str：主源是数字 ID、备用源 football-data.org 是 'fd-123'
-        # （见 football_data.py:217），两边都必须能用同一个 key 查到。
-        # 此前注解写成 OrderedDict[int, ...] 与实际不符，会误导维护者去传 int。
-        self._store: OrderedDict[str, Prediction] = OrderedDict()
+        self._store: OrderedDict[int, Prediction] = OrderedDict()
         # 预测落盘到机器人自身存储（SQLite），重启不丢，支撑命中率统计
         self.repo: PredictionRepository = PredictionRepository(getattr(settings, "db_path", None))
         # 历史库的 result 字段可能是 'pending'/NULL（旧版遗留），命中判定永远不相等，
         # 命中率会被压成 0。启动时自愈一次；幂等，正常库零改动。
         self.repo.backfill_results()
-        # 概率温度校准：泊松模型系统性过度自信（高概率档实测虚高 7~11pt），
-        # 会让「模型概率 − 1/赔率」被高估，把并非价值注的比赛误标成 Value Bet。
-        # 温度用库内已结算样本拟合；样本不足时 fit_temperature 返回 1.0（不校准）。
-        # 每次预测前刷新：随赛果积累逐步收敛，且始终只用过去的数据。
-        self.temperature: float = 1.0
-        self.refresh_calibration()
         # 赛程本地缓存：外部 API 只负责拉取，查询优先读本地库
         from sync import MatchSync
 
@@ -323,7 +308,7 @@ class PredictionService:
 
     # ---- 预测 ---------------------------------------------------------------
     @staticmethod
-    def _upcoming(fixtures: list[dict[str, Any]], now: datetime, end: datetime) -> list[tuple[datetime, dict]]:
+    def _upcoming(fixtures: list[dict], now: datetime, end: datetime) -> list[tuple[datetime, dict]]:
         result = []
         for fx in fixtures:
             info = fx.get("fixture") or {}
@@ -334,7 +319,7 @@ class PredictionService:
         result.sort(key=lambda item: item[0])
         return result
 
-    def _league_id_of(self, fx: dict[str, Any]) -> int:
+    def _league_id_of(self, fx: dict) -> int:
         """该场比赛真正所属的联赛 ID。
 
         多联赛下绝不能用主联赛 ID 代替：拿英超积分榜去给西甲比赛建模会算出错误的
@@ -350,7 +335,7 @@ class PredictionService:
         """该联赛解析出的赛季，未记录时回退到当前生效赛季。"""
         return self._season_by_league.get(int(league_id), self.season_in_use)
 
-    def _elo_for(self, league_id: int) -> "EloEngine":
+    def _elo_for(self, league_id: int) -> object:
         """取该联赛的 Elo 引擎（评分按联赛分区，避免跨联赛污染）。"""
         from elo import EloEngine
 
@@ -449,97 +434,41 @@ class PredictionService:
             predictions.append(prediction)
         return predictions
 
-    async def auto_predict_store(
-        self, league_ids: tuple[int, ...], days: int = 2, cap: int = 60
-    ) -> dict[str, Any]:
-        """无人值守批量预测：对指定联赛的未来赛程逐场预测并落盘。
-
-        为什么要有这个方法：
-            `build_predictions` 是「用户点了才算」，只覆盖当前选中的那一个联赛。
-            于是看板会出现「欧冠 9 场全部未预测」——因为机器人从没为欧冠算过。
-            赛程页展示的是**库里所有联赛**，预测若只覆盖单联赛，两边永远对不上。
-            这里按联赛列表批量算，让「有赛程」和「有预测」是同一批比赛。
-
-        ⚠️ 幂等：predictions 以 fixture_id 为主键且 ON CONFLICT DO UPDATE，
-            重复跑只会刷新概率，不会产生重复行，也不会污染命中率统计。
-
-        ⚠️ 只算 PRE_MATCH 的比赛：已开赛的比赛再补预测毫无意义，
-            且会让「赛前预测」变成「事后诸葛亮」，直接毁掉复盘结论。
-
-        返回 {saved, skipped_season, errors, per_league}。
-        """
-        now = datetime.now(timezone.utc)
-        end = now + timedelta(days=max(1, int(days)))
-        stats: dict[str, Any] = {
-            "saved": 0, "errors": [], "per_league": {}, "window_days": days,
-        }
-        total = 0
-        for lid in dict.fromkeys(int(x) for x in league_ids):
-            if total >= cap:
-                break
-            try:
-                fixtures, season, note = await self._fetch_fixtures(
-                    now.date(), end.date(), league_id=lid)
-            except Exception as exc:
-                # 单联赛失败不能拖垮其他联赛；原因必须留痕，否则无从排查
-                stats["errors"].append(f"联赛 {lid} 赛程拉取失败：{exc}")
-                log.warning("自动预测：联赛 %s 赛程拉取失败：%s", lid, exc)
-                continue
-            upcoming = self._upcoming(fixtures, now, end)
-            if not upcoming:
-                stats["per_league"][lid] = {"saved": 0, "note": note or "窗口内无未开赛比赛"}
-                continue
-            models: dict[int, LeagueModel] = {}
-            if lid not in models:
-                try:
-                    models[lid] = await self._model_for(lid, models)
-                except Exception as exc:
-                    stats["errors"].append(f"联赛 {lid} 建模失败：{exc}")
-                    log.warning("自动预测：联赛 %s 建模失败：%s", lid, exc)
-                    continue
-            n = 0
-            for kickoff, fx in upcoming:
-                if total >= cap:
-                    break
-                try:
-                    prediction = await self._predict_one(models[lid], kickoff, fx)
-                except Exception as exc:
-                    log.warning("自动预测：fixture %s 失败：%s",
-                                (fx.get("fixture") or {}).get("id"), exc)
-                    continue
-                self._remember(prediction)
-                n += 1
-                total += 1
-            stats["per_league"][lid] = {"saved": n, "note": note}
-            stats["saved"] += n
-        return stats
-
-    async def _predict_one(
-        self, model: LeagueModel, kickoff: datetime, fx: dict[str, Any], fresh: bool = False
-    ) -> Prediction:
+    async def _predict_one(self, model: LeagueModel, kickoff: datetime, fx: dict, fresh: bool = False) -> Prediction:
         teams = fx.get("teams") or {}
         home, away = teams.get("home") or {}, teams.get("away") or {}
         fixture_id = fx["fixture"]["id"]  # 保持数据源原类型；_store 内部统一用 str key 查找
 
-        analysis = self.analyzer.predict_match(
-            model, home["id"], away["id"], temperature=self.temperature,
-        )
-        odds_error: str | None = None
+        analysis = self.analyzer.predict_match(model, home["id"], away["id"])
         try:
             odds_response = await self.api.get_odds(fixture_id, fresh=fresh)
         except (APIError, DataSourceError) as exc:  # 赔率缺失不应阻断整条预测
-            odds_error = str(exc)
             log.warning("赔率获取失败（fixture=%s）：%s", fixture_id, exc)
             odds_response = []
         bookmakers = collect_1x2_odds(odds_response)
         odds = consensus_odds(bookmakers)
-        # edge 由泊松口径计算：它是「模型 vs 市场」的差异，若先换成市场口径
-        # 则 edge 恒为 -抽水，失去信息量。故两者的先后顺序不能颠倒。
+        # edge 必须用**模型自身**概率算，见 analyzer 模块「市场锚定融合」说明：
+        # 若用融合后的概率，edge 会系统性趋近 −抽水，价值投注功能等于废掉。
         outcomes = self.analyzer.evaluate_outcomes(analysis, odds)
-        # 展示概率换成市场口径（实测优于泊松：准确率 53.78% vs 50.99%，
-        # log_loss 0.9692 vs 1.0053，McNemar p=0.007047，见 docs/MARKET_FUSION_EVAL.md）。
-        # 无赔率时 apply_market_adjustment 原样返回，行为不变。
-        analysis = apply_market_adjustment(analysis, odds)
+
+        # 市场锚定融合：只改「最终概率」（展示/审计/回测口径），不动 edge。
+        market = implied_probabilities(odds)
+        if market:
+            blended = blend_with_market(
+                (analysis["win_prob"], analysis["draw_prob"],
+                 analysis["loss_prob"]),
+                (market["home"], market["draw"], market["away"]),
+                weight=self.settings.market_weight,
+            )
+            # 保留融合前的模型原始概率，供对比与复盘使用
+            analysis["model_win_prob"] = analysis["win_prob"]
+            analysis["model_draw_prob"] = analysis["draw_prob"]
+            analysis["model_loss_prob"] = analysis["loss_prob"]
+            analysis["win_prob"], analysis["draw_prob"], analysis["loss_prob"] = blended
+            analysis["market_weight"] = self.settings.market_weight
+            analysis["market_blended"] = True
+        else:
+            analysis["market_blended"] = False
         best = max(outcomes.items(), key=lambda kv: kv[1]["edge"]) if outcomes else None
         league = fx.get("league") or {}
 
@@ -566,9 +495,6 @@ class PredictionService:
                 "has_home_data": home["id"] in (getattr(model, "teams", {}) or {}),
                 "has_away_data": away["id"] in (getattr(model, "teams", {}) or {}),
                 "odds_count": len(bookmakers),
-                # 赔率取不到时保留真实原因（套餐不含 / 未开盘 / 限流），
-                # 展示层据此如实说明，而不是笼统显示「暂无赔率数据」。
-                "odds_error": odds_error,
                 "kickoff": kickoff.isoformat() if kickoff else None,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
             },
@@ -647,7 +573,7 @@ class PredictionService:
     )
 
     @classmethod
-    def _is_national(cls, fx: dict[str, Any]) -> bool:
+    def _is_national(cls, fx: dict) -> bool:
         """该场是否国家队/洲际赛事（世预赛、欧国联、友谊赛等）。"""
         lg = fx.get("league") or {}
         country = str(lg.get("country") or "").strip().lower()
@@ -656,7 +582,7 @@ class PredictionService:
         name = str(lg.get("name") or "").strip().lower()
         return any(k in name for k in cls._NAT_KEYWORDS)
 
-    async def _fetch_all_by_date(self, day) -> list[dict[str, Any]]:
+    async def _fetch_all_by_date(self, day) -> list[dict]:
         """某一天的全部赛程：一次请求拿全天，再按需筛选。
 
         主路径不再逐个联赛轮询——17 个联赛各带赛季降级与空结果重试，
@@ -690,7 +616,7 @@ class PredictionService:
         return national
 
     async def _fetch_fixtures(self, date_from, date_to,
-                              league_id: int | None = None) -> tuple[list[dict[str, Any]], int, str | None]:
+                              league_id: int | None = None) -> tuple[list[dict], int, str | None]:
         """按候选赛季依次请求赛程，遇到「赛季不可用」就自动降级。
 
         league_id 省略时用 settings.league_id。多联赛同步必须逐联赛调用：
@@ -727,7 +653,7 @@ class PredictionService:
 
     async def _fetch_fixtures_multi(
         self, date_from, date_to
-    ) -> tuple[list[dict[str, Any]], int, str | None]:
+    ) -> tuple[list[dict], int, str | None]:
         """多联赛赛程：逐个联赛拉取后按开赛时间合并。
 
         每个联赛独立走自己的赛季降级逻辑，并把解析出的赛季记到 _season_by_league，
@@ -746,7 +672,7 @@ class PredictionService:
             *(self._fetch_fixtures(date_from, date_to, league_id=lid) for lid in league_ids),
             return_exceptions=True,
         )
-        merged: list[dict[str, Any]] = []
+        merged: list[dict] = []
         first_error: BaseException | None = None
         notes: list[str] = []
         for lid, res in zip(league_ids, results):
@@ -762,16 +688,15 @@ class PredictionService:
             merged.extend(fixtures)
         if not merged and first_error is not None:
             raise first_error
-        merged.sort(key=lambda fx: parse_kickoff((fx.get("fixture") or {}).get("date"))
-                    or datetime.min.replace(tzinfo=timezone.utc))
+        merged.sort(key=lambda fx: parse_kickoff((fx.get("fixture") or {}).get("date")) or datetime.min.replace(tzinfo=timezone.utc))
         return merged, self.season_in_use, (notes[0] if notes else None)
 
-    def _season_range(self) -> tuple[Any, ...] | None:
+    def _season_range(self) -> tuple | None:
         """当前数据源记录的赛季日期范围（最早 / 最晚比赛日），用于排查窗口命中情况。"""
         fb = getattr(self.api, "fallback", None)
         return getattr(fb, "season_range", None) if fb else None
 
-    def _limit_to_next(self, fixtures: list[dict[str, Any]], now: datetime, tz, result: dict) -> list[dict]:
+    def _limit_to_next(self, fixtures: list[dict], now: datetime, tz, result: dict) -> list[dict]:
         """MODE_NEXT：只保留不早于当前时刻的第一场，并把标题日期改成该场日期。"""
         upcoming = [fx for fx in fixtures
                     if (parse_kickoff((fx.get("fixture") or {}).get("date")) or now) >= now]
@@ -811,7 +736,7 @@ class PredictionService:
         return sorted(fixtures, key=key)
 
     async def query_fixtures(self, mode: str = MODE_TODAY, target: date | None = None,
-                             now: datetime | None = None) -> dict[str, Any]:
+                             now: datetime | None = None) -> dict:
         """统一赛程查询入口：今日 / 未来 N 天 / 下一场 / 指定日期。
 
         明确区分三种状态，避免把「接口无数据」和「窗口内没比赛」混为一谈：
@@ -839,7 +764,7 @@ class PredictionService:
             else date_from.isoformat()
         )
 
-        result: dict[str, Any] = {
+        result = {
             "mode": mode, "status": ST_OK, "fixtures": [],
             "season": self.season_in_use, "day_label": self.fixture_day_label,
             "season_range": None, "note": None,
@@ -903,12 +828,8 @@ class PredictionService:
             fixtures = upcoming[:1]
             if fixtures:
                 k = parse_kickoff((fixtures[0].get("fixture") or {}).get("date"))
-                # 上面的过滤用 `or now` 兜底，date 缺失/格式异常的场次也会留在
-                # upcoming 里且排在最前，因此这里 k 可能为 None，直接
-                # .astimezone() 会抛 AttributeError。
-                if k is not None:
-                    self.fixture_day_label = k.astimezone(s.timezone).date().isoformat()
-                    result["day_label"] = self.fixture_day_label
+                self.fixture_day_label = k.astimezone(s.timezone).date().isoformat()
+                result["day_label"] = self.fixture_day_label
 
         fb = getattr(self.api, "fallback", None)
         if fixtures:
@@ -924,7 +845,7 @@ class PredictionService:
         # 并用 note 说清「今日无比赛」，避免把「今天没球」说成「数据源异常」。
         if mode == MODE_TODAY and not fixtures:
             span_from, span_to = today, today + timedelta(days=UPCOMING_DAYS)
-            retry: list[dict[str, Any]] = []
+            retry: list[dict] = []
             if self.local_first:
                 try:
                     retry = self.repo.load_matches(
@@ -997,7 +918,7 @@ class PredictionService:
             log.warning("赛程查询[%s]：%s", mode, result["note"])
         return result
 
-    async def get_today_fixtures(self, now: datetime | None = None) -> list[dict[str, Any]]:
+    async def get_today_fixtures(self, now: datetime | None = None) -> list[dict]:
         """取「今天」（按 TIMEZONE，默认 Asia/Shanghai）的全部赛程。
 
         与 build_predictions 不同：这里不限制未来窗口，已开赛 / 已完场的比赛也要列出。
@@ -1069,7 +990,7 @@ class PredictionService:
         return fixtures
 
     # ---- 单场比赛预测 ----------------------------------------------------------
-    async def predict_fixture(self, fixture_id: int, fixtures: list[dict[str, Any]] | None = None) -> Prediction:
+    async def predict_fixture(self, fixture_id: int, fixtures: list[dict] | None = None) -> Prediction:
         """为指定的一场比赛生成预测。
 
         fixtures 为今日赛程缓存；不传则重新拉取一次。找不到该场比赛抛 KeyError，
@@ -1092,7 +1013,7 @@ class PredictionService:
         self._remember(prediction)
         return prediction
 
-    async def analyze_fixture(self, fixture_id: int, fixtures: list[dict[str, Any]] | None = None) -> dict:
+    async def analyze_fixture(self, fixture_id: int, fixtures: list[dict] | None = None) -> dict:
         """深度分析报告：近期状态 + 联赛排名 + 历史交锋 + 模型因素。
 
         积分榜是必需数据，取不到就抛 APIError，由上层显示真实原因；
@@ -1153,9 +1074,7 @@ class PredictionService:
             "model": {
                 "home_strength": model.strength(home_id),
                 "away_strength": model.strength(away_id),
-                "analysis": self.analyzer.predict_match(
-                    model, home_id, away_id, temperature=self.temperature,
-                ),
+                "analysis": self.analyzer.predict_match(model, home_id, away_id),
                 "avg_home_goals": model.avg_home_goals,
                 "avg_away_goals": model.avg_away_goals,
             },
@@ -1165,7 +1084,7 @@ class PredictionService:
             "created_at": datetime.now(timezone.utc),
         }
 
-    async def get_standings_page(self, limit: int = 20) -> list[dict[str, Any]]:
+    async def get_standings_page(self, limit: int = 20) -> list[dict]:
         """积分榜（联赛排名），取不到时抛 APIError 显示真实原因。"""
         return await self.api.get_standings(self.settings.league_id, self.season_in_use)
 
@@ -1174,54 +1093,7 @@ class PredictionService:
         """回写真实赛果，供命中率统计使用。"""
         return self.repo.settle(fixture_id, home_score, away_score)
 
-    def refresh_calibration(self) -> float:
-        """用已结算样本重拟合概率温度，返回当前生效的 T。
-
-        拟合不出来的情况（样本不足、数据异常）一律退回 1.0 —— 不校准只是
-        维持现状，用错误的 T 反而会把概率推得更偏。
-        """
-        try:
-            samples = self.repo.settled_samples()
-        except Exception as exc:  # pragma: no cover - 库不可用时保持不校准
-            log.warning("读取校准样本失败，保持不校准：%s", exc)
-            self.temperature = 1.0
-            return self.temperature
-        from analyzer import fit_temperature
-
-        self.temperature = fit_temperature(samples)
-        if self.temperature != 1.0:
-            log.info("概率温度校准已生效：T=%.4f（样本 %d 场）", self.temperature, len(samples))
-        return self.temperature
-
-    def _missing_result_days(self, pending, by_id: dict) -> list[Any]:
-        """pending 中在今天窗口里没匹配上赛程的行，按开赛日期去重返回。
-
-        只回溯最近 SETTLE_BACKFILL_DAYS 天：再往前要么是历史遗留脏数据
-        （那时根本没有预测流水），要么补了也没意义，白白消耗额度。
-        """
-        from datetime import date as _date, timedelta as _td
-
-        cutoff = (datetime.now(timezone.utc) - _td(days=SETTLE_BACKFILL_DAYS)).date()
-        days: dict[str, Any] = {}
-        for row in pending:
-            fid = str(row["fixture_id"])
-            if fid in by_id:
-                continue
-            raw = row["kickoff"]
-            if not raw:
-                continue
-            try:
-                kd = datetime.fromisoformat(str(raw)).date()
-            except ValueError:
-                continue
-            if kd < cutoff or kd > datetime.now(timezone.utc).date():
-                continue
-            days.setdefault(kd.isoformat(), kd)
-        # 由近及远：最近的比赛最可能已完赛
-        out = sorted(days.values(), reverse=True)
-        return out[:SETTLE_BACKFILL_DAYS]
-
-    async def sync_results(self, fixtures: list[dict[str, Any]] | None = None) -> int:
+    async def sync_results(self, fixtures: list[dict] | None = None) -> int:
         """把已完场比赛的真实比分回写到数据库。返回本次结算条数。
 
         只处理库里已有预测、但还没回填比分的比赛；取不到赛程时不报错。
@@ -1236,26 +1108,6 @@ class PredictionService:
                 log.warning("同步赛果时获取赛程失败：%s", exc)
                 return 0
         by_id = {str((fx.get("fixture") or {}).get("id")): fx for fx in fixtures}
-
-        # ── 回溯补取：只在「今天」窗口取数的历史缺陷 ──────────────────
-        # pending 返回的是**所有**未结算预测（含昨天、前天的），
-        # 但 get_today_fixtures 只拉「今天」的赛程。于是隔夜的比赛
-        # 永远匹配不上，比分永远回写不进去 —— 命中率统计因此长期缺失样本，
-        # 复盘与校准都成了无米之炊。
-        # 这里按 pending 实际缺失的日期补拉，且只补真正缺的那些天，
-        # 避免为无关日期白烧 API 额度。
-        missing_days = self._missing_result_days(pending, by_id)
-        for d in missing_days:
-            try:
-                extra = await self._fetch_all_by_date(d)
-            except Exception as exc:
-                log.warning("回溯赛果：%s 取数失败：%s", d, exc)
-                continue
-            for fx in extra or []:
-                fid = str((fx.get("fixture") or {}).get("id"))
-                if fid not in by_id:
-                    by_id[fid] = fx
-
         done = 0
         for row in pending:
             fx = by_id.get(str(row["fixture_id"]))
@@ -1275,11 +1127,9 @@ class PredictionService:
                 self._sync_elo(fx, int(home), int(away))
         if done:
             log.info("已回写 %d 场赛果", done)
-            # 赛果多了，温度该重新拟合——否则校准一直停在启动时的样本上。
-            self.refresh_calibration()
         return done
 
-    def _sync_elo(self, fixture: dict[str, Any], home_score: int, away_score: int) -> None:
+    def _sync_elo(self, fixture: dict, home_score: int, away_score: int) -> None:
         """把一场已结束比赛计入 Elo。任何异常都不影响结算主流程。"""
         if not getattr(self, "elo_enabled", False):
             return
@@ -1297,7 +1147,7 @@ class PredictionService:
             # Elo 出错绝不能拖垮赛果回写
             log.warning("Elo 更新失败（不影响结算）：%s", exc)
 
-    def stats(self) -> dict[str, Any]:
+    def stats(self) -> dict:
         """命中率统计（含各信心等级）。"""
         return self.repo.stats()
 
@@ -1320,7 +1170,7 @@ class PredictionService:
         self._remember(new)
         return new
 
-    async def get_h2h(self, prediction: Prediction, last: int = 5) -> list[dict[str, Any]]:
+    async def get_h2h(self, prediction: Prediction, last: int = 5) -> list[dict]:
         return await self.api.get_h2h(prediction.home_id, prediction.away_id, last)
 
     @property
