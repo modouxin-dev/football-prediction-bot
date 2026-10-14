@@ -27,6 +27,7 @@ from context import (context_factors, merge_factors, player_ratings,
 from data_source import DataSourceError
 from repository import PredictionRepository
 from signal_capture import capture as capture_signal_ab, split_factors
+from signal_ab import CHANGE_APPLIED, SIGNAL_LINEUP, SIGNAL_RATING
 from templates import LEAGUE_ORDER
 from weather import WeatherClient
 
@@ -89,6 +90,15 @@ def _side(m: dict[str, Any], team_id: int) -> tuple[int | None, int | None, bool
 # 阵容只在开赛前约 20–40 分钟才公布（官方说明），过早请求必然为空。
 # 因此只有进入这个窗口才去取，否则白烧额度——自动预测每轮数百场，不能每场都试。
 PREMATCH_LINEUP_WINDOW = 45 * 60  # 秒
+
+# 阵容数据的两条生效路径（见 PredictionService._lineup_already_applied）。
+# 都源自 get_lineups，去重时任一留下 applied 行即视为"这场已用上阵容"。
+LINEUP_SIGNAL_TYPES = (SIGNAL_LINEUP, SIGNAL_RATING)
+
+# 赛前刷新一轮最多重算多少场。取 24 是因为一个时段的比赛通常不超过这个数
+# （五大联赛同一时刻开踢的场次峰值约 10–15），留一倍余量；
+# 超出的按开赛时间排序后自然落在窗口外，下一轮再处理，不会丢失。
+PREMATCH_REFRESH_CAP = 24
 
 # 球员评分只在「今晚谁上场」确定后才有意义，故与阵容共用同一窗口。
 # 天气提前太久不准（预报会改），6 小时内才取。
@@ -581,6 +591,124 @@ class PredictionService:
             stats["per_league"][lid] = {"saved": n, "note": note}
             stats["saved"] += n
         return stats
+
+    async def prematch_refresh(
+        self,
+        window_seconds: float = PREMATCH_LINEUP_WINDOW,
+        cap: int = PREMATCH_REFRESH_CAP,
+    ) -> dict[str, Any]:
+        """赛前刷新：只对**即将开赛**的比赛重算预测，让阵容信号真正生效。
+
+        为什么必须有这个任务（它不是"再跑一次自动预测"就够了）：
+            `auto_predict_store` 每 6 小时一轮，而首发阵容按官方说明要
+            开赛前 20–40 分钟才公布。两个节奏对不上时——例如比赛 19:45 开踢，
+            自动预测落在 14:00 与 20:00——19:45 那场在 14:00 拿不到阵容，
+            20:00 又已经开赛被排除。**阵容信号在线上一次都不会触发**，
+            代码写了、测试过了，生产里却是死代码。（这正是本项目反复出现
+            的"接了线但没人调用"那一类问题。）
+
+        因此这里按「距离开赛还有多久」挑比赛，只在官方公布窗口内重算，
+        拿到阵容后立刻把新概率落盘（predictions 以 fixture_id 为主键，
+        覆盖而非新增）。
+
+        ⚠️ 幂等与额度：拿到阵容的比赛会在 signal_ab 留下 applied 记录，
+            下一轮据此跳过；没拿到（官方还没公布）的才会重试。
+            因此一轮真实请求数 ≈ 窗口内尚未拿到阵容的场次数，不是全量。
+
+        ⚠️ 已开赛的比赛绝不重算：那会让「赛前预测」变成事后诸葛亮，
+            直接毁掉复盘与回测的结论。
+
+        返回 {checked, refreshed, skipped, errors}。
+        """
+        stats: dict[str, Any] = {
+            "checked": 0, "refreshed": 0, "skipped": 0, "errors": [],
+        }
+        settings = getattr(self, "settings", None)
+        if not getattr(settings, "prematch_enabled", False):
+            stats["skipped_reason"] = "赛前信号总开关关闭（PREMATCH_ENABLED=0）"
+            return stats
+        now = datetime.now(timezone.utc)
+        try:
+            window = float(window_seconds)
+        except (TypeError, ValueError):
+            window = float(PREMATCH_LINEUP_WINDOW)
+        end = now + timedelta(seconds=window)
+        # 只按日期粗筛（utc_date 时区后缀不统一），精确窗口在下面用解析后的
+        # 开赛时间判断，避免字符串比较把跨时区的比赛漏掉。
+        rows = self.repo.upcoming_matches(
+            now.date().isoformat(), end.date().isoformat(), limit=max(int(cap) * 5, 50))
+        candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for fx in rows:
+            kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
+            if kickoff is None:
+                continue
+            # 严格 now < kickoff <= end：已开赛的排除，窗口外的留给自动预测
+            if not (now < kickoff <= end):
+                continue
+            if _is_finished(fx):
+                continue
+            candidates.append((kickoff, fx))
+        candidates.sort(key=lambda item: item[0])
+
+        models: dict[int, Any] = {}
+        for kickoff, fx in candidates[: max(int(cap), 1)]:
+            fid = (fx.get("fixture") or {}).get("id")
+            stats["checked"] += 1
+            # 已经拿到并施加过阵容的比赛不再重复请求，省额度、少一次无谓失败
+            if self._lineup_already_applied(fid):
+                stats["skipped"] += 1
+                continue
+            lid = self._league_id_of(fx)
+            if lid not in models:
+                try:
+                    models[lid] = await self._model_for(lid, models)
+                except Exception as exc:  # 单联赛建模失败不拖垮其他比赛
+                    stats["errors"].append(f"联赛 {lid} 建模失败：{exc}")
+                    log.warning("赛前刷新：联赛 %s 建模失败：%s", lid, exc)
+                    continue
+            try:
+                prediction = await self._predict_one(models[lid], kickoff, fx)
+            except Exception as exc:
+                stats["errors"].append(f"fixture {fid} 预测失败：{exc}")
+                log.warning("赛前刷新：fixture %s 失败：%s", fid, exc)
+                continue
+            self._remember(prediction)
+            stats["refreshed"] += 1
+        return stats
+
+    def _lineup_already_applied(self, fixture_id: Any) -> bool:
+        """该场是否已经拿到过首发阵容并施加过（用于避免每轮重复请求）。
+
+        用 signal_ab 的 applied 行当标记，而不是另设一张表：
+            它本来就是"这一场、这一类信号施加过"的权威记录，
+            再建一张表只会有两份可能不一致的真值。
+        查不到（或表不存在）一律返回 False —— 宁可多请求一次，
+        也不能因为标记读不出来而永远不再取阵容。
+
+        ⚠️ 阵容数据有**两条**生效路径，只认 SIGNAL_LINEUP 会漏掉另一条：
+            · SIGNAL_LINEUP —— 阵型攻守倾向（受 PREMATCH_TILT 控制）
+            · SIGNAL_RATING —— 首发 11 人的赛季评分均值（受 RATING_STRENGTH 控制）
+          两者的数据源头都是 get_lineups。默认 PREMATCH_TILT=0（倾向未启用）
+          而 RATING_STRENGTH=0.5（评分启用），此时阵容只走评分路径，
+          若只认 SIGNAL_LINEUP，去重会失效 —— 同一场比赛每 15 分钟被
+          重复请求一次阵容，白烧额度。故两条路径任一留下 applied 行即视为
+          "这场已经用上阵容"。
+        """
+        if fixture_id is None:
+            return False
+        try:
+            rows = self.repo.signal_ab_for_fixture(fixture_id)
+        except Exception as exc:  # 读标记失败不能当成"已施加"
+            log.warning("读取阵容标记失败（fixture=%s）：%s", fixture_id, exc)
+            return False
+        for row in rows:
+            try:
+                if row["signal_type"] in LINEUP_SIGNAL_TYPES \
+                        and row["change_type"] == CHANGE_APPLIED:
+                    return True
+            except (KeyError, IndexError, TypeError):
+                continue
+        return False
 
     def _signal_ab_snapshot(self) -> dict[str, Any]:
         """当前关键配置快照，随每条对照记录一起存。

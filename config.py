@@ -40,6 +40,14 @@ VALID_DATA_SOURCE_MODES = {"auto", "api-football", "football-data"}
 DEFAULT_DB_PATH = None  # 由 paths.DB_PATH 统一决定（默认 /data/football.db）
 TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 
+# 赛前刷新间隔（分钟）。0 = 关闭该任务。
+# 为什么是 15 分钟：首发阵容官方写明「开赛前 20–40 分钟公布」，
+# 45 分钟窗口内跑 3 轮，既能覆盖不同联赛公布时间参差不齐的情况，
+# 又不至于每轮都重复请求（拿到阵容后该场会被标记，后续轮次跳过）。
+# 上限 180 是防止误填成 0.5 这类小数被当成分钟而刷爆额度。
+DEFAULT_PREMATCH_REFRESH_MINUTES = 15
+PREMATCH_REFRESH_MAX_MINUTES = 180
+
 
 class ConfigError(RuntimeError):
     """配置缺失或格式错误。"""
@@ -139,6 +147,10 @@ class Settings:
     weather_strength: float   # WEATHER_STRENGTH：天气强度，默认 0（关闭）
     signal_ab_enabled: bool   # SIGNAL_AB_ENABLED：赛前信号对照采集，默认开启
     signal_ab_write_enabled: bool
+    prematch_refresh_minutes: int
+    # PREMATCH_REFRESH_MINUTES：赛前刷新间隔（分钟），0 = 不启用
+    # 存在的理由见 service.prematch_refresh —— 自动预测 6 小时一轮，
+    # 而首发阵容开赛前 20–40 分钟才公布，两者对不上时阵容信号永远取不到。
     # SIGNAL_AB_WRITE_ENABLED：**默认关闭**。只有显式开启才允许改信号权重，
     # 线上服务不给写权限 —— 这样任何代码 bug 都不可能意外改掉权重。
 
@@ -376,6 +388,24 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     #   线上服务只开读权限，调权重走 signal_admin.apply_weight 并二次确认。
     signal_ab_write_enabled = parse_bool(_get(env, "SIGNAL_AB_WRITE_ENABLED"), False)
 
+    # 赛前刷新间隔：默认 15 分钟。设为 0 表示不启用该定时任务
+    #   （例如只想手动点预测、或 API 额度紧张）。
+    prematch_refresh_minutes = DEFAULT_PREMATCH_REFRESH_MINUTES
+    raw_prm = _get(env, "PREMATCH_REFRESH_MINUTES")
+    if raw_prm:
+        try:
+            parsed_prm = int(float(raw_prm))
+        except (TypeError, ValueError):
+            log.warning("PREMATCH_REFRESH_MINUTES 不是数字，回退默认 %s：%r",
+                        DEFAULT_PREMATCH_REFRESH_MINUTES, raw_prm)
+        else:
+            if 0 <= parsed_prm <= PREMATCH_REFRESH_MAX_MINUTES:
+                prematch_refresh_minutes = parsed_prm
+            else:
+                log.warning("PREMATCH_REFRESH_MINUTES 越界 [0, %s]，回退默认 %s：%r",
+                            PREMATCH_REFRESH_MAX_MINUTES,
+                            DEFAULT_PREMATCH_REFRESH_MINUTES, raw_prm)
+
     ensemble_learn = _get(env, "ENSEMBLE_LEARN", "").strip().lower() in (
         "1", "true", "yes", "on")
     ensemble_eta = DEFAULT_ETA
@@ -438,4 +468,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         weather_strength=weather_strength,
         signal_ab_enabled=signal_ab_enabled,
         signal_ab_write_enabled=signal_ab_write_enabled,
+        prematch_refresh_minutes=prematch_refresh_minutes,
     )

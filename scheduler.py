@@ -45,6 +45,7 @@ SYNC_JOB = "sync_matches"
 BACKTEST_JOB = "backtest_run"
 HISTORY_JOB = "sync_history"
 AUTO_PREDICT_JOB = "auto_predict"
+PREMATCH_JOB = "prematch_refresh"
 REVIEW_JOB = "daily_review"
 
 # 历史赛季回填与回测都是重活：前者要拉整季（数百场，吃 API 额度），
@@ -233,6 +234,33 @@ async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("自动预测失败（不影响主流程）：%s", exc)
 
 
+async def prematch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """赛前刷新：对即将开赛的比赛重算预测，让首发阵容信号真正生效。
+
+    为什么必须单独一个任务，而不是把 auto_predict_job 调密：
+        首发阵容按官方说明要开赛前 20–40 分钟才公布。自动预测 6 小时一轮，
+        两者节奏对不上时，某场比赛在上一轮「还没公布」、下一轮「已经开赛」，
+        阵容信号在线上一次都不会触发。把这个窗口单独拎出来高频跑，
+        才拿得到阵容。
+
+    ⚠️ 只对进入窗口的比赛发请求（见 service.prematch_refresh），
+        且拿到阵容的当轮之后就跳过，因此额度开销是常数级而非全量。
+    """
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    try:
+        r = await service.prematch_refresh()
+        if r.get("checked"):
+            log.info(
+                "赛前刷新完成：窗口内 %d 场，重算 %d 场，已取过阵容跳过 %d 场",
+                r["checked"], r["refreshed"], r["skipped"],
+            )
+        for err in r.get("errors", []):
+            log.warning("赛前刷新：%s", err)
+    except Exception as exc:  # 刷新失败绝不能影响推送主流程
+        log.warning("赛前刷新失败（不影响主流程）：%s", exc)
+
+
 async def review_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """每日复盘：把「昨天推的准不准、准在哪」讲清楚并推送。
 
@@ -359,12 +387,30 @@ def setup_scheduler(app, settings: Settings) -> int:
         auto_predict_job, interval=AUTO_PREDICT_INTERVAL_HOURS * 3600, first=120,
         name=AUTO_PREDICT_JOB,
     )
+    # 赛前刷新：只跑「即将开赛」的少数比赛，拿到首发阵容后重算概率。
+    # 不注册的条件说在前面——赛前信号被整体关掉，或间隔填 0 明确表示不要，
+    # 这时跑它只会白烧额度。它也不依赖 CHAT_ID：刷新是为了数据闭环，
+    # 不是推送。
+    prematch_registered = False
+    if getattr(settings, "prematch_enabled", False) and \
+            getattr(settings, "prematch_refresh_minutes", 0) > 0:
+        app.job_queue.run_repeating(
+            prematch_job,
+            interval=int(settings.prematch_refresh_minutes) * 60,
+            first=max(int(settings.prematch_refresh_minutes) * 60, 60),
+            name=PREMATCH_JOB,
+        )
+        prematch_registered = True
+    else:
+        log.info("赛前刷新未注册：PREMATCH_ENABLED 关闭或 PREMATCH_REFRESH_MINUTES=0")
+
     # 赛果结算移出 chat_id 分支（此前误放进来，导致没配群号时一条都不结算）。
     # 结算是数据闭环的地基：不结算就永远没有命中率样本，复盘与校准都是空的。
     app.job_queue.run_repeating(
         settle_job, interval=6 * 3600, first=300, name=SETTLE_JOB,
     )
-    registered = 5
+    # 5 = 同步 / 历史回填 / 回测 / 自动预测 / 结算；赛前刷新按开关另计。
+    registered = 6 if prematch_registered else 5
     if settings.chat_id:
         app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
         # 每日复盘：把「准在哪、不准在哪」讲清楚，是进步型机器人的反馈回路

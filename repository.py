@@ -1288,6 +1288,39 @@ class PredictionRepository:
                 continue
         return out
 
+    def upcoming_matches(self, day_from: str, day_to: str,
+                         *, limit: int = 500) -> list[dict[str, Any]]:
+        """按**日期**（YYYY-MM-DD）粗筛本地赛程，返回保存时的原始 fixture 结构。
+
+        为什么只按日期过滤、不按精确时刻过滤：
+            `utc_date` 是文本，两种数据源的后缀不一致（`+00:00` / `Z`），
+            字符串区间比较会错序——看起来是同一天的比赛可能被漏掉。
+            精确的开赛时刻窗口交给上层用 parse_kickoff 解析后判断，
+            这里只负责把候选范围缩小到「今天/明天」这几百行。
+
+        不在这里过滤 status：
+            已完场的比赛由上层按解析出的开赛时间排除（`now < kickoff`），
+            SQL 层判断状态反而会把「推迟但尚未开赛」的比赛误杀。
+        """
+        try:
+            conn = self._connect()
+            rows = list(conn.execute(
+                """SELECT raw_json FROM matches
+                   WHERE substr(utc_date,1,10) BETWEEN ? AND ?
+                   ORDER BY utc_date LIMIT ?""",
+                (str(day_from), str(day_to), int(limit)),
+            ))
+        except Exception as exc:
+            log.warning("读取本地赛程失败：%s", exc)
+            return []
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                out.append(json.loads(r["raw_json"]))
+            except (ValueError, TypeError):
+                continue
+        return out
+
     def matches_with_predictions(self, day: str, *, limit: int = 300) -> list[dict[str, Any]]:
         """指定日期（YYYY-MM-DD）的全部比赛，左连已生成的预测。
 
