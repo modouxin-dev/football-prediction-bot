@@ -27,8 +27,7 @@ import sys
 from typing import Any
 
 from repository import PredictionRepository
-from signal_ab import (_load_probs, describe, outcome_index, summarise,
-                       verdict)
+from signal_ab import (_load_probs, outcome_index, summarise, verdict)
 from signal_admin import export_csv, simulate_text, simulate_weight
 
 # 概率列的三段标签，打印时对齐用。
@@ -90,6 +89,12 @@ def render_stats(repo: PredictionRepository) -> int:
         return 1
     out = summarise(rows)
     print(f"=== 对照汇总（共 {out['total']} 行，阈值 {out['threshold']}）===")
+    if out.get("revoked"):
+        # 撤销行不计入上面的统计（信号已经不在预测里了），但必须让人看见，
+        # 否则"明明触发过信号怎么没进统计"会变成无从排查的疑问。
+        detail = "、".join(f"{k} {v} 场" for k, v
+                           in sorted((out.get("revoked_by_type") or {}).items()))
+        print(f"（另有 {out['revoked']} 场信号被撤销，不计入评估：{detail}）")
     for sig_type in sorted(out["by_signal"]):
         entry = out["by_signal"][sig_type]
         strong = entry["strong"]

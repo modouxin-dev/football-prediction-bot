@@ -795,8 +795,15 @@ class PredictionService:
         # 对照采集紧跟在 predict_match 之后：此时 analysis 还是"刚算出"的状态，
         # 再往下就会被市场融合改写，采到的就不是模型口径了。
         # 采集失败只告警（capture 内部已保证），不影响本次预测。
+        #
+        # ⚠️ 这里的条件**不能要求 prematch 非空**：prematch 为 None 恰恰是
+        # "所有信号都撤了"的场景（伤停球员赛前复出等），而"信号被撤销"必须
+        # 写一行 revoked 记录。加上 `prematch and` 的话，信号一旦全部消失
+        # 采集就被跳过，撤销永远记录不下来 —— 复盘会把"信号撤销后仍然命中"
+        # 错算成"信号有效"。只按 split_out 判断：它空着时 capture 内部会
+        # 立刻返回 0，不会白跑。
         if (getattr(self.settings, "signal_ab_enabled", False)
-                and prematch and split_out):
+                and split_out):
             capture_signal_ab(
                 self.repo, fixture_id=fixture_id, analyzer=self.analyzer,
                 model=model, home_id=home["id"], away_id=away["id"],

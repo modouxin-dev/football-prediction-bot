@@ -197,6 +197,21 @@ def describe(signal_type: str, detail: dict[str, Any] | None) -> str:
     return f"{label}信号：已触发"
 
 
+def signal_label(signal_type: str) -> str:
+    """信号类型的中文名（registry 里没有就回落到类型字符串）。"""
+    return dict((t, n) for t, n, _ in SIGNAL_REGISTRY).get(signal_type, signal_type)
+
+
+def describe_revoked(signal_type: str) -> str:
+    """信号被撤销时的 human_readable 描述。
+
+    必须说清"本场不再计入该信号评估"——否则复盘时看到这一行会误以为
+    它和其他行一样能用来判断信号有没有用。
+    """
+    return (f"{signal_label(signal_type)}信号已撤销（赛前状态变化，"
+            f"如球员复出进入大名单），本场不再计入该信号评估")
+
+
 def outcome_index(home: Any, away: Any) -> int | None:
     """比分 → 0/1/2（主胜/平/客胜）；比分缺失返回 None。"""
     h, a = _finite_or_none(home), _finite_or_none(away)
@@ -339,19 +354,33 @@ def summarise(rows: list[Any], *, strong_threshold: float = DEFAULT_STRONG_THRES
 
     对照 baseline 用 **partial_baseline**（有其他信号、独缺本类），这才是
     "这一类信号的增量价值"；pure_baseline 另给一列，用于看"所有信号合起来"。
+
+    **撤销行（change_type='revoked'）一律排除在统计之外。** 信号被撤销后
+    我们发出的预测里已经不含它了，但"如果它还在会怎么说"无法反推。把这类
+    行算进去，会把"信号撤销后仍然命中"错误地记成"信号有效"，结论系统性偏乐观。
     """
     parsed: list[dict[str, Any]] = []
+    revoked: list[dict[str, Any]] = []
     for row in rows or []:
         if isinstance(row, dict):
-            parsed.append(row)
+            item = row
         else:
             try:
-                parsed.append(dict(row))
+                item = dict(row)
             except (TypeError, ValueError):
                 continue
+        if str(item.get("change_type") or CHANGE_APPLIED) == CHANGE_REVOKED:
+            revoked.append(item)
+        else:
+            parsed.append(item)
+    revoked_by_type: dict[str, int] = {}
+    for r in revoked:
+        key = str(r.get("signal_type"))
+        revoked_by_type[key] = revoked_by_type.get(key, 0) + 1
     if not parsed:
         return {"total": 0, "by_signal": {}, "threshold": strong_threshold,
-                "min_samples": min_samples}
+                "min_samples": min_samples, "revoked": len(revoked),
+                "revoked_by_type": revoked_by_type}
 
     by_signal: dict[str, Any] = {}
     types = sorted({str(r.get("signal_type")) for r in parsed
@@ -375,9 +404,11 @@ def summarise(rows: list[Any], *, strong_threshold: float = DEFAULT_STRONG_THRES
                              min_samples=min_samples),
             "n_rows": len(mine),
             "n_strong": len(strong),
+            "n_revoked": revoked_by_type.get(sig_type, 0),
         }
     return {"total": len(parsed), "by_signal": by_signal,
-            "threshold": strong_threshold, "min_samples": min_samples}
+            "threshold": strong_threshold, "min_samples": min_samples,
+            "revoked": len(revoked), "revoked_by_type": revoked_by_type}
 
 
 def verdict(entry: dict[str, Any]) -> str:

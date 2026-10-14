@@ -12,9 +12,9 @@ from __future__ import annotations
 import pytest
 
 from repository import PredictionRepository
-from signal_ab import (SIGNAL_INJURY, SIGNAL_LINEUP, SIGNAL_RATING,
-                       SIGNAL_WEATHER, STATUS_PARTIAL_FAILURE, summarise,
-                       verdict)
+from signal_ab import (CHANGE_REVOKED, SIGNAL_INJURY, SIGNAL_LINEUP,
+                       SIGNAL_RATING, SIGNAL_WEATHER, STATUS_PARTIAL_FAILURE,
+                       summarise, verdict)
 from signal_capture import (_is_neutral, capture, raw_strength,
                             split_factors)
 
@@ -213,3 +213,94 @@ def test_summarise_tolerates_empty_and_junk():
     """复盘不能因为读不到对照数据就整个挂掉。"""
     assert summarise([])["total"] == 0
     assert summarise([object(), None])["total"] == 0
+
+
+# ---- 信号撤销 --------------------------------------------------------------
+
+
+def _injury_factors():
+    return split_factors(1, 2, injuries=_injury(1), prematch_strength=0.5)
+
+
+def test_signal_withdrawn_becomes_revoked_row(repo):
+    """信号消失（伤停球员赛前复出）必须写一行 revoked，而不是静默不写。
+
+    不写的话，复盘会把"信号撤销后仍然命中的比赛"错算成"信号有效"，
+    结论系统性偏乐观。
+    """
+    capture(repo, fixture_id=21, analyzer=FakeAnalyzer(), model=None,
+            home_id=1, away_id=2, by_signal=_injury_factors())
+    assert repo.signal_ab_rows()[0]["change_type"] == "applied"
+
+    # 第二轮：伤停消失（球员复出）
+    written = capture(repo, fixture_id=21, analyzer=FakeAnalyzer(), model=None,
+                      home_id=1, away_id=2, by_signal=split_factors(1, 2))
+    assert written == 1
+    row = repo.signal_ab_rows()[0]
+    assert row["change_type"] == CHANGE_REVOKED
+    assert row["signal_strength"] == 0.0
+
+
+def test_first_capture_never_writes_revoked(repo):
+    """没有历史就没有"撤销"——首次采集不该凭空产生 revoked 行。"""
+    capture(repo, fixture_id=22, analyzer=FakeAnalyzer(), model=None,
+            home_id=1, away_id=2, by_signal=_injury_factors())
+    assert all(r["change_type"] == "applied" for r in repo.signal_ab_rows())
+
+
+def test_revoked_row_keeps_pure_baseline(repo):
+    """撤销行仍要留下 pure 版预测，排查时能看出"没信号会怎么说"。"""
+    capture(repo, fixture_id=23, analyzer=FakeAnalyzer(), model=None,
+            home_id=1, away_id=2, by_signal=_injury_factors())
+    capture(repo, fixture_id=23, analyzer=FakeAnalyzer(), model=None,
+            home_id=1, away_id=2, by_signal=split_factors(1, 2))
+    row = repo.signal_ab_rows()[0]
+    assert row["pure_baseline"]
+    assert "撤销" in row["human_note"]
+
+
+def test_revoked_row_is_not_written_twice(repo):
+    """第二轮已经撤销后，第三轮不该再把它当"新撤销"重复计数。"""
+    capture(repo, fixture_id=24, analyzer=FakeAnalyzer(), model=None,
+            home_id=1, away_id=2, by_signal=_injury_factors())
+    capture(repo, fixture_id=24, analyzer=FakeAnalyzer(), model=None,
+            home_id=1, away_id=2, by_signal=split_factors(1, 2))
+    written = capture(repo, fixture_id=24, analyzer=FakeAnalyzer(), model=None,
+                      home_id=1, away_id=2, by_signal=split_factors(1, 2))
+    assert written == 0        # 已撤销且无新信号 → 无需再写
+    assert len(repo.signal_ab_rows()) == 1
+
+
+def test_revoked_rows_excluded_from_statistics():
+    """撤销行必须排除在统计之外 —— 它代表"信号已经不在预测里了"。"""
+    applied = [_row(SIGNAL_INJURY, 0.5, 0.44, 0.44, 2, 1) for _ in range(40)]
+    revoked = dict(applied[0])
+    revoked["change_type"] = CHANGE_REVOKED
+    out = summarise(applied + [revoked], min_samples=10)
+    entry = out["by_signal"][SIGNAL_INJURY]
+    assert entry["strong"]["n"] == 40      # 撤销行没被算进去
+    assert out["revoked"] == 1
+    assert out["revoked_by_type"][SIGNAL_INJURY] == 1
+    assert entry["n_revoked"] == 1
+
+
+def test_revoked_only_rows_do_not_create_empty_verdict():
+    """全是撤销行时统计为空，但不能因此报错或凭空造结论。"""
+    row = _row(SIGNAL_INJURY, 0.5, 0.44, 0.48, 2, 1)
+    row["change_type"] = CHANGE_REVOKED
+    out = summarise([row], min_samples=1)
+    assert out["total"] == 0
+    assert out["revoked"] == 1
+
+
+def test_capture_is_not_gated_on_prematch_presence():
+    """采集不能被「prematch 非空」挡住 —— prematch 为 None 正是信号全撤的场景。
+
+    若加上 `prematch and`，信号一旦全部消失采集就被整体跳过，撤销行永远
+    写不出来，复盘会把「撤销后仍命中」错算成「信号有效」。
+    """
+    src = open("service.py", encoding="utf-8").read()
+    marker = 'getattr(self.settings, "signal_ab_enabled", False)'
+    assert marker in src
+    snippet = src[src.index(marker):src.index(marker) + 200]
+    assert "prematch and" not in snippet
