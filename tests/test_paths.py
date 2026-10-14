@@ -105,6 +105,33 @@ def test_probe_survives_unwritable_dir():
 # 且没有任何报错，只能看到「正在加载数据」。
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _restore_path_modules(monkeypatch):
+    """还原被 importlib.reload 改写的路径常量。
+
+    真实事故：_reload_paths 先删掉 DATABASE_PATH/DATA_DIR 再 reload paths 与
+    config，模块级常量因此被改写成默认值（/data/...）。monkeypatch 只还原
+    **环境变量**，不会还原已经 reload 过的模块常量；于是后续用例里
+    PredictionRepository 连的是默认库，而 conftest._reset_db() 清的是测试库
+    ——两者分裂，上一用例的数据清不掉，下一个用例再插同样的 fixture_id 就报
+    "UNIQUE constraint failed: predictions.fixture_id"。
+
+    表现为「单独跑这个文件全绿、跑全量就红」，极易被误判成新改动的问题。
+    这里在用例结束后按还原后的环境变量重建常量，把污染挡在本文件内。
+    """
+    yield
+    import importlib
+    import os
+
+    monkeypatch.undo()  # 先还原环境变量，再按还原后的值重建常量
+    import config
+
+    expected = os.environ.get("DATABASE_PATH") or os.environ.get("DB_PATH")
+    if expected and str(paths.DB_PATH) != str(expected):
+        importlib.reload(paths)
+        importlib.reload(config)
+
+
 def _reload_paths(monkeypatch, env: dict):
     """在给定环境变量下重新加载 paths 与 config，返回 (paths.DB_PATH, Settings.db_path)。"""
     for key in ("DATABASE_PATH", "DB_PATH", "DATA_DIR"):
