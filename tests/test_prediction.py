@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import main
+from support import begin_task
 from api_client import APIError, flatten_standings
 from bot_handler import BotUI
 from config import load_settings
@@ -270,7 +271,7 @@ def test_fx_callback_duplicate_click_blocked():
     run(main.on_predict_fixture(update, ctx))
     first_edits = len(q.edits)
     # 模拟并发：任务未结束时再次点击
-    ctx.application.bot_data.setdefault("pending", set()).add((555, "pred:1001"))
+    run(begin_task(ctx.application.bot_data, 555, "pred:1001"))
     update2, q2 = q_update("fx:1001")
     run(main.on_predict_fixture(update2, ctx))
     assert len(q2.edits) == 0  # 被拦下，没有重复渲染

@@ -39,8 +39,8 @@ from keyboards import Keyboards
 from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
 from service import (MODE_DATE, MODE_NEXT, MODE_TODAY, ST_NO_DATA, Prediction,
                      PredictionService)
-from support import (back_to_menu_markup, begin_task, describe_error,
-                     edit_view, end_task, is_admin, reply_html,
+from support import (GUARD_HINT, back_to_menu_markup, begin_task,
+                     describe_error, edit_view, end_task, is_admin, reply_html,
                      set_panel_state)
 from templates import (PANEL_CLOSE_LABEL, PANEL_COLLAPSED, PANEL_EXPANDED,
                        PANEL_HINTS, PANEL_OPEN_LABEL)
@@ -315,11 +315,15 @@ async def generate_digest(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     settings: Settings = app.bot_data["settings"]
     service: PredictionService = app.bot_data["service"]
 
-    await query.answer("正在生成今日预测…")
     user_id = query.from_user.id
-    # 生成要调 API 算几十场，耗时数秒；用 pending 守卫避免重复点击把 API 打爆
-    if not await begin_task(app.bot_data, user_id, "digest"):
+    chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+    # 生成要调 API 算几十场，耗时十几秒；用 pending 守卫避免重复点击把 API 打爆。
+    # 命中守卫必须明确告知「上一次还在跑」：此前直接 return，界面毫无变化，
+    # 用户只能以为机器人坏了（或以为内容被发到了别的会话）。
+    if not await begin_task(app.bot_data, user_id, "digest", chat_id):
+        await query.answer(GUARD_HINT, show_alert=True)
         return
+    await query.answer("正在生成今日预测…")
     try:
         predictions, note = await _build_digest_predictions(service)
     except Exception as exc:  # 手动触发：失败必须让用户看见，不能只写日志
@@ -331,7 +335,7 @@ async def generate_digest(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
     finally:
-        end_task(app.bot_data, user_id, "digest")
+        end_task(app.bot_data, user_id, "digest", chat_id)
 
     if not predictions:
         # 兜底文案用汇总视图的空态，保证与推送口径一致
@@ -756,8 +760,14 @@ async def reply_digest(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = app.bot_data["settings"]
     service: PredictionService = app.bot_data["service"]
     user_id = message.from_user.id
-    if not await begin_task(app.bot_data, user_id, "digest"):
+    chat_id = getattr(message, "chat_id", None)
+    if not await begin_task(app.bot_data, user_id, "digest", chat_id):
+        # 命中守卫必须给可见反馈：静默 return 会让用户以为机器人没反应
+        await reply_html(message, GUARD_HINT, None)
         return
+    # 取数要算几十场、耗时十几秒，先回一条可见提示，否则界面长时间毫无动静，
+    # 用户只能反复点击（后续点击又会被守卫吞掉）。
+    await reply_html(message, "⏳ 正在生成今日预测…", None)
     try:
         predictions, note = await _build_digest_predictions(service)
     except Exception as exc:
@@ -765,7 +775,7 @@ async def reply_digest(message, context: ContextTypes.DEFAULT_TYPE) -> None:
         await reply_html(message, f"❌ <b>生成失败</b>\n{esc(describe_error(exc))}", None)
         return
     finally:
-        end_task(app.bot_data, user_id, "digest")
+        end_task(app.bot_data, user_id, "digest", chat_id)
 
     if not predictions:
         await reply_html(message, DigestView.format_digest_empty(note), None)

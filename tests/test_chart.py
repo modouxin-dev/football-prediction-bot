@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import main
+from support import begin_task
 from api_client import APIError
 from bot_handler import BotUI
 from config import load_settings
@@ -254,7 +255,7 @@ def test_chart_callback_duplicate_click_blocked():
     update, q = q_update("chart:prob:1001")
     run(main.on_chart(update, ctx))
     first = len(q.message.photos)
-    ctx.application.bot_data.setdefault("pending", set()).add((555, "chart:prob:1001"))
+    run(begin_task(ctx.application.bot_data, 555, "chart:prob:1001"))
     update2, q2 = q_update("chart:prob:1001")
     run(main.on_chart(update2, ctx))
     assert first == 1 and len(q2.message.photos) == 0

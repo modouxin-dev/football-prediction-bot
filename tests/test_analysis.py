@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import main
+from support import begin_task
 from api_client import APIError, flatten_standings
 from bot_handler import NO_DATA, BotUI
 from config import load_settings
@@ -331,7 +332,7 @@ def test_fa_callback_duplicate_click_blocked():
     ctx, _ = make_ctx(AnalysisAPI(standings=standings_with_points()), fx_cache={"date": "x", "items": [now_fixture()]})
     update, q = q_update("fa:1001")
     run(main.on_analysis_fixture(update, ctx))
-    ctx.application.bot_data.setdefault("pending", set()).add((555, "analysis:1001"))
+    run(begin_task(ctx.application.bot_data, 555, "analysis:1001"))
     update2, q2 = q_update("fa:1001")
     run(main.on_analysis_fixture(update2, ctx))
     assert len(q2.edits) == 0

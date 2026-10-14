@@ -54,17 +54,30 @@ async def notify_admins(app, text: str) -> None:
 
 
 # ---- 防重复点击（同一用户同一任务并发只放行一次） -----------------------------------
-async def begin_task(bot_data: dict, user_id: int, task: str) -> bool:
+# 命中守卫时的提示：必须说清「上一次还在跑」，否则用户点了没反应只会以为
+# 机器人坏了（甚至以为内容被发到了别的会话）。
+GUARD_HINT = "⏳ 上一次还在生成，请稍候几秒再点。"
+
+
+async def begin_task(bot_data: dict, user_id: int, task: str,
+                     chat_id: int | None = None) -> bool:
+    """同一用户同一任务并发只放行一次。
+
+    `chat_id` 用于区分「同一个人在群与私聊」：key 只按 user_id 时，
+    在群里点了一次还没跑完，私聊再点会被吞掉——两个会话互不相干，
+    不该互相阻塞。不传则退化为原来的按用户粒度（等价于 chat_id=0）。
+    """
     pending = bot_data.setdefault("pending", set())
-    key = (user_id, task)
+    key = (user_id, task, chat_id or 0)
     if key in pending:
         return False
     pending.add(key)
     return True
 
 
-def end_task(bot_data: dict, user_id: int, task: str) -> None:
-    bot_data.setdefault("pending", set()).discard((user_id, task))
+def end_task(bot_data: dict, user_id: int, task: str,
+             chat_id: int | None = None) -> None:
+    bot_data.setdefault("pending", set()).discard((user_id, task, chat_id or 0))
 
 
 def back_to_menu_markup() -> InlineKeyboardMarkup:
