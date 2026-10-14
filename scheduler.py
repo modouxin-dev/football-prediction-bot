@@ -57,12 +57,15 @@ BACKTEST_INTERVAL_HOURS = 24
 # ── 自动预测与复盘 ────────────────────────────────────────────────────────
 # 欧冠（2）默认纳入无人值守预测：它是关注度最高的赛事之一，
 # 但用户手动点「预测」时只覆盖当前选中的单一联赛，欧冠因此长期没有预测记录，
-# 看板上整片显示「未预测」。主联赛由 settings.league_id 提供，这里只补额外联赛。
+# 看板上整片显示「未预测」。主联赛列表由 settings.league_ids 提供，
+# 这里补的是可能不在 LEAGUE_IDS 里、但仍需无人值守兜底的额外联赛。
 AUTO_PREDICT_EXTRA_LEAGUES: tuple[int, ...] = (2,)  # 2 = 欧洲冠军联赛
 
-# 自动预测的向前窗口（天）。2 天足够覆盖「明天」又不至于为远期赛程白烧额度——
-# 远期赛程会变（改期、阵容未定），提前算好的概率反而是噪音。
-AUTO_PREDICT_DAYS = 2
+# 自动预测的向前窗口（天）。
+# 必须与看板可切换的范围对齐：看板 days 支持 1/3/7，窗口只有 2 天时
+# 切到「3 天」第三天必然整片未预测。取 3 天覆盖看板默认档位，
+# 再远则赛程会变（改期、阵容未定、赔率未开），提前算好的概率是噪音。
+AUTO_PREDICT_DAYS = 3
 
 # 复盘回看窗口（天）。7 天能在样本量与时效性之间取得平衡：
 # 太短（1 天）样本个位数，归因全是噪音；太长（30 天）会掩盖近期劣化。
@@ -220,8 +223,15 @@ async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     app = context.application
     service: PredictionService = app.bot_data["service"]
     try:
+        # 必须用「全部启用联赛」，不能用主联赛。
+        # 赛程同步（sync.py）遍历 settings.league_ids 拉取 10 个联赛 × 30 天，
+        # 而这里若只用 settings.league_id，看板展示的比赛里
+        # 除英超/欧冠外的 8 个联赛永远显示「尚未生成预测」。
+        # 有赛程就必须有预测，两边得是同一批比赛。
+        enabled = getattr(service.settings, "league_ids", None) or (
+            int(service.settings.league_id),)
         ids = tuple(dict.fromkeys(
-            (int(service.settings.league_id),) + tuple(AUTO_PREDICT_EXTRA_LEAGUES)
+            tuple(int(x) for x in enabled) + tuple(AUTO_PREDICT_EXTRA_LEAGUES)
         ))
         r = await service.auto_predict_store(ids, days=AUTO_PREDICT_DAYS)
         log.info(

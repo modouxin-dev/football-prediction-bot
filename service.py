@@ -551,10 +551,10 @@ class PredictionService:
         stats: dict[str, Any] = {
             "saved": 0, "errors": [], "per_league": {}, "window_days": days,
         }
-        total = 0
+
+        # 第一阶段：先把各联赛窗口内未开赛的赛程收集齐。
+        pending: list[tuple[int, list[tuple[Any, dict[str, Any]]], Any]] = []
         for lid in dict.fromkeys(int(x) for x in league_ids):
-            if total >= cap:
-                break
             try:
                 fixtures, season, note = await self._fetch_fixtures(
                     now.date(), end.date(), league_id=lid)
@@ -567,18 +567,36 @@ class PredictionService:
             if not upcoming:
                 stats["per_league"][lid] = {"saved": 0, "note": note or "窗口内无未开赛比赛"}
                 continue
-            models: dict[int, LeagueModel] = {}
-            if lid not in models:
-                try:
-                    models[lid] = await self._model_for(lid, models)
-                except Exception as exc:
-                    stats["errors"].append(f"联赛 {lid} 建模失败：{exc}")
-                    log.warning("自动预测：联赛 %s 建模失败：%s", lid, exc)
-                    continue
-            n = 0
-            for kickoff, fx in upcoming:
+            pending.append((lid, upcoming, note))
+
+        # 第二阶段：轮转发牌。
+        # 配额若按联赛顺序「先到先得」，cap 打满后直接结束，
+        # 排在后面的联赛（意甲/西甲）一场都轮不到，看板上它们就恒显示
+        # 「尚未生成预测」——明明同步了赛程却没有预测。轮转保证配额不足时
+        # 每个联赛都分到一些，而不是前面吃满、后面饿死。
+        models: dict[int, LeagueModel] = {}
+        cursor: dict[int, int] = {lid: 0 for lid, _, _ in pending}
+        saved_per: dict[int, int] = {lid: 0 for lid, _, _ in pending}
+        total = 0
+        while total < cap:
+            progressed = False
+            for lid, upcoming, _note in pending:
                 if total >= cap:
                     break
+                i = cursor[lid]
+                if i >= len(upcoming):
+                    continue
+                if lid not in models:
+                    try:
+                        models[lid] = await self._model_for(lid, models)
+                    except Exception as exc:
+                        # 建模失败则放弃该联赛，但原因必须进 errors，否则无从排查
+                        stats["errors"].append(f"联赛 {lid} 建模失败：{exc}")
+                        log.warning("自动预测：联赛 %s 建模失败：%s", lid, exc)
+                        cursor[lid] = len(upcoming)
+                        continue
+                kickoff, fx = upcoming[i]
+                cursor[lid] = i + 1
                 try:
                     prediction = await self._predict_one(models[lid], kickoff, fx)
                 except Exception as exc:
@@ -586,10 +604,15 @@ class PredictionService:
                                 (fx.get("fixture") or {}).get("id"), exc)
                     continue
                 self._remember(prediction)
-                n += 1
+                saved_per[lid] += 1
                 total += 1
-            stats["per_league"][lid] = {"saved": n, "note": note}
-            stats["saved"] += n
+                progressed = True
+            if not progressed:
+                break
+
+        for lid, _upcoming, note in pending:
+            stats["per_league"][lid] = {"saved": saved_per[lid], "note": note}
+        stats["saved"] = total
         return stats
 
     async def prematch_refresh(
