@@ -539,7 +539,11 @@ class PredictionService:
         # 展示概率换成市场口径（实测优于泊松：准确率 53.78% vs 50.99%，
         # log_loss 0.9692 vs 1.0053，McNemar p=0.007047，见 docs/MARKET_FUSION_EVAL.md）。
         # 无赔率时 apply_market_adjustment 原样返回，行为不变。
-        analysis = apply_market_adjustment(analysis, odds)
+        # 市场锚定融合：w·市场 + (1−w)·模型，w 由 MARKET_BLEND_WEIGHT 配置
+        # （默认 0.75）。矩阵同步缩放，故最可能比分与三项概率仍自洽。
+        # 模型原始概率已由 apply_market_adjustment 存入 poisson_probs 供复盘对比。
+        analysis = apply_market_adjustment(
+            analysis, odds, blend_weight=self.settings.market_weight)
         best = max(outcomes.items(), key=lambda kv: kv[1]["edge"]) if outcomes else None
         league = fx.get("league") or {}
 

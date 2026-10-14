@@ -712,7 +712,8 @@ def market_gap(model_probs: dict, odds: dict | None) -> dict[str, float]:
     }
 
 
-def apply_market_adjustment(analysis: dict, odds: dict | None) -> dict:
+def apply_market_adjustment(analysis: dict, odds: dict | None,
+                         blend_weight: float | None = None) -> dict:
     """用去水市场概率替换胜平负，并按结果块等比缩放比分矩阵。
 
     为什么必须同步缩放矩阵，而不只替换三项概率：
@@ -735,6 +736,28 @@ def apply_market_adjustment(analysis: dict, odds: dict | None) -> dict:
         result["market_used"] = False
         result["market_probs"] = None
         return result
+
+    # 市场锚定融合：blend_weight 非 None 时，缩放目标从「纯市场」改为
+    # w·市场 + (1−w)·模型。矩阵仍按结果块等比缩放，因此最可能比分、
+    # 大小球与三项概率保持自洽（不会出现「最可能比分 1-0」与「客胜最高」并存）。
+    if blend_weight is not None:
+        model_p = (
+            float(analysis.get("win_prob", 0.0) or 0.0),
+            float(analysis.get("draw_prob", 0.0) or 0.0),
+            float(analysis.get("loss_prob", 0.0) or 0.0),
+        )
+        blended = blend_with_market(
+            model_p,
+            (market["home"], market["draw"], market["away"]),
+            weight=blend_weight,
+        )
+        market = {
+            "home": blended[0],
+            "draw": blended[1],
+            "away": blended[2],
+        }
+        result["market_weight"] = blend_weight
+        result["market_blended"] = True
 
     lh = float(analysis.get("lambda_home", 0.0) or 0.0)
     la = float(analysis.get("lambda_away", 0.0) or 0.0)
@@ -792,6 +815,78 @@ def apply_market_adjustment(analysis: dict, odds: dict | None) -> dict:
         "market_probs": market,
     })
     return result
+
+
+# ---- 市场锚定融合 ------------------------------------------------------------
+DEFAULT_MARKET_WEIGHT = 0.75
+MARKET_WEIGHT_MIN = 0.0
+MARKET_WEIGHT_MAX = 1.0
+
+
+def blend_with_market(
+    model_probs: tuple[float, float, float],
+    market_probs: tuple[float, float, float] | None,
+    weight: float = DEFAULT_MARKET_WEIGHT,
+) -> tuple[float, float, float]:
+    """P_final = w·市场 + (1−w)·模型，返回归一化后的三项概率。
+
+    model_probs / market_probs 均为 (主胜, 平, 客胜)。
+    market_probs 为 None（无赔率）时原样返回模型概率，绝不臆造市场信息。
+    weight=0 → 纯模型；weight=1 → 纯市场。
+    """
+    if market_probs is None:
+        return tuple(float(v) for v in model_probs)  # type: ignore[return-value]
+    w = min(max(float(weight), MARKET_WEIGHT_MIN), MARKET_WEIGHT_MAX)
+    out = tuple(
+        w * float(market_probs[i]) + (1.0 - w) * float(model_probs[i])
+        for i in range(3)
+    )
+    total = sum(out)
+    if total <= 0:
+        return tuple(float(v) for v in model_probs)  # type: ignore[return-value]
+    return tuple(v / total for v in out)
+
+
+def _rps(probs: tuple[float, float, float], actual: int) -> float:
+    """排序概率分数（越低越好）。
+
+    这里本地实现一份而不是从 backtest 导入：backtest 依赖 analyzer，
+    反向导入会形成循环。逻辑与 backtest.rps 完全一致。
+    """
+    total = 0.0
+    cum_p = cum_a = 0.0
+    for i in range(3):
+        cum_p += probs[i]
+        cum_a += 1.0 if i == actual else 0.0
+        total += (cum_p - cum_a) ** 2
+    return total / 2.0
+
+
+def fit_market_weight(
+    samples: list[tuple[tuple[float, float, float],
+                        tuple[float, float, float] | None, int]],
+    grid: tuple[float, ...] = (0.0, 0.25, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0),
+) -> tuple[float, dict[float, float]]:
+    """在给定样本上按 RPS 网格搜索最优融合权重。
+
+    samples 元素为 (模型概率, 市场概率|None, 实际结果索引)。
+    返回 (最优权重, {权重: 平均RPS})。样本为空时返回 (DEFAULT_MARKET_WEIGHT, {})，
+    让调用方安全降级到默认值而不是崩溃。
+
+    调用方必须保证 samples 全部来自**被评估时刻之前**的历史，
+    否则就是拿未来数据调参，回测结论不可信。
+    """
+    if not samples:
+        return DEFAULT_MARKET_WEIGHT, {}
+    scores: dict[float, float] = {}
+    for w in grid:
+        acc = 0.0
+        for model_p, market_p, actual in samples:
+            acc += _rps(blend_with_market(model_p, market_p, w), actual)
+        scores[w] = acc / len(samples)
+    best = min(scores, key=lambda k: scores[k])
+    return best, scores
+
 
 
 # ---- 模型信心等级 -------------------------------------------------------------
