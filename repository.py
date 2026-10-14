@@ -279,6 +279,14 @@ SELECT id, fixture_id, signal_type, signal_strength, signal_strength_norm,
        created_at, updated_at
 FROM signal_ab;
 
+-- 赛前二次推送去重：一行 = 一场已经推送过赛前更新的比赛。
+--   没有它，赛前刷新每 15 分钟一轮会把同一场比赛反复推一遍，
+--   用户端就是刷屏。同一场比赛终身只推一次，见 scheduler.prematch_push。
+CREATE TABLE IF NOT EXISTS prematch_push (
+    fixture_id  INTEGER PRIMARY KEY,
+    pushed_at   TEXT NOT NULL
+);
+
 -- 迁移完成标记：补列脚本必须幂等，且跑过一次后不必每次启动都扫全表。
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name        TEXT PRIMARY KEY,
@@ -524,6 +532,46 @@ class PredictionRepository:
             log.warning("补建 signal_ab 列失败：%s", exc)
             return
         self._mark_migration(name)
+
+    def prematch_pushed(self, fixture_id: Any) -> bool:
+        """该场赛前更新是否已推送过（去重，避免每轮重复推送刷屏）。
+
+        查不到一律返回 False —— 宁可多推一次，也不能因为标记读不出来
+        而永远不再推送。理由同 _lineup_already_applied。
+        """
+        if fixture_id is None:
+            return False
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT 1 FROM prematch_push WHERE fixture_id=?",
+                (int(fixture_id),)).fetchone()
+        except Exception as exc:
+            log.warning("读取赛前推送标记失败（fixture=%s）：%s", fixture_id, exc)
+            return False
+        return row is not None
+
+    def mark_prematch_pushed(self, fixture_ids: Any) -> int:
+        """标记这些比赛已推送过赛前更新；返回实际写入的行数。"""
+        ids: list[int] = []
+        for fid in fixture_ids or []:
+            try:
+                ids.append(int(fid))
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            return 0
+        try:
+            conn = self._connect()
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            conn.executemany(
+                "INSERT OR REPLACE INTO prematch_push(fixture_id, pushed_at) "
+                "VALUES(?,?)", [(fid, now) for fid in ids])
+            conn.commit()
+        except Exception as exc:
+            log.warning("写入赛前推送标记失败：%s", exc)
+            return 0
+        return len(ids)
 
     def _seed_signal_registry(self) -> None:
         """把已注册的信号类型写进注册表；已存在的不覆盖（保留自定义描述）。"""

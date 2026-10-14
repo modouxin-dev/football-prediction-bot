@@ -645,6 +645,10 @@ class PredictionService:
         """
         stats: dict[str, Any] = {
             "checked": 0, "refreshed": 0, "skipped": 0, "errors": [],
+            # 本轮实际重算过的比赛明细，供赛前二次推送按"距开赛多久 +
+            # 是否拿到阵容"决定推送时机。放在这里而不是让调用方重查一遍，
+            # 是为了避免两处算出不同的 lead（时间会流逝）。
+            "entries": [],
         }
         settings = getattr(self, "settings", None)
         if not getattr(settings, "prematch_enabled", False):
@@ -697,6 +701,15 @@ class PredictionService:
                 continue
             self._remember(prediction)
             stats["refreshed"] += 1
+            stats["entries"].append({
+                "fixture_id": fid,
+                "kickoff": kickoff,
+                "lead_seconds": (kickoff - now).total_seconds(),
+                # 阵容是否真的拿到了：与去重判断共用同一份真值（signal_ab
+                # 的 applied 行），避免两处口径不一致导致"说拿到了其实没有"。
+                "lineup": bool(self._lineup_already_applied(fid)),
+                "prediction": prediction,
+            })
         return stats
 
     def _lineup_already_applied(self, fixture_id: Any) -> bool:

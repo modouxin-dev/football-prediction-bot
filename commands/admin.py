@@ -31,11 +31,37 @@ log = logging.getLogger("bot")
 
 
 async def test_cmd(update, context) -> None:
-    """/test — 立即推送一次预测，走与定时任务完全相同的路径。"""
+    """/test — 立即推送一次预测，走与定时任务完全相同的路径。
+
+    ⚠️ 收件人：默认发到**当前会话**（在私聊敲就进私聊）。此前写死发
+        settings.chat_target，导致管理员在私聊里验证时内容全飞进群，
+        本人一条都看不到 —— 看起来就像"机器人没理我"。
+
+        需要验证定时推送那条路径时，用 `/test group` 显式指定发到 CHAT_ID。
+    """
     app = context.application
-    progress = await update.effective_message.reply_text("⏳ 正在获取数据并生成预测…")
+    settings = app.bot_data.get("settings")
+    args = (context.args or []) if getattr(context, "args", None) else []
+    to_group = bool(args) and str(args[0]).strip().lower() in ("group", "g", "群", "chat")
+    # getattr 而非直接取属性：既有测试用 SimpleNamespace 构造 update，
+    # 只放了 effective_user。拿不到会话时退回 chat_target（旧行为），
+    # 不让命令因为取不到 id 而崩掉。
+    chat = getattr(update, "effective_chat", None)
+    current_chat = getattr(chat, "id", None) if chat is not None else None
+    if to_group:
+        chat_id = getattr(settings, "chat_target", None)
+        if chat_id is None:
+            await update.effective_message.reply_text(
+                "ℹ️ 未设置 CHAT_ID，无法发到群。直接 /test 可发到当前会话。")
+            return
+        where = f"群 CHAT_ID（{esc(str(chat_id))}）"
+    else:
+        chat_id = current_chat
+        where = "当前会话"
+    progress = await update.effective_message.reply_text(
+        f"⏳ 正在获取数据并生成预测…（目的地：{where}）")
     try:
-        result = await run_push(app, widen=True)
+        result = await run_push(app, widen=True, chat_id=chat_id)
     except Exception as exc:
         log.exception("/test 失败")
         await progress.edit_text(f"❌ 发送失败：{describe_error(exc)}")
@@ -45,7 +71,8 @@ async def test_cmd(update, context) -> None:
             "ℹ️ 没有可推送的比赛（近期赛程为空或已全部开赛），未发送任何消息。")
     else:
         extra = f"\n{result.note}" if result.note else ""
-        await progress.edit_text(f"✅ 已向 CHAT_ID 发送 {result.sent} 条预测。{extra}")
+        await progress.edit_text(
+            f"✅ 已向{where}发送 {result.sent} 条预测。{extra}")
 
 
 def _format_quota(api: Any, req: dict[str, Any]) -> str:

@@ -48,6 +48,15 @@ TRUE_VALUES = {"1", "true", "yes", "on", "y"}
 DEFAULT_PREMATCH_REFRESH_MINUTES = 15
 PREMATCH_REFRESH_MAX_MINUTES = 180
 
+# 赛前二次推送：开赛前多久进入"可推送"窗口（分钟）。
+#   用户要的是"赛前一小时用实时数据再推一次"。但官方明确说明首发阵容
+#   要开赛前 20–40 分钟才公布，T-60 拿到的往往只有更新过的伤停与赔率。
+#   因此在窗口内**优先等阵容**：拿到阵容立刻推；始终拿不到（部分赛事
+#   官方不提供）则在 PREMATCH_PUSH_FORCE_MINUTES 兜底推一次，
+#   免得这场比赛永远等不到更新。两种情形都只推一次，靠 prematch_push 表去重。
+DEFAULT_PREMATCH_PUSH_LEAD_MINUTES = 60
+DEFAULT_PREMATCH_PUSH_FORCE_MINUTES = 20
+
 
 class ConfigError(RuntimeError):
     """配置缺失或格式错误。"""
@@ -151,6 +160,12 @@ class Settings:
     # PREMATCH_REFRESH_MINUTES：赛前刷新间隔（分钟），0 = 不启用
     # 存在的理由见 service.prematch_refresh —— 自动预测 6 小时一轮，
     # 而首发阵容开赛前 20–40 分钟才公布，两者对不上时阵容信号永远取不到。
+    prematch_push_enabled: bool
+    # PREMATCH_PUSH_ENABLED：赛前二次推送总开关，默认开启
+    prematch_push_lead_minutes: int
+    # PREMATCH_PUSH_LEAD_MINUTES：进入窗口后允许推送（默认 60 分钟）
+    prematch_push_force_minutes: int
+    # PREMATCH_PUSH_FORCE_MINUTES：临近开赛仍未拿到阵容时的兜底推送点
     # SIGNAL_AB_WRITE_ENABLED：**默认关闭**。只有显式开启才允许改信号权重，
     # 线上服务不给写权限 —— 这样任何代码 bug 都不可能意外改掉权重。
 
@@ -406,6 +421,29 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                             PREMATCH_REFRESH_MAX_MINUTES,
                             DEFAULT_PREMATCH_REFRESH_MINUTES, raw_prm)
 
+    # 赛前二次推送：**默认开启**。赛前刷新只是把新概率落库，不推送的话
+    #   用户看到的还是早上 08:00 那条旧预测 —— 赛前信号接了等于没接。
+    prematch_push_enabled = parse_bool(_get(env, "PREMATCH_PUSH_ENABLED"), True)
+
+    def _minutes_env(key: str, default: int) -> int:
+        raw = _get(env, key)
+        if not raw:
+            return default
+        try:
+            parsed = int(float(raw))
+        except (TypeError, ValueError):
+            log.warning("%s 不是数字，回退默认 %s：%r", key, default, raw)
+            return default
+        if not 0 <= parsed <= 24 * 60:
+            log.warning("%s 越界 [0, %d]，回退默认 %s：%r", key, 24 * 60, default, raw)
+            return default
+        return parsed
+
+    prematch_push_lead_minutes = _minutes_env(
+        "PREMATCH_PUSH_LEAD_MINUTES", DEFAULT_PREMATCH_PUSH_LEAD_MINUTES)
+    prematch_push_force_minutes = _minutes_env(
+        "PREMATCH_PUSH_FORCE_MINUTES", DEFAULT_PREMATCH_PUSH_FORCE_MINUTES)
+
     ensemble_learn = _get(env, "ENSEMBLE_LEARN", "").strip().lower() in (
         "1", "true", "yes", "on")
     ensemble_eta = DEFAULT_ETA
@@ -469,4 +507,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         signal_ab_enabled=signal_ab_enabled,
         signal_ab_write_enabled=signal_ab_write_enabled,
         prematch_refresh_minutes=prematch_refresh_minutes,
+        prematch_push_enabled=prematch_push_enabled,
+        prematch_push_lead_minutes=prematch_push_lead_minutes,
+        prematch_push_force_minutes=prematch_push_force_minutes,
     )

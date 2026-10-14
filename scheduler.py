@@ -88,19 +88,30 @@ class NotificationManager:
 
     当前实现走 Telegram Bot API；将来接 Web 推送、邮件或队列时，
     只需替换这里的 send，定时任务与命令层代码不用改。
+
+    ⚠️ 收件人（chat_id）可在调用时显式指定：**不给就退回
+    settings.chat_target**（定时任务的行为，不受影响）。
+    手动入口（/test、按钮）必须显式传入发起会话的 id —— 否则在私聊里
+    触发的测试推送会飞到群里，本人反而一条都看不到。
     """
 
     def __init__(self, app) -> None:
         self.app = app
 
+    def _target(self, chat_id: object = None) -> object:
+        """解析收件人：显式优先，缺省退回配置的 CHAT_ID。"""
+        if chat_id is not None:
+            return chat_id
+        return self.settings.chat_target
+
     @property
     def settings(self) -> Settings:
         return self.app.bot_data["settings"]
 
-    async def send_prediction(self, prediction) -> None:
+    async def send_prediction(self, prediction, chat_id: object = None) -> None:
         settings = self.settings
         await self.app.bot.send_message(
-            chat_id=settings.chat_target,
+            chat_id=self._target(chat_id),
             # 推送是唯一「无人值守」的出口：一条畸形标签会让整条推送 400 失败
             # 且没人会发现，因此这里必须过规范化层。
             text=normalize(ui.format_prediction(prediction, settings.timezone)),
@@ -108,7 +119,8 @@ class NotificationManager:
             reply_markup=ui.get_main_keyboard(prediction.fixture_id, "home"),
         )
 
-    async def send_digest(self, predictions, *, note: str | None = None) -> int:
+    async def send_digest(self, predictions, *, note: str | None = None,
+                          chat_id: object = None) -> int:
         """推送「按联赛分组的单条汇总」，返回实际发出的消息条数。
 
         五大联赛周末一天能有 30+ 场，逐场推送 = 30 条消息、30 次通知，会把
@@ -138,7 +150,7 @@ class NotificationManager:
             sent = 0
             for page in pages:
                 await self.app.bot.send_message(
-                    chat_id=settings.chat_target,
+                    chat_id=self._target(chat_id),
                     text=normalize(page),
                     parse_mode="HTML",
                     reply_markup=markup,
@@ -147,7 +159,7 @@ class NotificationManager:
             return sent
 
         await self.app.bot.send_message(
-            chat_id=settings.chat_target,
+            chat_id=self._target(chat_id),
             text=normalize(text),
             parse_mode="HTML",
             reply_markup=markup,
@@ -158,11 +170,16 @@ class NotificationManager:
         await notify_admins(self.app, text)
 
 
-async def run_push(app, *, widen: bool = False) -> PushResult:
-    """生成并推送预测。/test 与每日定时任务走的是同一条路径。"""
+async def run_push(app, *, widen: bool = False, chat_id: object = None) -> PushResult:
+    """生成并推送预测。/test 与每日定时任务走的是同一条路径。
+
+    ⚠️ chat_id：显式传入时发到该会话（手动触发必须这么做 —— 私聊里敲
+        /test 却发到群，本人一条都看不到）；不给则退回 settings.chat_target
+       （定时任务的行为，保持不变）。
+    """
     settings: Settings = app.bot_data["settings"]
     service: PredictionService = app.bot_data["service"]
-    if settings.chat_target is None:
+    if chat_id is None and settings.chat_target is None:
         raise RuntimeError("未设置 CHAT_ID，无法推送")
 
     predictions = await service.build_predictions()
@@ -176,7 +193,7 @@ async def run_push(app, *, widen: bool = False) -> PushResult:
             note = service.last_note  # 降级/空结果的真实原因，必须让用户看到
 
     sender = NotificationManager(app)
-    await sender.send_digest(predictions, note=note)
+    await sender.send_digest(predictions, note=note, chat_id=chat_id)
     # PushResult.sent 语义保持「推送了多少场比赛」；分页只是传输细节，
     # 不该让调用方（/test 回显、日志）看到消息条数和场数混在一起。
     return PushResult(len(predictions), note)
@@ -260,6 +277,56 @@ async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("自动预测失败（不影响主流程）：%s", exc)
 
 
+PREMATCH_PUSH_NOTE = (
+    "🔄 赛前更新：已并入最新伤停与首发阵容，与早间推送相比概率可能变化。"
+)
+
+
+async def prematch_push(app, entries) -> int:
+    """赛前二次推送：把刚用实时数据重算过的比赛推一次，且**每场只推一次**。
+
+    为什么必须推，只落库不够：
+        早间 08:00 推送的概率里没有当天的伤停与首发。赛前刷新把新概率
+        写进库，但用户看到的仍是早上那条 —— 赛前信号接了等于没接。
+
+    去重靠 prematch_push 表（同一场终身一行）：赛前刷新每 15 分钟一轮，
+        不去重就是每 15 分钟刷一次屏。
+
+    ⚠️ 推送时机：拿到阵容立刻推；始终拿不到（部分赛事官方不提供阵容）
+        则在 PREMATCH_PUSH_FORCE_MINUTES 兜底推一次，免得这场永远等不到更新。
+        窗口外（距开赛 > PREMATCH_PUSH_LEAD_MINUTES）不推 —— 那属于早间推送的职责。
+    """
+    settings: Settings = app.bot_data["settings"]
+    if not getattr(settings, "prematch_push_enabled", False):
+        return 0
+    service: PredictionService = app.bot_data["service"]
+    lead = max(int(getattr(settings, "prematch_push_lead_minutes", 60) or 0), 0) * 60
+    force = max(int(getattr(settings, "prematch_push_force_minutes", 20) or 0), 0) * 60
+    repo = service.repo
+    picked: list = []
+    for entry in entries or []:
+        fid = entry.get("fixture_id")
+        if fid is None or repo.prematch_pushed(fid):
+            continue
+        remaining = entry.get("lead_seconds")
+        if remaining is None or remaining > lead:
+            continue
+        # 还没拿到阵容就再等一轮；临近开赛仍拿不到则兜底推，不再无限等
+        if not entry.get("lineup") and remaining > force:
+            continue
+        if entry.get("prediction") is None:
+            continue
+        picked.append(entry)
+    if not picked:
+        return 0
+    sender = NotificationManager(app)
+    sent = await sender.send_digest(
+        [e["prediction"] for e in picked], note=PREMATCH_PUSH_NOTE)
+    # 只有真的发出去了才标记：标记早于发送会让一次失败变成永久不再推送
+    repo.mark_prematch_pushed([e["fixture_id"] for e in picked])
+    return sent
+
+
 async def prematch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """赛前刷新：对即将开赛的比赛重算预测，让首发阵容信号真正生效。
 
@@ -283,6 +350,12 @@ async def prematch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         for err in r.get("errors", []):
             log.warning("赛前刷新：%s", err)
+        try:
+            pushed = await prematch_push(app, r.get("entries", []))
+            if pushed:
+                log.info("赛前更新已推送 %d 条", pushed)
+        except Exception as exc:  # 推送失败绝不能影响刷新与主流程
+            log.warning("赛前推送失败（不影响主流程）：%s", exc)
     except Exception as exc:  # 刷新失败绝不能影响推送主流程
         log.warning("赛前刷新失败（不影响主流程）：%s", exc)
 
