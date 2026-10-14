@@ -116,6 +116,31 @@ class Keyboards:
         return InlineKeyboardMarkup(rows)
 
     @staticmethod
+    def digest_keyboard(focus: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+        """每日汇总的键盘：焦点战直达 + 底部两个出口。
+
+        焦点战按钮直接带队名而不是序号：此前「⚽ 预测 3」要求用户先记住
+        序号与比赛的对应关系，而序号在翻页、按联赛筛选后会重排——点进去
+        落到另一场比赛是这类列表最常见的误操作。按钮上写清是哪一场，
+        对应关系就不必靠记忆。
+
+        每行只放一个焦点战按钮：两队名加 vs 在手机上已经接近一行宽度，
+        并排两个必然各自截断，截断后反而认不出是哪场。
+
+        底部两个出口沿用已有 callback（menu:fixtures / menu:stats），
+        不新增路由，避免改一处要连带改 handler。
+        """
+        rows = [[InlineKeyboardButton(label, callback_data=f"fx:{fid}")] for fid, label in focus]
+        rows.append(
+            [
+                InlineKeyboardButton("📋 完整赛程", callback_data="menu:fixtures"),
+                InlineKeyboardButton("📊 准确率统计", callback_data="menu:stats"),
+            ]
+        )
+        rows.append(nav_row(with_fixtures=False))
+        return InlineKeyboardMarkup(rows)
+
+    @staticmethod
     def standings_keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔄 刷新", callback_data="menu:refresh")] + nav_row()]

@@ -26,11 +26,11 @@ from telegram.ext import ContextTypes
 from backtester_fixed import BacktesterFixed
 from bot_handler import BotUI
 from config import Settings
-from keyboards import nav_row
+from keyboards import Keyboards
 from service import PredictionService
 from support import describe_error, notify_admins
 from tghtml import normalize
-from views.digest import DigestView
+from views.digest import TELEGRAM_MAX_CHARS, DigestView
 
 log = logging.getLogger("bot")
 ui = BotUI()
@@ -122,21 +122,37 @@ class NotificationManager:
             return 0
 
         settings = self.settings
-        pages = DigestView.format_daily_digest_pages(
-            predictions, settings, settings.timezone, note=note,
+        tz = settings.timezone
+        # 首屏只推焦点战，完整列表收进「📋 完整赛程」按钮。此前把当天全部
+        # 场次平铺进推送，30 场时要滑很久，重点反而被淹没了。
+        text = DigestView.format_daily_overview(predictions, settings, tz, note=note)
+        # 焦点战按钮直接带队名：序号按钮（「预测 3」）在翻页/筛选后会重排，
+        # 点进去落到另一场比赛是这类列表最常见的误操作。
+        markup = Keyboards.digest_keyboard(DigestView.focus_entries(predictions))
+
+        # 总览结构上是恒定短小的（3 场 + 一行概览），但队名极端长时仍可能
+        # 顶到 4096。这是无人值守的定时推送，400 失败没人会发现，所以超限
+        # 时退回分页版，宁可多几条也不能整条发不出去。
+        if len(text) > TELEGRAM_MAX_CHARS:
+            pages = DigestView.format_daily_digest_pages(predictions, settings, tz, note=note)
+            sent = 0
+            for page in pages:
+                await self.app.bot.send_message(
+                    chat_id=settings.chat_target,
+                    text=normalize(page),
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+                sent += 1
+            return sent
+
+        await self.app.bot.send_message(
+            chat_id=settings.chat_target,
+            text=normalize(text),
+            parse_mode="HTML",
+            reply_markup=markup,
         )
-        # 汇总只给结论，细节在单场页；挂导航键让用户一键跳进去
-        markup = InlineKeyboardMarkup([nav_row()])
-        sent = 0
-        for page in pages:
-            await self.app.bot.send_message(
-                chat_id=settings.chat_target,
-                text=normalize(page),
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-            sent += 1
-        return sent
+        return 1
 
     async def notify_admins(self, text: str) -> None:
         await notify_admins(self.app, text)

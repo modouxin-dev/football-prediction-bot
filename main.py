@@ -33,7 +33,7 @@ from commands.basic import toggle_panel_message
 from config import ConfigError, Settings, load_settings
 from data_source import DataSourceRouter
 from football_data import FootballDataAPI
-from keyboards import nav_row
+from keyboards import Keyboards
 # 定时任务已迁到 scheduler.py。以下两个名字仍是既有测试与调用方的入口，
 # 保留再导出；其余不再从 main 暴露。
 from scheduler import daily_push, run_push, setup_scheduler  # noqa: F401
@@ -342,17 +342,16 @@ async def generate_digest(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    pages = DigestView.format_daily_digest_pages(
+    # 手动触发与定时推送走同一套排版，否则用户在按钮里看到的和早上收到
+    # 的长得不一样，会以为是两个功能。
+    text = DigestView.format_daily_overview(
         predictions, settings, settings.timezone, note=note,
     )
-    await edit_view(query, pages[0], InlineKeyboardMarkup([nav_row()]))
-    # 分页的其余几页新发：edit_message_text 只能改当前这一条
-    for extra in pages[1:]:
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=normalize(extra),
-            parse_mode=ParseMode.HTML,
-        )
+    await edit_view(
+        query,
+        text,
+        Keyboards.digest_keyboard(DigestView.focus_entries(predictions)),
+    )
 
 
 async def on_fixtures_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -771,11 +770,15 @@ async def reply_digest(message, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not predictions:
         await reply_html(message, DigestView.format_digest_empty(note), None)
         return
-    pages = DigestView.format_daily_digest_pages(
+    # 与按钮入口、定时推送共用同一排版（见 generate_digest）
+    text = DigestView.format_daily_overview(
         predictions, settings, settings.timezone, note=note,
     )
-    for page in pages:
-        await reply_html(message, page, None)
+    await reply_html(
+        message,
+        text,
+        Keyboards.digest_keyboard(DigestView.focus_entries(predictions)),
+    )
 
 
 def _panel_key_from_text(text: str) -> str | None:
