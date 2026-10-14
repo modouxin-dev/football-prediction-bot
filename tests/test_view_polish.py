@@ -103,8 +103,13 @@ def test_card_probability_percentages_share_one_width():
     text = PredictionView.format_prediction_card(p, SETTINGS.timezone)
     pcts = _prob_percentages(text)
     assert len(pcts) == 3, f"应抽出三行概率，实际 {pcts}"
-    # 补位后每行「条形+百分比」的等宽块长度一致，右侧数字才不会错开
-    widths = {len(m) for m in re.findall(r"<code>([^<]+)</code>", text) if "%" in m}
+    # 补位后每行「条形+百分比」的等宽块长度一致，右侧数字才不会错开。
+    # 只取带条形的块：结论行尾部另有一块紧凑概率（「50 — 26 — 24%」），
+    # 它用途是整段引用，长度天然与条形行不同，不该被这条对齐规则约束。
+    widths = {
+        len(m) for m in re.findall(r"<code>([^<]+)</code>", text)
+        if "%" in m and ("█" in m or "░" in m)
+    }
     assert len(widths) == 1, f"概率行宽度不一致：{widths}"
 
 

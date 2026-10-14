@@ -261,6 +261,11 @@ class PredictionView:
                 f"{OUTCOME_ICON[label]} {label}　<code>{hbar(prob)} {prob:>3.0%}</code>{mark}"
             )
 
+        # 一行紧凑概率：三行进度条适合细看，但转发、截图、快速扫一眼时
+        # 需要「48% — 28% — 24%」这种能整段引用的形式。挂在结论行尾部，
+        # 不额外占行——正文已经很长，再加一行会让手机上要多滑一屏。
+        compact_probs = " — ".join(f"{prob:.0%}" for _, prob in probs)
+
         # 统一分节：标题 → 分隔线 → 空行 → 内容。空行是排版的关键，
         # 没有它各块会挤成一坨；分隔线长度固定（SEP），相邻两块不会糊在一起。
         lines = [
@@ -279,7 +284,7 @@ class PredictionView:
             "",
             *prob_lines,
             "",
-            f"🎯 预测结果　<b>{verdict}</b>",
+            f"🎯 预测结果　<b>{verdict}</b>　<code>{compact_probs}</code>",
             f"⚽ 预计比分　<b>{esc(a['best_score'])}</b>",
             f"💎 信心等级　<b>{level['emoji']} {level['name']}</b>",
             "",

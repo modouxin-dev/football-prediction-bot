@@ -53,22 +53,24 @@ class Keyboards:
 
     @staticmethod
     def prediction_keyboard(fixture_id: int) -> InlineKeyboardMarkup:
-        """预测卡片按钮：两列三行，继续操作全部走按钮，不挤在正文里。"""
+        """预测卡片按钮：只留「这场比赛能做什么」，其余收进主菜单。
+
+        原先 4 行 7 个按钮，其中「联赛排名」「历史命中率」与这场比赛无关，
+        「今日赛程」又与底部的「返回赛程」重复——同一层出现两个回赛程的
+        入口，用户不知道该点哪个。按钮一多，真正要点的「详细分析」反而
+        被淹没，这是「排版杂」的主要来源。
+
+        现在三行：第一行是本场的深入操作，第二行刷新（本场相关），
+        第三行出口。全局功能（排名、命中率）回主菜单找。
+        """
         return InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton("📊 详细分析", callback_data=f"deep:{fixture_id}"),
                     InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
                 ],
-                [
-                    InlineKeyboardButton("📅 今日赛程", callback_data="menu:fixtures"),
-                    InlineKeyboardButton("🏆 联赛排名", callback_data="menu:standings"),
-                ],
-                [
-                    InlineKeyboardButton("🎯 历史命中率", callback_data="menu:stats"),
-                    InlineKeyboardButton("🔄 刷新数据", callback_data=f"refresh:{fixture_id}"),
-                ],
-                nav_row(with_fixtures=False),
+                [InlineKeyboardButton("🔄 刷新数据", callback_data=f"refresh:{fixture_id}")],
+                nav_row(),
             ]
         )
 
