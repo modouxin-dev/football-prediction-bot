@@ -180,6 +180,33 @@ def _repo() -> PredictionRepository:
     return PredictionRepository(_DB_PATH)
 
 
+def _active_competitions() -> tuple[str, ...] | None:
+    """看板要显示的联赛分区代码，来自配置的 LEAGUE_IDS。
+
+    看板与自动预测必须看同一批比赛：预测只跑配置的联赛，看板若把本地库
+    里所有比赛都列出来（含历史同步残留的未配置联赛），那些比赛永远不会
+    有预测，每条都恒显示「尚未生成预测」。
+
+    返回 None 表示**不过滤**（配置读取失败或映射不出任何代码）。宁可多
+    显示，也不能因为映射表缺项把配置内的联赛也过滤掉——那会让看板整页
+    空白，比多显示几场无关比赛严重得多。
+    """
+    try:
+        from config import load_settings
+        from football_data import LEAGUE_ID_TO_CODE
+
+        settings = load_settings()
+        codes = tuple(
+            LEAGUE_ID_TO_CODE[int(lid)]
+            for lid in settings.league_ids
+            if int(lid) in LEAGUE_ID_TO_CODE
+        )
+        return codes or None
+    except Exception as exc:  # 拿不到就不过滤，绝不中断看板
+        log.warning("看板联赛过滤未启用：%s", exc)
+        return None
+
+
 @app.get("/")
 async def index():
     """看板页面。
@@ -323,10 +350,11 @@ async def fixtures(date: str | None = None, days: int = 1, limit: int = 100) -> 
     day_list = [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days)]
 
     repo = _repo()
+    comps = _active_competitions()
     rows: list[dict[str, Any]] = []
     try:
         for d in day_list:
-            for r in repo.matches_with_predictions(d, limit=limit):
+            for r in repo.matches_with_predictions(d, limit=limit, competitions=comps):
                 rows.append({**r, "date": d})
     except Exception as exc:
         log.exception("/fixtures 读取失败")

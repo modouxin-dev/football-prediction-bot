@@ -1395,8 +1395,10 @@ class PredictionRepository:
                 continue
         return out
 
-    def matches_with_predictions(self, day: str, *, limit: int = 300) -> list[dict[str, Any]]:
-        """指定日期（YYYY-MM-DD）的全部比赛，左连已生成的预测。
+    def matches_with_predictions(self, day: str, *, limit: int = 300,
+                                 competitions: tuple[str, ...] | None = None
+                                 ) -> list[dict[str, Any]]:
+        """指定日期（YYYY-MM-DD）的比赛，左连已生成的预测。
 
         为什么连表而不是让上层自己拼：predictions 的键是 API fixture_id 的
         **文本**形式，matches 的主键是**整数** id，两者写法还不一致
@@ -1404,7 +1406,24 @@ class PredictionRepository:
 
         未生成预测的比赛 `prediction` 为 None —— 调用方据此显示「未预测」，
         而不是假装成 0%，避免把「没算过」误读成「算出来是 0」。
+
+        competitions 非空时只返回这些分区代码的比赛。默认 None = 不过滤，
+        行为与加参数前完全一致（既有调用方不受影响）。
+
+        为什么要这层过滤：本地库里存着历史同步进来的所有比赛，而自动预测
+        只跑配置的联赛。不过滤的话，看板会列出从未生成过预测的比赛，
+        每条都恒显示「尚未生成预测」——看起来像预测坏了，实际是这批比赛
+        根本不在预测范围内。
         """
+        where = "substr(m.utc_date,1,10)=?"
+        params: list[Any] = [str(day)]
+        if competitions:
+            codes = [str(c) for c in competitions if str(c)]
+            if codes:
+                where += " AND m.competition_code IN ({})".format(
+                    ",".join("?" * len(codes)))
+                params.extend(codes)
+        params.append(int(limit))
         try:
             conn = self._connect()
             rows = list(conn.execute(
@@ -1419,10 +1438,10 @@ class PredictionRepository:
                           p.actual_home, p.actual_away
                    FROM matches m
                    LEFT JOIN predictions p ON p.fixture_id = CAST(m.id AS TEXT)
-                   WHERE substr(m.utc_date,1,10)=?
+                   WHERE """ + where + """
                    ORDER BY m.competition_code, m.utc_date
                    LIMIT ?""",
-                (str(day), int(limit)),
+                tuple(params),
             ))
         except Exception as exc:
             log.warning("读取当日赛程失败：%s", exc)

@@ -51,7 +51,10 @@ def test_fixtures_default_date_uses_project_tz(monkeypatch):
     monkeypatch.setattr(_api, "_TZ_NAME", "Asia/Shanghai")
     monkeypatch.setattr(_api, "datetime", FrozenDT)
     monkeypatch.setattr(_api, "_repo", lambda: type("R", (), {
-        "matches_with_predictions": staticmethod(lambda day, limit=300: []),
+        # 打桩须跟随真实签名：/fixtures 会带上 competitions 过滤参数
+        "matches_with_predictions": staticmethod(
+            lambda day, limit=300, competitions=None: []
+        ),
     })())
 
     body = TestClient(_api.app).get("/fixtures").json()
