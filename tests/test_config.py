@@ -77,3 +77,52 @@ def test_invalid_values_raise_readable_errors():
     with pytest.raises(ConfigError, match="TIMEZONE"):
         load_settings({**BASE, "TIMEZONE": "Mars/Base"})
     assert load_settings({**BASE, "LOG_LEVEL": "loud"}).log_level == "INFO"
+
+
+def test_prematch_settings_reach_settings_object():
+    """回归：赛前信号配置必须真的进入 Settings。
+
+    此前这五个值只被 load_settings 解析、却没传进 Settings(...)，于是
+    service.py 里 getattr(settings, "prematch_enabled", False) 恒为 False，
+    整个赛前信号（伤停/首发/评分/天气）在生成环境从未生效，且
+    PREMATCH_ENABLED 关不掉、RATING_STRENGTH 开不起来。
+
+    这里逐字段断言存在且可改，确保这类"配置被静默丢弃"不再复发。
+    """
+    s = load_settings(BASE)
+    # 默认值：伤停/阵容半强度、评分半强度、天气关闭、总开关开启
+    assert s.prematch_enabled is True
+    assert s.prematch_strength == 0.5
+    assert s.prematch_tilt == 0.0
+    assert s.rating_strength == 0.5
+    assert s.weather_strength == 0.0
+
+
+def test_prematch_settings_are_configurable():
+    """环境变量必须能真正改变行为（不是被解析后丢弃）。"""
+    off = load_settings({**BASE, "PREMATCH_ENABLED": "false"})
+    assert off.prematch_enabled is False      # 能关掉
+    tuned = load_settings({
+        **BASE,
+        "PREMATCH_STRENGTH": "0.9",
+        "PREMATCH_TILT": "0.15",
+        "RATING_STRENGTH": "1.0",
+        "WEATHER_STRENGTH": "0.3",
+    })
+    assert tuned.prematch_strength == 0.9
+    assert tuned.prematch_tilt == 0.15
+    assert tuned.rating_strength == 1.0
+    assert tuned.weather_strength == 0.3      # 天气能开
+
+
+def test_prematch_settings_out_of_range_fall_back():
+    """越界值回退默认，而不是抛出或穿帮。"""
+    s = load_settings({
+        **BASE,
+        "PREMATCH_STRENGTH": "5",
+        "RATING_STRENGTH": "abc",
+        "WEATHER_STRENGTH": "-1",
+    })
+    assert s.prematch_strength == 0.5
+    assert s.rating_strength == 0.5
+    assert s.weather_strength == 0.0

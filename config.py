@@ -17,6 +17,7 @@ import pytz
 from paths import DB_PATH
 
 from ensemble import DEFAULT_ETA
+from context import DEFAULT_RATING_STRENGTH, DEFAULT_WEATHER_STRENGTH
 from prematch import (
     DEFAULT_STRENGTH,
     DEFAULT_TILT,
@@ -126,6 +127,16 @@ class Settings:
     market_weight: float  # 市场锚定权重 w：0=纯模型，1=纯市场（见 analyzer 模块说明）
     ensemble_learn: bool  # 集成器是否开启动态权重学习（ENSEMBLE_LEARN）
     ensemble_eta: float   # 动态权重学习率 η（ENSEMBLE_ETA，见 ensemble 模块说明）
+    # ---- 赛前实时信号（伤停 / 首发 / 球员评估 / 天气）----------------------
+    # ⚠️ 这五个字段此前**只被解析、从未传进 Settings**，导致 service.py 里
+    #    getattr(settings, "prematch_enabled", False) 恒取默认 False ——
+    #    整个赛前信号在生成环境是死代码，且 PREMATCH_ENABLED 无法关闭、
+    #    RATING_STRENGTH 无法开启。必须显式声明并传入，否则配置形同虚设。
+    prematch_enabled: bool    # PREMATCH_ENABLED：总开关，关闭后行为与接入前逐位一致
+    prematch_strength: float  # PREMATCH_STRENGTH：伤停/阵容折损强度，0 = 只接线不改结果
+    prematch_tilt: float      # PREMATCH_TILT：阵型攻守倾向权重
+    rating_strength: float    # RATING_STRENGTH：首发评分强度，0 = 不启用球员评估
+    weather_strength: float   # WEATHER_STRENGTH：天气强度，默认 0（关闭）
 
     @property
     def requested_season(self) -> int:
@@ -315,6 +326,41 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 log.warning("PREMATCH_TILT 越界 [0, %s]，回退默认 %s：%r",
                             TILT_MAX, DEFAULT_TILT, raw_pt)
 
+    # 球员评估（首发评分）：默认半强度，与伤停口径一致。
+    #   0 = 只接线不改结果（用于 A/B 对照）。
+    rating_strength = DEFAULT_RATING_STRENGTH
+    raw_rs = _get(env, "RATING_STRENGTH")
+    if raw_rs:
+        try:
+            parsed_rs = float(raw_rs)
+        except ValueError:
+            log.warning("RATING_STRENGTH 不是数字，回退默认 %s：%r",
+                        DEFAULT_RATING_STRENGTH, raw_rs)
+        else:
+            if STRENGTH_MIN <= parsed_rs <= STRENGTH_MAX:
+                rating_strength = parsed_rs
+            else:
+                log.warning("RATING_STRENGTH 越界 [%s, %s]，回退默认 %s：%r",
+                            STRENGTH_MIN, STRENGTH_MAX, DEFAULT_RATING_STRENGTH, raw_rs)
+
+    # 天气：**默认 0（关闭）**。公开研究结论互相矛盾（英超湿润月份 +0.22 球/场
+    #   与英冠 4826 场「降雨无显著效应」并存），且本项目尚未验证。
+    #   天气是四类信号里唯一可用历史归档回测的，启用前应在自己库上验证为正。
+    weather_strength = DEFAULT_WEATHER_STRENGTH
+    raw_ws = _get(env, "WEATHER_STRENGTH")
+    if raw_ws:
+        try:
+            parsed_ws = float(raw_ws)
+        except ValueError:
+            log.warning("WEATHER_STRENGTH 不是数字，回退默认 %s：%r",
+                        DEFAULT_WEATHER_STRENGTH, raw_ws)
+        else:
+            if STRENGTH_MIN <= parsed_ws <= STRENGTH_MAX:
+                weather_strength = parsed_ws
+            else:
+                log.warning("WEATHER_STRENGTH 越界 [%s, %s]，回退默认 %s：%r",
+                            STRENGTH_MIN, STRENGTH_MAX, DEFAULT_WEATHER_STRENGTH, raw_ws)
+
     ensemble_learn = _get(env, "ENSEMBLE_LEARN", "").strip().lower() in (
         "1", "true", "yes", "on")
     ensemble_eta = DEFAULT_ETA
@@ -370,4 +416,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         market_weight=market_weight,
         ensemble_learn=ensemble_learn,
         ensemble_eta=ensemble_eta,
+        prematch_enabled=prematch_enabled,
+        prematch_strength=prematch_strength,
+        prematch_tilt=prematch_tilt,
+        rating_strength=rating_strength,
+        weather_strength=weather_strength,
     )

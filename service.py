@@ -18,13 +18,16 @@ from analyzer import (LeagueModel, MatchAnalyzer, TeamStrength,
                       apply_market_adjustment, build_league_model,
                       calculate_prediction_level, collect_1x2_odds,
                       consensus_odds, implied_probabilities)
-from prematch import squad_factors
+from prematch import side_lineup, squad_factors
 from ensemble import FALLBACK_PROBS, EnsemblePredictor
 from api_client import APIError, FootballAPI
 from config import Settings
+from context import (context_factors, merge_factors, player_ratings,
+                     squad_positions, weighted_absence_load)
 from data_source import DataSourceError
 from repository import PredictionRepository
 from templates import LEAGUE_ORDER
+from weather import WeatherClient
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +88,10 @@ def _side(m: dict[str, Any], team_id: int) -> tuple[int | None, int | None, bool
 # 阵容只在开赛前约 20–40 分钟才公布（官方说明），过早请求必然为空。
 # 因此只有进入这个窗口才去取，否则白烧额度——自动预测每轮数百场，不能每场都试。
 PREMATCH_LINEUP_WINDOW = 45 * 60  # 秒
+
+# 球员评分只在「今晚谁上场」确定后才有意义，故与阵容共用同一窗口。
+# 天气提前太久不准（预报会改），6 小时内才取。
+CONTEXT_WEATHER_WINDOW = 6 * 3600  # 秒
 
 
 async def _no_injuries() -> list[dict[str, Any]]:
@@ -330,6 +337,9 @@ class PredictionService:
             learn=bool(getattr(settings, "ensemble_learn", False)),
         )
         self.season_in_use: int = settings.season
+        # 天气客户端惰性创建：它不占足球额度，但默认 strength=0（不改结果），
+        # 因此任何失败都必须是静默的。
+        self._weather: WeatherClient | None = None
         # 每个联赛各自解析出的赛季：多联赛下各联赛可用赛季未必相同，
         # 建模必须用「该场比赛所属联赛」的赛季，不能统一套主联赛的。
         self._season_by_league: dict[int, int] = {}
@@ -572,9 +582,15 @@ class PredictionService:
         return stats
 
     async def _prematch_factors(
-        self, fixture_id: Any, kickoff: datetime | None, home_id: Any, away_id: Any
+        self,
+        fixture_id: Any,
+        kickoff: datetime | None,
+        home_id: Any,
+        away_id: Any,
+        city: str | None = None,
+        season: int | None = None,
     ) -> dict[str, Any] | None:
-        """合成赛前信号（伤停 / 首发阵容）修正因子。
+        """合成全部赛前信号（伤停 / 首发阵容 / 球员评估 / 天气）修正因子。
 
         返回 None 表示「不修正」，此时模型行为与接入前**逐位一致**：
         未启用、拿不到任何信号、或修正量本身为零，都属于这种情况。
@@ -599,19 +615,127 @@ class PredictionService:
         results = await asyncio.gather(*tasks)
         injuries = results[0] if results else []
         lineups = results[1] if len(results) > 1 else []
-        if not injuries and not lineups:
+
+        # 球员评估与天气：即使没有伤停/阵容也可能有贡献（评分靠首发，
+        # 天气只看城市），所以单独判断而不是跟着上面的早退。
+        rating_strength = getattr(settings, "rating_strength", 0.0)
+        weather_strength = getattr(settings, "weather_strength", 0.0)
+        loads, start_xi, ratings, weather = {}, {}, {}, None
+        if (rating_strength > 0 or weather_strength > 0) and season is not None:
+            loads, start_xi, ratings, weather = await self._context_signals(
+                kickoff, home_id, away_id, lineups, injuries, city, season
+            )
+        elif season is not None:
+            # 强度为 0 时只需位置加权（它属于伤停范畴，受 prematch 强度控制）
+            loads, _, _, _ = await self._context_signals(
+                kickoff, home_id, away_id, lineups, injuries, city, season
+            )
+
+        if not injuries and not lineups and not start_xi and weather is None:
             return None
+
         factors = squad_factors(
             home_id, away_id,
             injuries=injuries, lineups=lineups,
             strength=getattr(settings, "prematch_strength", 0.5),
             tilt_weight=getattr(settings, "prematch_tilt", 0.0),
+            loads=loads or None,
         )
-        # 修正量全为零（例如只有存疑伤停且强度为 0）时同样视为不修正
-        if all(abs(factors[side][k] - 1.0) < 1e-12
-               for side in ("home", "away") for k in ("attack", "concede")):
+        context = context_factors(
+            home_id, away_id,
+            start_xi=start_xi or None,
+            ratings=ratings or None,
+            weather_sample=weather,
+            rating_strength=rating_strength,
+            weather_strength=weather_strength,
+        )
+        merged = merge_factors(factors, context)
+        if merged is None:
             return None
-        return factors
+        # 修正量全为零（例如只有存疑伤停且强度为 0）时同样视为不修正
+        if all(abs(merged[side][k] - 1.0) < 1e-12
+               for side in ("home", "away") for k in ("attack", "concede")):
+            if abs(merged.get("weather", 1.0) - 1.0) < 1e-12:
+                return None
+        return merged
+
+    def _weather_client(self) -> WeatherClient:
+        """惰性创建天气客户端（只有 weather_strength>0 才会真正发请求）。"""
+        if self._weather is None:
+            self._weather = WeatherClient(
+                enabled=getattr(self.settings, "weather_strength", 0.0) > 0
+            )
+        return self._weather
+
+    async def _context_signals(
+        self,
+        kickoff: datetime | None,
+        home_id: Any,
+        away_id: Any,
+        lineups: list[dict[str, Any]] | None,
+        injuries: list[dict[str, Any]] | None,
+        city: str | None,
+        season: int,
+    ) -> tuple[dict[str, float], dict[str, list[dict[str, Any]]], dict[str, Any], Any]:
+        """收集球员评估所需的三类旁路数据。失败一律返回空，不阻断预测。
+
+        返回 (加权缺阵负荷, 各队首发, 各队评分表, 天气快照)。
+        """
+        settings = self.settings
+        now = datetime.now(timezone.utc)
+        lead = None
+        if isinstance(kickoff, datetime):
+            lead = (kickoff - now).total_seconds()
+
+        squad_call = getattr(self.api, "get_squad", None)
+        stats_call = getattr(self.api, "get_team_player_stats", None)
+
+        # 位置映射：伤停端点没有位置，靠球队名单补上
+        positions: dict[str, dict[str, str]] = {}
+        if squad_call:
+            for key, tid in (("home", str(home_id)), ("away", str(away_id))):
+                try:
+                    raw = await _safe_api_call(lambda tid=tid: squad_call(tid))
+                except Exception:  # noqa: BLE001
+                    raw = []
+                positions[key] = squad_positions(raw)
+
+        # 评分：只有确定首发后才有意义，与阵容同一窗口。
+        # 键必须用**球队 id**（不是 "home"/"away"）：context_factors 按 id 查表，
+        # 两边键不一致会让评分静默失效（曾真实发生过）。
+        want_xi = bool(lineups)
+        ratings: dict[str, dict[str, tuple[float, float]]] = {}
+        start_xi: dict[str, list[dict[str, Any]]] = {}
+        if want_xi and stats_call:
+            for key, tid in (("home", str(home_id)), ("away", str(away_id))):
+                side = side_lineup(lineups, tid)
+                xi = side.get("startXI") or []
+                start_xi[str(tid)] = xi
+                if not xi:
+                    continue
+                try:
+                    raw = await _safe_api_call(lambda tid=tid: stats_call(tid, season))
+                except Exception:  # noqa: BLE001
+                    raw = []
+                ratings[str(tid)] = player_ratings(raw)
+
+        # 加权缺阵负荷（位置信息拿不到时退化为按人数）
+        loads: dict[str, float] = {}
+        for key, tid in (("home", home_id), ("away", away_id)):
+            loads[key] = weighted_absence_load(
+                injuries, tid, positions.get(key) or {}
+            )
+
+        # 天气：默认关闭（strength=0），此时连 DNS 都不会查
+        sample = None
+        if getattr(settings, "weather_strength", 0.0) > 0 and city:
+            if lead is None or lead <= CONTEXT_WEATHER_WINDOW:
+                try:
+                    sample = await self._weather_client().for_fixture(city, kickoff)
+                except Exception as exc:  # noqa: BLE001
+                    log.info("天气不可用（city=%s）：%s", city, exc)
+                    sample = None
+        return loads, start_xi, ratings, sample
 
     async def _predict_one(
         self, model: LeagueModel, kickoff: datetime, fx: dict[str, Any], fresh: bool = False
@@ -620,8 +744,13 @@ class PredictionService:
         home, away = teams.get("home") or {}, teams.get("away") or {}
         fixture_id = fx["fixture"]["id"]  # 保持数据源原类型；_store 内部统一用 str key 查找
 
+        # 球员评估要按「该场所属联赛」的赛季取，多联赛下各联赛赛季未必相同
+        league_id = (fx.get("league") or {}).get("id")
+        season = self._season_by_league.get(league_id, self.season_in_use) \
+            if league_id is not None else self.season_in_use
+        city = ((fx.get("fixture") or {}).get("venue") or {}).get("city")
         prematch = await self._prematch_factors(
-            fixture_id, kickoff, home["id"], away["id"])
+            fixture_id, kickoff, home["id"], away["id"], city=city, season=season)
         analysis = self.analyzer.predict_match(
             model, home["id"], away["id"], temperature=self.temperature,
             prematch=prematch,
@@ -1278,6 +1407,7 @@ class PredictionService:
         injuries_raw = [] if isinstance(results[3], BaseException) else results[3]
 
         # 阵容未进赛前窗口时不请求（官方：开赛前 20–40 分钟才公布）
+        # 球队名单（含位置）同样只在赛前窗口内取，用于伤停位置加权。
         lineups_raw: list[dict[str, Any]] = []
         if getattr(s, "prematch_enabled", False):
             lineups_call = getattr(self.api, "get_lineups", None)
@@ -1285,14 +1415,14 @@ class PredictionService:
                 lead = (kickoff - datetime.now(timezone.utc)).total_seconds()
                 if lead <= PREMATCH_LINEUP_WINDOW:
                     lineups_raw = await _safe_api_call(lambda: lineups_call(fixture_id))
-        prematch_factors = None
-        if getattr(s, "prematch_enabled", False) and (injuries_raw or lineups_raw):
-            prematch_factors = squad_factors(
-                home_id, away_id,
-                injuries=injuries_raw, lineups=lineups_raw,
-                strength=getattr(s, "prematch_strength", 0.5),
-                tilt_weight=getattr(s, "prematch_tilt", 0.0),
-            )
+        # 与预测路径共用同一套赛前信号（伤停 / 首发 / 球员评估 / 天气），
+        # 否则「分析」与「预测」会给出口径不一致的数字，用户无从判断信哪个。
+        # 球员评估要按该场所属联赛的赛季取，多联赛下各联赛赛季未必相同。
+        _lg = (fx.get("league") or {}).get("id")
+        _season = self._season_by_league.get(_lg, season) if _lg is not None else season
+        _city = ((fx.get("fixture") or {}).get("venue") or {}).get("city")
+        prematch_factors = await self._prematch_factors(
+            fixture_id, kickoff, home_id, away_id, city=_city, season=_season)
 
         return {
             "fixture_id": fixture_id,

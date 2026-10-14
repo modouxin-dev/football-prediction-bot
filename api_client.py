@@ -75,6 +75,12 @@ TTL_SEASON_FIXTURES = 6 * 3600
 TTL_INJURIES = 3 * 3600
 TTL_LINEUPS = 10 * 60  # 阵容临近开赛才公布，缓存要短
 TTL_STATS = 24 * 3600
+# 球队名单几乎不变（一个转会窗才动一次），赛季统计一天更新一次足够
+TTL_SQUAD = 24 * 3600
+TTL_PLAYER_STATS = 12 * 3600
+# /players 每页 20 人，一支一线队 20–30 人，故最多翻 3 页即止。
+# 设上限是为了防止接口异常时陷入死循环把额度烧光。
+PLAYER_STATS_MAX_PAGES = 3
 
 HTTP_HINTS = {
     401: "API Key 无效或缺失",
@@ -331,6 +337,48 @@ class FootballAPI:
         except APIError as exc:
             log.info("阵容不可用（fixture=%s）：%s", fixture_id, exc)
             return []
+
+    async def get_squad(self, team_id: int) -> list[dict[str, Any]]:
+        """球队当前名单（/players/squads），**含位置**。
+
+        它的价值在于补上伤停端点缺失的字段：`/injuries` 只给缺阵类型、
+        不给位置，因此无法判断「缺的是前锋还是边后卫」。拿到名单后可按
+        player.id 把缺阵者映射回位置，做位置加权（见 `context.py`）。
+
+        取不到一律返回空 —— 位置加权只是增强，缺了应退化为按人数计，
+        绝不能让预测失败。
+        """
+        try:
+            return await self._get("players/squads", {"team": team_id}, ttl=TTL_SQUAD)
+        except APIError as exc:
+            log.info("球队名单不可用（team=%s）：%s", team_id, exc)
+            return []
+
+    async def get_team_player_stats(self, team_id: int, season: int) -> list[dict[str, Any]]:
+        """某队全队本赛季的球员统计（/players），含 `games.rating`。
+
+        评分是**赛季累计平均**，只含已结束的比赛，因此赛前可用、无前视偏差。
+        （`/fixtures/players` 的单场 rating 是赛后数据，**不可**用于赛前。）
+
+        接口按 20 人分页，一线队通常 2 页即可取完，最多翻
+        `PLAYER_STATS_MAX_PAGES` 页。取不到返回空。
+        """
+        out: list[dict[str, Any]] = []
+        for page in range(1, PLAYER_STATS_MAX_PAGES + 1):
+            try:
+                chunk = await self._get(
+                    "players", {"team": team_id, "season": season, "page": page},
+                    ttl=TTL_PLAYER_STATS,
+                )
+            except APIError as exc:
+                log.info("球员统计不可用（team=%s 第%d页）：%s", team_id, page, exc)
+                break
+            if not chunk:
+                break
+            out.extend(chunk)
+            if len(chunk) < 20:      # 不足一页即最后一页
+                break
+        return out
 
     async def get_standings(self, league_id: int, season: int) -> list[dict[str, Any]]:
         """积分榜（含主客场进球/失球）。"""

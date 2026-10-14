@@ -210,7 +210,7 @@ def formation_tilt(formation: str | None) -> float:
     return _tilt(defenders, forwards, 10.0)
 
 
-def _side_lineup(lineups: list[dict[str, Any]] | None, team_id: Any) -> dict[str, Any]:
+def side_lineup(lineups: list[dict[str, Any]] | None, team_id: Any) -> dict[str, Any]:
     """从 lineups 响应里取出指定球队的那一段。"""
     target = str(team_id)
     for side in lineups or []:
@@ -228,21 +228,29 @@ def squad_factors(
     lineups: list[dict[str, Any]] | None = None,
     strength: float = 1.0,
     tilt_weight: float = 0.0,
+    loads: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """合成两队的攻防修正因子。
 
     返回 {'home': {'attack':…, 'defence':…}, 'away': {...}, 'detail': {...}}。
     四个乘数在无任何信号时**全部精确为 1.0**。
+
+    `loads` 允许调用方传入**已加权**的缺阵负荷（例如按球员位置加权，见
+    `context.weighted_absence_load`）。不传时退化为按人数计。这样本模块
+    无需知道「位置」这个概念——那属于球员评估的范畴，放在 context 里更合适，
+    也避免两个模块循环依赖。
     """
     sides: dict[str, dict[str, Any]] = {}
     detail: dict[str, Any] = {}
     for key, tid in (("home", home_id), ("away", away_id)):
-        load = absence_load(injuries, tid)
+        load = (loads or {}).get(key)
+        if load is None:
+            load = absence_load(injuries, tid)
         keep = loss_factor(load, strength)
         attack_mult = 1.0 - (1.0 - keep) * ATTACK_SHARE
         concede_mult = 1.0 + (1.0 - keep) * CONCEDE_SHARE
 
-        side = _side_lineup(lineups, tid)
+        side = side_lineup(lineups, tid)
         start_xi = side.get("startXI") or []
         tilt = starters_tilt(start_xi)
         if tilt == 0.0:
@@ -278,6 +286,9 @@ def apply_to_lambdas(
     λ客' = λ客 · 客attack(≤1) · 主concede(≥1)
 
     即：主队缺员 → 主队进球变少、客队进球变多，方向必须相反。
+
+    另有一个可选的 `weather` 标量：天气对双方**对称**，两个 λ 乘同一个数。
+    它来自 `context.py`，这里只读字典键、不导入那个模块，避免循环依赖。
     """
     if not factors:
         return lambda_home, lambda_away
@@ -287,4 +298,8 @@ def apply_to_lambdas(
     new_home *= _as_float(away.get("concede"), 1.0)   # 客队防守缺员 → 主队更容易进球
     new_away = lambda_away * _as_float(away.get("attack"), 1.0)
     new_away *= _as_float(home.get("concede"), 1.0)   # 主队防守缺员 → 客队更容易进球
+    weather = _as_float(factors.get("weather"), 1.0)
+    if weather != 1.0:
+        new_home *= weather
+        new_away *= weather
     return min(max(new_home, 0.05), 6.0), min(max(new_away, 0.05), 6.0)
