@@ -31,14 +31,15 @@ PRIMARY_COOLDOWN = 10 * 60  # 主源失败后，冷却多久内直接走备用�
 # 可选数据：免费层天然可能没有（无赔率、无交锋、无近期战绩），
 # 取不到时返回空是正常降级，不能当成「两个源都失败」抛出错误。
 OPTIONAL_METHODS = {"get_odds", "get_h2h", "get_team_form", "get_injuries",
-                    "get_fixture_statistics"}
+                    "get_fixture_statistics", "get_lineups"}
 
 # 按比赛 ID 查询的方法 / Methods queried by fixture id.
 # 备用源 ID 带 "fd-" 前缀，拿去问主源会被直接拒绝
 # （"The Fixture field must contain an integer."），
 # 于是健康的主源被误判为故障并拖进冷却，冷却期间又只能用备用源，
 # 产出更多 fd- ID —— 形成自我维持的降级闭环。必须按 ID 归属路由。
-FIXTURE_ID_METHODS = {"get_odds", "get_injuries", "get_fixture_statistics"}
+FIXTURE_ID_METHODS = {"get_odds", "get_injuries", "get_fixture_statistics",
+                      "get_lineups"}
 
 
 class DataSourceError(RuntimeError):
@@ -322,6 +323,10 @@ class DataSourceRouter:
         因此不套 _run 的逐源重试，避免空结果时反复回退放大请求量。
         """
         return await self.primary.get_fixtures_by_date(day)
+
+    async def get_lineups(self, fixture_id: int) -> list[dict]:
+        """首发阵容：可选数据，取不到返回空（未公布/套餐不含均属正常）。"""
+        return await self._run("get_lineups", fixture_id)
 
     async def get_injuries(self, fixture_id: int) -> list[dict]:
         """伤停名单；两个源都没有时返回空列表（不中断预测）。"""

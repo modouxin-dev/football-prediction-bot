@@ -433,6 +433,10 @@ class FootballDataAPI:
         """免费层无伤停端点：返回空列表（上层显示「暂无伤停信息」）。"""
         return []
 
+    async def get_lineups(self, fixture_id: int | str) -> list[dict]:
+        """免费层无首发阵容端点：返回空列表（上层不做阵容修正，不伪造）。"""
+        return []
+
     async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict]:
         """整季赛程：免费层只有当前赛季，历史赛季返回空（不伪造）。
 

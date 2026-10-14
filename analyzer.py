@@ -12,6 +12,8 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from prematch import apply_to_lambdas
+
 MAX_GOALS = 10  # 比分矩阵覆盖 0~10 球，再整体归一化
 DEFAULT_AVG_HOME_GOALS = 1.5
 DEFAULT_AVG_AWAY_GOALS = 1.2
@@ -507,7 +509,8 @@ class MatchAnalyzer:
     def predict_match(self, model: LeagueModel, home_id: int, away_id: int,
                       elo_factor: float | None = None,
                       rho: float = DEFAULT_RHO,
-                      temperature: float = 1.0) -> dict:
+                      temperature: float = 1.0,
+                      prematch: dict | None = None) -> dict:
         h, a = model.strength(home_id), model.strength(away_id)
         res = self.calculate_prediction(
             {"attack": h.attack_home, "defense": h.defense_home},
@@ -516,6 +519,7 @@ class MatchAnalyzer:
             league_avg_away=model.avg_away_goals,
             elo_factor=elo_factor,
             rho=rho,
+            prematch=prematch,
         )
         # 温度校准：概率「拉平」以修正过度自信（见 fit_temperature 说明）。
         # 三项概率的排序不变，因此最可能比分、信心等级的判定逻辑不受影响；
@@ -538,6 +542,7 @@ class MatchAnalyzer:
         max_goals: int = MAX_GOALS,
         elo_factor: float | None = None,
         rho: float = DEFAULT_RHO,
+        prematch: dict | None = None,
     ) -> dict:
         """
         home_stats: 主队主场 {'attack': 进攻强度, 'defense': 防守强度}
@@ -566,6 +571,12 @@ class MatchAnalyzer:
                     lambda_away = total * (1.0 - share_new)
         lambda_home = min(max(lambda_home, 0.05), 6.0)
         lambda_away = min(max(lambda_away, 0.05), 6.0)
+        # 赛前信号（伤停/首发）最后生效：它修正的是「今天的实际条件」，
+        # 必须建立在已完成 Elo 平移的 λ 之上，且不能破坏前面的上下界。
+        # prematch=None 时完全不介入，行为与接入前逐位一致。
+        if prematch:
+            lambda_home, lambda_away = apply_to_lambdas(
+                lambda_home, lambda_away, prematch)
 
         n = max_goals + 1
         rho = clamp_rho(rho, lambda_home, lambda_away)

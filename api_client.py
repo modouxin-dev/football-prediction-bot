@@ -73,6 +73,7 @@ TTL_STATUS = 5 * 60
 TTL_SEASONS = 24 * 3600
 TTL_SEASON_FIXTURES = 6 * 3600
 TTL_INJURIES = 3 * 3600
+TTL_LINEUPS = 10 * 60  # 阵容临近开赛才公布，缓存要短
 TTL_STATS = 24 * 3600
 
 HTTP_HINTS = {
@@ -315,6 +316,20 @@ class FootballAPI:
             return await self._get("injuries", {"fixture": fixture_id}, ttl=TTL_INJURIES)
         except APIError as exc:
             log.info("伤停不可用（fixture=%s）：%s", fixture_id, exc)
+            return []
+
+    async def get_lineups(self, fixture_id: int) -> list[dict[str, Any]]:
+        """指定比赛的首发阵容（/fixtures/lineups）。
+
+        官方说明：阵容通常只在开赛前 20–40 分钟才公布，部分赛事甚至更晚。
+        因此这是**可选数据**，取不到（未公布/套餐不含/限流）一律返回空，
+        绝不能让预测失败。
+        """
+        try:
+            return await self._get("fixtures/lineups", {"fixture": fixture_id},
+                                   ttl=TTL_LINEUPS)
+        except APIError as exc:
+            log.info("阵容不可用（fixture=%s）：%s", fixture_id, exc)
             return []
 
     async def get_standings(self, league_id: int, season: int) -> list[dict[str, Any]]:

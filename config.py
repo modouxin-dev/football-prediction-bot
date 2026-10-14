@@ -17,6 +17,13 @@ import pytz
 from paths import DB_PATH
 
 from ensemble import DEFAULT_ETA
+from prematch import (
+    DEFAULT_STRENGTH,
+    DEFAULT_TILT,
+    STRENGTH_MAX,
+    STRENGTH_MIN,
+    TILT_MAX,
+)
 from analyzer import (
     DEFAULT_MARKET_WEIGHT,
     MARKET_WEIGHT_MAX,
@@ -275,6 +282,39 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     #   ENSEMBLE_LEARN=1 → 权重按各路实测表现动态调整（η 越大越倾向强者）。
     #   默认关闭 → 用固定经验权重（市场 0.75），行为完全确定、便于回归测试。
     #   实测（英超三赛季 1140 场走前）：动态模式 η=200 时市场权重收敛到 0.842。
+    # 赛前实时信号（伤停 / 首发阵容）：
+    #   这是模型第一次拥有市场之外的独立信息，但权重**未经本项目语料校准**
+    #   ——回测语料没有伤停/阵容列，拟合不了。故默认半强度，并保留关闭开关，
+    #   待线上积累 A/B 样本后再定标。详见 prematch.py 顶部说明。
+    prematch_enabled = parse_bool(_get(env, "PREMATCH_ENABLED"), True)
+    prematch_strength = DEFAULT_STRENGTH
+    raw_ps = _get(env, "PREMATCH_STRENGTH")
+    if raw_ps:
+        try:
+            parsed_ps = float(raw_ps)
+        except ValueError:
+            log.warning("PREMATCH_STRENGTH 不是数字，回退默认 %s：%r",
+                        DEFAULT_STRENGTH, raw_ps)
+        else:
+            if STRENGTH_MIN <= parsed_ps <= STRENGTH_MAX:
+                prematch_strength = parsed_ps
+            else:
+                log.warning("PREMATCH_STRENGTH 越界 [%s, %s]，回退默认 %s：%r",
+                            STRENGTH_MIN, STRENGTH_MAX, DEFAULT_STRENGTH, raw_ps)
+    prematch_tilt = DEFAULT_TILT
+    raw_pt = _get(env, "PREMATCH_TILT")
+    if raw_pt:
+        try:
+            parsed_pt = float(raw_pt)
+        except ValueError:
+            log.warning("PREMATCH_TILT 不是数字，回退默认 %s：%r", DEFAULT_TILT, raw_pt)
+        else:
+            if 0.0 <= parsed_pt <= TILT_MAX:
+                prematch_tilt = parsed_pt
+            else:
+                log.warning("PREMATCH_TILT 越界 [0, %s]，回退默认 %s：%r",
+                            TILT_MAX, DEFAULT_TILT, raw_pt)
+
     ensemble_learn = _get(env, "ENSEMBLE_LEARN", "").strip().lower() in (
         "1", "true", "yes", "on")
     ensemble_eta = DEFAULT_ETA

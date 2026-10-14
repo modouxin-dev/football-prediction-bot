@@ -18,6 +18,7 @@ from analyzer import (LeagueModel, MatchAnalyzer, TeamStrength,
                       apply_market_adjustment, build_league_model,
                       calculate_prediction_level, collect_1x2_odds,
                       consensus_odds, implied_probabilities)
+from prematch import squad_factors
 from ensemble import FALLBACK_PROBS, EnsemblePredictor
 from api_client import APIError, FootballAPI
 from config import Settings
@@ -81,9 +82,27 @@ def _side(m: dict[str, Any], team_id: int) -> tuple[int | None, int | None, bool
     return (hg if is_home else ag), (ag if is_home else hg), is_home
 
 
+# 阵容只在开赛前约 20–40 分钟才公布（官方说明），过早请求必然为空。
+# 因此只有进入这个窗口才去取，否则白烧额度——自动预测每轮数百场，不能每场都试。
+PREMATCH_LINEUP_WINDOW = 45 * 60  # 秒
+
+
 async def _no_injuries() -> list[dict[str, Any]]:
     """数据源未提供伤停接口时的空实现（保持 gather 结构不变）。"""
     return []
+
+
+
+async def _safe_api_call(coro_factory) -> list[dict[str, Any]]:
+    """可选端点：方法不存在、抛错、无数据，一律返回空，不阻断预测。"""
+    if coro_factory is None:
+        return []
+    try:
+        data = await coro_factory()
+    except Exception as exc:  # noqa: BLE001 - 可选信号失败绝不能中断预测
+        log.info("赛前信号不可用：%s", exc)
+        return []
+    return data or []
 
 
 def injuries_stats(raw: list[dict[str, Any]], home_id: int, away_id: int) -> dict:
@@ -552,6 +571,48 @@ class PredictionService:
             stats["saved"] += n
         return stats
 
+    async def _prematch_factors(
+        self, fixture_id: Any, kickoff: datetime | None, home_id: Any, away_id: Any
+    ) -> dict[str, Any] | None:
+        """合成赛前信号（伤停 / 首发阵容）修正因子。
+
+        返回 None 表示「不修正」，此时模型行为与接入前**逐位一致**：
+        未启用、拿不到任何信号、或修正量本身为零，都属于这种情况。
+        """
+        settings = getattr(self, "settings", None)
+        if not getattr(settings, "prematch_enabled", False):
+            return None
+        now = datetime.now(timezone.utc)
+        lead = None
+        if isinstance(kickoff, datetime):
+            lead = (kickoff - now).total_seconds()
+        # 阵容只在临近开赛才公布，没进窗口就不问，省额度也少一次无谓失败。
+        want_lineups = lead is not None and lead <= PREMATCH_LINEUP_WINDOW
+
+        injuries_call = getattr(self.api, "get_injuries", None)
+        lineups_call = getattr(self.api, "get_lineups", None) if want_lineups else None
+
+        tasks = [_safe_api_call(lambda: injuries_call(fixture_id))
+                 if injuries_call else _no_injuries()]
+        if lineups_call:
+            tasks.append(_safe_api_call(lambda: lineups_call(fixture_id)))
+        results = await asyncio.gather(*tasks)
+        injuries = results[0] if results else []
+        lineups = results[1] if len(results) > 1 else []
+        if not injuries and not lineups:
+            return None
+        factors = squad_factors(
+            home_id, away_id,
+            injuries=injuries, lineups=lineups,
+            strength=getattr(settings, "prematch_strength", 0.5),
+            tilt_weight=getattr(settings, "prematch_tilt", 0.0),
+        )
+        # 修正量全为零（例如只有存疑伤停且强度为 0）时同样视为不修正
+        if all(abs(factors[side][k] - 1.0) < 1e-12
+               for side in ("home", "away") for k in ("attack", "concede")):
+            return None
+        return factors
+
     async def _predict_one(
         self, model: LeagueModel, kickoff: datetime, fx: dict[str, Any], fresh: bool = False
     ) -> Prediction:
@@ -559,8 +620,11 @@ class PredictionService:
         home, away = teams.get("home") or {}, teams.get("away") or {}
         fixture_id = fx["fixture"]["id"]  # 保持数据源原类型；_store 内部统一用 str key 查找
 
+        prematch = await self._prematch_factors(
+            fixture_id, kickoff, home["id"], away["id"])
         analysis = self.analyzer.predict_match(
             model, home["id"], away["id"], temperature=self.temperature,
+            prematch=prematch,
         )
         odds_error: str | None = None
         try:
@@ -1213,6 +1277,23 @@ class PredictionService:
         h2h_raw = [] if isinstance(results[2], BaseException) else results[2]
         injuries_raw = [] if isinstance(results[3], BaseException) else results[3]
 
+        # 阵容未进赛前窗口时不请求（官方：开赛前 20–40 分钟才公布）
+        lineups_raw: list[dict[str, Any]] = []
+        if getattr(s, "prematch_enabled", False):
+            lineups_call = getattr(self.api, "get_lineups", None)
+            if lineups_call:
+                lead = (kickoff - datetime.now(timezone.utc)).total_seconds()
+                if lead <= PREMATCH_LINEUP_WINDOW:
+                    lineups_raw = await _safe_api_call(lambda: lineups_call(fixture_id))
+        prematch_factors = None
+        if getattr(s, "prematch_enabled", False) and (injuries_raw or lineups_raw):
+            prematch_factors = squad_factors(
+                home_id, away_id,
+                injuries=injuries_raw, lineups=lineups_raw,
+                strength=getattr(s, "prematch_strength", 0.5),
+                tilt_weight=getattr(s, "prematch_tilt", 0.0),
+            )
+
         return {
             "fixture_id": fixture_id,
             "league": (fx.get("league") or {}).get("name") or f"联赛 {s.league_id}",
@@ -1227,11 +1308,13 @@ class PredictionService:
             "away_row": rows_by_team.get(away_id),
             "h2h": h2h_stats(h2h_raw, home_id),
             "injuries": injuries_stats(injuries_raw, home_id, away_id),
+            "prematch": (prematch_factors or {}).get("detail"),
             "model": {
                 "home_strength": model.strength(home_id),
                 "away_strength": model.strength(away_id),
                 "analysis": self.analyzer.predict_match(
                     model, home_id, away_id, temperature=self.temperature,
+                    prematch=prematch_factors,
                 ),
                 "avg_home_goals": model.avg_home_goals,
                 "avg_away_goals": model.avg_away_goals,
