@@ -45,8 +45,9 @@ class Keyboards:
         return InlineKeyboardMarkup(
             [
                 buttons[:2],
-                buttons[2:],
-                [InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}")],
+                # 刷新并进第二行而不是独占一行，避免被拉成又宽又空的长条
+                buttons[2:]
+                + [InlineKeyboardButton("🔄 刷新赔率", callback_data=f"refresh:{fixture_id}")],
                 nav_row(),
             ]
         )
@@ -69,8 +70,9 @@ class Keyboards:
                     InlineKeyboardButton("📊 详细分析", callback_data=f"deep:{fixture_id}"),
                     InlineKeyboardButton("📈 概率图表", callback_data=f"chart:prob:{fixture_id}"),
                 ],
-                [InlineKeyboardButton("🔄 刷新数据", callback_data=f"refresh:{fixture_id}")],
-                nav_row(),
+                # 刷新并入出口行而不是独占一行：独占按钮会被拉满整行宽度
+                [InlineKeyboardButton("🔄 刷新数据", callback_data=f"refresh:{fixture_id}")]
+                + nav_row(),
             ]
         )
 

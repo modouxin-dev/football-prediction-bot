@@ -344,7 +344,10 @@ class FixturesView:
             rows.append([
                 InlineKeyboardButton("⏭ 查询下一场", callback_data="fxm:next"),
                 InlineKeyboardButton("📅 未来 7 天", callback_data="fxm:upcoming"),
+            ])
+            rows.append([
                 InlineKeyboardButton("📆 指定日期", callback_data="fxm:date"),
+                InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
             ])
         if total_pages > 1:
             rows.append(
@@ -355,9 +358,11 @@ class FixturesView:
                 ]
             )
         if chunk:  # 空态已单独给出「下一场/未来 7 天」，不重复
+            # 「返回主菜单」并入本行而不是独占一行：Telegram 会把独占的
+            # 按钮拉满整行，变成一条又宽又空的长条，与正文抢视觉空间。
             rows.append([
                 InlineKeyboardButton("📊 赛程图表", callback_data="chart:schedule:all"),
                 InlineKeyboardButton("⏭ 下一场", callback_data="fxm:next"),
+                InlineKeyboardButton("🏠 主菜单", callback_data="menu:home"),
             ])
-        rows.append([InlineKeyboardButton("↩️ 返回主菜单", callback_data="menu:home")])
         return "\n".join(lines), InlineKeyboardMarkup(rows), page, total_pages

@@ -78,7 +78,11 @@ BOT_COMMANDS: list[tuple[str, str]] = [
 ]
 WIDE_HOURS = 24 * 14  # /test 在近期无比赛（如国际比赛日）时放宽到 14 天，方便看到示例消息
 
-FX_PER_PAGE = 10  # 今日赛程每页比赛数
+# 今日赛程每页比赛数。
+# 实测：每页 10 场时，逐场按钮就是 10 行，加上联赛筛选 2 行、日期导航
+# 1 行、辅助 1 行、返回 1 行 = 15 行按钮，比 29 行正文更占屏，手机上
+# 一屏根本放不下。降到 5 场后按钮 9 行、正文约 15 行，一屏可容纳。
+FX_PER_PAGE = 5  # 今日赛程每页比赛数
 MENU_BY_LABEL = {label: key for key, label in MENU_ITEMS}  # 底部键盘文字 → 菜单 key
 
 

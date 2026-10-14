@@ -131,11 +131,15 @@ def test_prediction_keyboard_keeps_match_actions():
     assert "menu:fixtures" in data and "menu:home" in data
 
 
-def test_prediction_keyboard_row_count_is_three():
-    """4 行 7 个 → 3 行 5 个；按钮少了才看得清哪个是本场操作。"""
+def test_prediction_keyboard_row_count_is_two():
+    """4 行 7 个 → 2 行 5 个；按钮少了才看得清哪个是本场操作。
+
+    原先「🔄 刷新数据」独占一行，Telegram 会把它拉满整行，变成又宽
+    又空的长条。现并入出口行，按钮数量不变但少一行、不再有宽条。
+    """
     markup = Keyboards.prediction_keyboard(1001)
     flat = [b for row in markup.inline_keyboard for b in row]
-    assert len(markup.inline_keyboard) == 3, f"行数 {len(markup.inline_keyboard)}"
+    assert len(markup.inline_keyboard) == 2, f"行数 {len(markup.inline_keyboard)}"
     assert len(flat) == 5, f"按钮数 {len(flat)}"
 
 
