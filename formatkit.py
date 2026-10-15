@@ -624,7 +624,11 @@ def _factors(report: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
         unknowns.append("暂无历史交锋记录")
     if min(hs.games_home, aws.games_away) < 5:
         unknowns.append("主/客场已赛场次不足 5 场，强度估计不稳定")
-    unknowns.append("数据源未提供伤停信息（当前套餐不支持）")
+    # 只有当名单真的为空时才归入不确定因素。此前无条件 append，于是
+    # 上面刚列出十几名伤停球员、下面又说「套餐不支持」，自相矛盾。
+    inj = report.get("injuries") or {}
+    if not (inj.get("home") or inj.get("away")):
+        unknowns.append("数据源未提供伤停名单，本场预测不含伤停影响")
     return pros, cons, unknowns
 
 
