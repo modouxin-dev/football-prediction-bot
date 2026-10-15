@@ -116,7 +116,6 @@ class AnalysisView:
                 f" / 客队场均 <code>{report['model']['avg_away_goals']:.2f}</code>",
                 f"⚽ 预期进球 λ：<code>{analysis['lambda_home']:.2f} - {analysis['lambda_away']:.2f}</code>",
                 f"🧩 数据完整性：<b>{integrity}</b>",
-                "🩹 伤停信息：数据源未提供（当前套餐不支持）",
                 f"🛰 数据源：<code>{esc(report.get('source', 'API-Football'))}</code>",
                 f"🤖 模型版本：<code>{esc(model_version)}</code>",
                 f"🕑 更新时间：<code>{CommonView.fmt_time(report['created_at'], tz, '%Y-%m-%d %H:%M:%S')}</code>",
