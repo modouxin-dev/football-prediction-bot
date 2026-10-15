@@ -161,14 +161,39 @@ OTHERS_ICON = "📌"
 BUTTON_MAX_COLS = 20
 
 
-def _focus_key(p) -> tuple[tuple[int, int], Any]:
-    """焦点战排序键：先联赛优先级，再开赛时间。
+# 信心等级排序：high 最有把握，unknown 兜底。
+# 取值来自 predictions.level_key（analyzer.calculate_prediction_level），
+# 语义是「等级越高越可信」，与直觉一致——不存在分数越高越不确定的字段。
+_LEVEL_RANK = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
 
-    选「焦点战」必须用确定性口径，不能依赖热度/强度打分——那些指标在缺
-    数据时会退化成随机顺序，同一天两次推送可能选出不同的三场，用户会以为
-    推送在乱跳。联赛优先级（LEAGUE_ORDER）+ 开赛时间完全确定、可复现。
+
+def _confidence_rank(p) -> int:
+    """本场信心等级序数。概率缺失时归入 unknown，绝不臆造等级。"""
+    home, draw, away = _probs_of(p)
+    try:
+        level = calculate_prediction_level(
+            {"home_win": home, "draw": draw, "away_win": away})
+    except Exception:
+        return _LEVEL_RANK["unknown"]
+    return _LEVEL_RANK.get(level.get("key"), _LEVEL_RANK["unknown"])
+
+
+def _focus_key(p) -> tuple[int, tuple[int, int], Any, int]:
+    """焦点战排序键：先信心等级，再联赛优先级，再开赛时间，最后 fixture_id。
+
+    把信心等级放在最前：焦点战的产品意图是「挑模型最有把握的几场」，
+    只按联赛优先级选出来的会是英超/西甲，而不是最有把握的那几场。
+
+    末位加 fixture_id 是为了让排序键成为全序——信心、联赛、开赛时间
+    三者都相同时（例如同一联赛同一时间开球），sorted 的稳定性和输入
+    顺序有关，同批比赛换个顺序就会选出不同的焦点战。
     """
-    return (_league_sort_key(_league_id_of(p)), p.kickoff)
+    try:
+        fid = int(getattr(p, "fixture_id", 0) or 0)
+    except (TypeError, ValueError):
+        fid = 0
+    return (_confidence_rank(p), _league_sort_key(_league_id_of(p)),
+            p.kickoff, fid)
 
 
 def _pick_focus(predictions, limit: int = FOCUS_LIMIT) -> list[Any]:
