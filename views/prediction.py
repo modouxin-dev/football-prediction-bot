@@ -313,6 +313,14 @@ class PredictionView:
             lines += ["", SEP, "", "<b>📝 模型分析</b>", ""]
             lines += [f"• {n}" for n in notes]
 
+        # 市场对照：主卡的概率是融合口径（线上含 75% 市场信息），不给市场
+        # 基准就无法判断这个数字里有多少是模型自己的判断——差值才是模型
+        # 真正贡献的部分。只放对照块，各家公司报价留在 format_odds_detail：
+        # 主卡已有 40+ 行，再塞 6 行会让手机上多滑一屏。
+        compare = cls.market_compare_block(p)
+        if compare:
+            lines += ["", SEP, "", "<b>💰 市场对照</b>", "", *compare]
+
         # 风险因素：与主卡的免责声明不同，这里说的是「本次预测具体缺什么」
         risks = cls.risk_bullets(p)
         if risks:
@@ -361,13 +369,64 @@ class PredictionView:
         notes.append(f"综合数据倾向：{verdict}")
         return notes
 
+    @classmethod
+    def market_compare_block(cls, p, note: str | None = None) -> list[str]:
+        """模型 vs 市场（去水后）对照块，主卡与赔率详情页共用。
+
+        为什么抽成共用实现：
+            主卡与详情页各写一套差值算法时，一旦出现「主卡 +5.1pp、
+            详情页 +2.3pp」这种不一致，两边单看都对，只有互相比才发现，
+            而用户只会认为这个系统不可信。
+
+        为什么必须去水：
+            1/赔率含抽水，三项和 > 1。直接拿它当市场概率会把市场算得比
+            实际更自信，模型与市场的差距因此被系统性放大。
+
+        为什么差值用 pp：
+            写成 +5.1% 会被读成「概率 5.1%」，而它实际是「比市场高
+            5.1 个百分点」。
+
+        返回空列表表示不可比（无赔率或报价无效），调用方自行决定如何提示，
+        本函数不替调用方编造文案。
+        """
+        if not p.odds:
+            return []
+        a = p.analysis
+        probs = {"home": a["win_prob"], "draw": a["draw_prob"], "away": a["loss_prob"]}
+        market = implied_probabilities(p.odds)
+        gap = market_gap(probs, p.odds)
+        # gap 为空或 market 为空都表示报价无效（如含 0 或负数），此时不渲染。
+        if not gap or not market:
+            return []
+        label_w, num_w = 12, 8
+        header = pad_cjk("", label_w) + "".join(
+            align_cjk(OUTCOME_LABEL[k], num_w, "right") for k in OUTCOMES
+        )
+        model_row = pad_cjk("模型", label_w) + "".join(
+            align_cjk(f"{probs[k]:.1%}", num_w, "right") for k in OUTCOMES
+        )
+        market_row = pad_cjk("市场(去水)", label_w) + "".join(
+            align_cjk(f"{market[k]:.1%}", num_w, "right") for k in OUTCOMES
+        )
+        gap_row = pad_cjk("差值", label_w) + "".join(
+            align_cjk(f"{gap[k] * 100:+.1f}pp", num_w, "right") for k in OUTCOMES
+        )
+        biggest = max(gap, key=lambda k: abs(gap[k]))
+        block = [
+            f"<pre>{esc(chr(10).join([header, model_row, market_row, gap_row]))}</pre>",
+            f"最大分歧 <b>{OUTCOME_LABEL[biggest]}</b> "
+            f"<code>{gap[biggest] * 100:+.1f}pp</code>",
+        ]
+        if note:
+            block.append(note)
+        return block
+
     @staticmethod
     def format_odds_detail(p, tz) -> str:
         title = "💰 <b>赔率对比</b>"
         if not p.odds:
             return f"{title}\n{CommonView.matchup(p, tz)}\n{SEP}\n暂无赔率数据（该场比赛可能尚未开盘）。"
         a = p.analysis
-        probs = {"home": a["win_prob"], "draw": a["draw_prob"], "away": a["loss_prob"]}
         # 列宽按显示宽度算，且表头与数据行必须同宽：原来表头用 12、
         # 「中位数」行用 10，两列直接错开两格。
         name_w, num_w = 12, 6
@@ -388,41 +447,14 @@ class PredictionView:
             pad_cjk("中位数", name_w)
             + f"{o['home']:>{num_w}.2f}{o['draw']:>{num_w}.2f}{o['away']:>{num_w}.2f}"
         )
-        # 去水对照表：市场概率必须归一化后才能与模型概率相减。
-        # 旧版直接拿 1/赔率（含抽水，三项和 > 1）当市场概率，等于把市场
-        # 算得比实际更自信，模型与市场的差距因此被系统性放大。
-        market = implied_probabilities(o)
-        gap = market_gap(probs, o)
-        compare_rows = []
-        if gap:
-            label_w, num_w = 12, 8
-            header = pad_cjk("", label_w) + "".join(
-                align_cjk(OUTCOME_LABEL[k], num_w, "right") for k in OUTCOMES
-            )
-            model_row = pad_cjk("模型", label_w) + "".join(
-                align_cjk(f"{probs[k]:.1%}", num_w, "right") for k in OUTCOMES
-            )
-            market_row = pad_cjk("市场(去水)", label_w) + "".join(
-                align_cjk(f"{market[k]:.1%}", num_w, "right") for k in OUTCOMES
-            )
-            # 差值用百分点（pp）而不是 %：写成 +5.0% 会被读成「概率 5%」，
-            # 而它实际是「比市场高 5 个百分点」。
-            gap_row = pad_cjk("差值", label_w) + "".join(
-                align_cjk(f"{gap[k] * 100:+.1f}pp", num_w, "right") for k in OUTCOMES
-            )
-            compare_rows.append(
-                f"<pre>{esc(chr(10).join([header, model_row, market_row, gap_row]))}</pre>"
-            )
-            biggest = max(gap, key=lambda k: abs(gap[k]))
-            compare_rows.append(
-                f"最大分歧 <b>{OUTCOME_LABEL[biggest]}</b> "
-                f"<code>{gap[biggest] * 100:+.1f}pp</code>"
-            )
-            compare_rows.append(
-                "ℹ️ 上表为<b>对比口径</b>（已去抽水）；Value Bet 判据仍用"
-                "<b>含抽水赔率</b>算期望收益，两者不可互换。"
-            )
-        else:
+        # 对照块与单场预测卡共用同一实现（market_compare_block），
+        # 保证两处显示的差值永远一致。
+        compare_rows = PredictionView.market_compare_block(
+            p,
+            note="ℹ️ 上表为<b>对比口径</b>（已去抽水）；Value Bet 判据仍用"
+                 "<b>含抽水赔率</b>算期望收益，两者不可互换。",
+        )
+        if not compare_rows:
             compare_rows.append("暂无可比数据（赔率缺失或含无效报价）。")
         blocks = [
             [title, CommonView.matchup(p, tz), BLANK],
