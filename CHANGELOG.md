@@ -152,6 +152,7 @@
    机器上执行下载后随代码提交。**在这些 CSV 入库前，`by_div` 里非 E0 分区仍为 0，
    覆盖盲区尚未真正消除。**
 2. **未删除 `backtest.py` / `backtester_fixed.py`**：二者均为生产依赖，见"阻塞上报"。
+3. **新增 `scripts/fetch_history_csv.py`**：解除上面第 1 条的工具。在有出口网络的机器上执行 `python scripts/fetch_history_csv.py`即可补齐五联赛 CSV（本环境实测 403，故脚本**未经真实下载验证**，仅 `--dry-run` 验证过计划输出）。
 
 ---
 
