@@ -24,15 +24,44 @@ matches 表的唯一键是 (competition_code, utc_date, home_team_id, away_team_
 from __future__ import annotations
 
 import logging
+from typing import Sequence
 
-from football_data_uk import (available_local_seasons, canonical_team_name,
-                              load_local)
+from football_data_uk import (DIV_TO_COMPETITION, available_local_seasons,
+                              canonical_team_name, load_local)
 from migrate_elo import fetch_finished
 
 log = logging.getLogger(__name__)
 
 DEFAULT_DIV = "E0"
 DEFAULT_COMPETITION = "PL"
+
+# 多联赛语料的默认分区集合（football-data.co.uk 的 div 代号）。
+#
+# ⚠️ 命名坑：西甲是 **SP1**，不是 E1 —— E1 是英冠（ELC）。
+# 写错不会报错，只会静默取回另一个联赛的赛果，回测结论随之失真。
+# 因此这里**不**自己维护代号表，直接复用 football_data_uk.DIV_TO_COMPETITION。
+DEFAULT_DIVS: tuple[str, ...] = ("E0", "SP1", "I1", "D1", "F1")
+
+
+def div_for_competition(competition: str) -> str:
+    """库内 competition_code → football-data.co.uk 分区代号。
+
+    查不到时退回 DEFAULT_DIV，由调用方决定是否降级为「只跑英超」。
+    """
+    comp = (competition or "").strip().upper()
+    for div, code in DIV_TO_COMPETITION.items():
+        if code.upper() == comp:
+            return div
+    return DEFAULT_DIV
+
+
+def available_divs() -> list[str]:
+    """返回镜像里**真的**有内置 CSV 的分区（按 DEFAULT_DIVS 的顺序）。
+
+    只声明支持、但 data/history/ 里没有文件的分区不算数——
+    否则回测会显示"支持五联赛"却只跑出英超的样本，属于虚报。
+    """
+    return [d for d in DEFAULT_DIVS if available_local_seasons(d)]
 
 
 def known_team_ids(repo) -> dict[str, str]:
@@ -135,40 +164,69 @@ def _dedup_key(m: dict) -> tuple:
 
 
 def load_corpus(repo, competition: str = "", *, div: str = DEFAULT_DIV,
+                divs: Sequence[str] | None = None,
                 include_history: bool = True
                 ) -> tuple[list[dict], dict]:
     """合并语料，返回 (按时间正序的样本, 来源统计)。
 
+    分区（div）选择规则，优先级从高到低：
+      1. 显式传 divs → 用传入的分区列表（多联赛回测走这条）；
+      2. 传了 div → 只用该分区（兼容旧调用，行为不变）；
+      3. 都没传 → 用 DEFAULT_DIVS 里**实际有内置 CSV** 的分区。
+
+    第 3 条刻意做"有数据才算数"的过滤：否则 info 会显示"覆盖五联赛"，
+    实际却只有英超有样本——回测结论的可信度就被虚报了。
+
     include_history=False 时等价于旧的 fetch_finished（只库内），
     便于对照和故障降级。
     """
+    if divs is None:
+        if div:
+            divs = [div]
+        else:
+            divs = available_divs() or [DEFAULT_DIV]
+    divs = list(dict.fromkeys(divs))  # 去重且保序，避免同一分区算两遍
+
     db_rows = fetch_finished(repo, competition)
     for r in db_rows:
         r["source"] = "db"
 
     merged: dict[tuple, dict] = {_dedup_key(r): r for r in db_rows}
     history_added = 0
+    by_div: dict[str, int] = {}
 
     if include_history:
         known = known_team_ids(repo)
-        comp = competition or DEFAULT_COMPETITION
-        for season in available_local_seasons(div):
-            try:
-                fixtures = load_local(season, div, competition=comp, known=known)
-            except Exception:
-                # 单个赛季读坏不应拖垮整体：跳过该赛季，其余照常
-                log.exception("回测语料：内置赛季 %s 读取失败，已跳过", season)
-                continue
-            for fx in fixtures:
-                m = fixture_to_match(fx)
-                if m is None:
+        for _div in divs:
+            # 单分区时尊重调用方传入的 competition；
+            # 多分区时必须用各分区自己的代号，否则五联赛的赛果
+            # 会被打成同一个 competition，去重键碰撞导致样本丢失。
+            if competition and len(divs) == 1:
+                comp = competition
+            else:
+                comp = DIV_TO_COMPETITION.get(_div, DEFAULT_COMPETITION)
+            div_count = 0
+            for season in available_local_seasons(_div):
+                try:
+                    fixtures = load_local(season, _div, competition=comp,
+                                          known=known)
+                except Exception:
+                    # 单个赛季读坏不应拖垮整体：跳过该赛季，其余照常
+                    log.exception("回测语料：分区 %s 赛季 %s 读取失败，已跳过",
+                                  _div, season)
                     continue
-                key = _dedup_key(m)
-                if key in merged:
-                    # 库内已有同一场 → 保留库内那行（真实 API 数据更全）
-                    continue
-                merged[key] = m
-                history_added += 1
+                for fx in fixtures:
+                    m = fixture_to_match(fx)
+                    if m is None:
+                        continue
+                    key = _dedup_key(m)
+                    if key in merged:
+                        # 库内已有同一场 → 保留库内那行（真实 API 数据更全）
+                        continue
+                    merged[key] = m
+                    history_added += 1
+                    div_count += 1
+            by_div[_div] = div_count
 
     matches = sorted(
         merged.values(),
@@ -180,6 +238,14 @@ def load_corpus(repo, competition: str = "", *, div: str = DEFAULT_DIV,
         "total": len(matches),
         "seasons": sorted({
             m["season"] for m in matches if m.get("season") is not None
+        }),
+        # 多联赛可观测性：光说"支持五联赛"没用，得能看到每个分区
+        # 到底贡献了多少场——某个分区为 0 就说明它的 CSV 没进镜像。
+        "divs": list(divs),
+        "by_div": by_div,
+        "competitions": sorted({
+            str(m.get("competition") or "") for m in matches
+            if m.get("competition")
         }),
     }
     return matches, info

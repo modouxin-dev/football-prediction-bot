@@ -167,3 +167,112 @@ def test_fixture_to_match_skips_unplayed():
         "score": {"fullTime": {"home": None, "away": None}},
     }
     assert fixture_to_match(fx) is None
+
+
+# ============================================================================
+# 多联赛语料（五大联赛合并）
+# ============================================================================
+# 背景：生产 LEAGUE_IDS 覆盖英超/西甲/意甲/德甲/法甲，但回测语料长期只有
+# 英超（DEFAULT_DIV="E0"）。于是"西甲的回测结论"其实是英超的结论——
+# 模型可信度存在覆盖盲区。本组用例保证合并后每个分区都真的贡献了样本。
+
+from football_data_uk import DIV_TO_COMPETITION  # noqa: E402
+import football_data_uk as _fdu  # noqa: E402
+from backtest_corpus import (DEFAULT_DIVS, available_divs,  # noqa: E402
+                             div_for_competition)
+
+CSV_HEADER = "Date,HomeTeam,AwayTeam,FTHG,FTAG"
+
+
+def _write_csv(d, div, season, n=6):
+    """在临时目录写一份最小可用的历史 CSV（n 场）。"""
+    rows = [CSV_HEADER]
+    for i in range(n):
+        day = f"{10 + i // 3:02d}/{season % 100 + 0:02d}/{season}" \
+            if False else f"{10 + i:02d}/08/{season}"
+        rows.append(f"{day},TeamA{i},TeamB{i},{i % 3},{i % 2}")
+    (d / f"{div}_{season}.csv").write_text("\n".join(rows) + "\n",
+                                           encoding="utf-8")
+
+
+def test_default_divs_cover_five_leagues():
+    """五联赛集合必须齐，且西甲是 SP1 而不是 E1。
+
+    E1 是英冠（ELC）。把它当西甲不会报错，只会静默取回英冠赛果，
+    回测结论随之失真——这是本条用例存在的唯一理由。
+    """
+    assert list(DEFAULT_DIVS) == ["E0", "SP1", "I1", "D1", "F1"]
+    assert DIV_TO_COMPETITION["SP1"] == "PD"    # 西甲
+    assert DIV_TO_COMPETITION["I1"] == "SA"     # 意甲
+    assert DIV_TO_COMPETITION["D1"] == "BL1"    # 德甲
+    assert DIV_TO_COMPETITION["F1"] == "FL1"    # 法甲
+    assert DIV_TO_COMPETITION["E1"] == "ELC"    # 英冠 ≠ 西甲
+    assert "E1" not in DEFAULT_DIVS
+
+
+def test_div_for_competition_roundtrip():
+    assert div_for_competition("PL") == "E0"
+    assert div_for_competition("PD") == "SP1"
+    assert div_for_competition("SA") == "I1"
+    assert div_for_competition("BL1") == "D1"
+    assert div_for_competition("FL1") == "F1"
+    assert div_for_competition("不存在的联赛") == "E0"   # 兜底不炸
+
+
+def test_available_divs_only_counts_real_files(tmp_path, monkeypatch):
+    """只声明支持没用：data/history 里没有 CSV 的分区不算数。"""
+    monkeypatch.setattr(_fdu, "history_dir", lambda: tmp_path)
+    _write_csv(tmp_path, "E0", 2024)
+    assert available_divs() == ["E0"]
+    _write_csv(tmp_path, "SP1", 2024)
+    assert available_divs() == ["E0", "SP1"]
+
+
+def test_multi_div_merges_every_league(tmp_path, monkeypatch):
+    """五个分区都真的并进来了——每个分区样本数都必须 > 0。"""
+    monkeypatch.setattr(_fdu, "history_dir", lambda: tmp_path)
+    for div in DEFAULT_DIVS:
+        _write_csv(tmp_path, div, 2024, n=6)
+
+    repo = PredictionRepository(str(tmp_path / "c.db"))
+    matches, info = load_corpus(repo, "", divs=list(DEFAULT_DIVS))
+
+    assert info["by_div"], "多联赛未产生分区统计"
+    assert len(info["by_div"]) == 5, f"分区数不足: {info['by_div']}"
+    for div in DEFAULT_DIVS:
+        assert info["by_div"].get(div, 0) == 6, \
+            f"{div} 样本缺失: {info['by_div']}"
+    # 五联赛各自的 competition_code 都要出现，否则去重键会互相碰撞
+    assert set(info["competitions"]) == {
+        DIV_TO_COMPETITION[d] for d in DEFAULT_DIVS}
+    assert info["total"] == 30
+
+
+def test_multi_div_no_cross_league_dedup(tmp_path, monkeypatch):
+    """同日同对手但在不同联赛，不能被当成同一场去重掉。
+
+    CSV 的稳定 id 由 (日期, 主队, 客队) 生成，不含联赛；
+    去重键必须带上 competition，否则跨联赛的同名对阵会互相吞掉。
+    """
+    monkeypatch.setattr(_fdu, "history_dir", lambda: tmp_path)
+    for div in ("E0", "SP1"):
+        (tmp_path / f"{div}_2024.csv").write_text(
+            CSV_HEADER + "\n10/08/2024,SameA,SameB,1,0\n", encoding="utf-8")
+
+    repo = PredictionRepository(str(tmp_path / "c.db"))
+    matches, info = load_corpus(repo, "", divs=["E0", "SP1"])
+
+    assert info["total"] == 2, f"跨联赛被误去重: {info}"
+    assert info["by_div"] == {"E0": 1, "SP1": 1}
+
+
+def test_single_div_keeps_backward_compat(tmp_path, monkeypatch):
+    """显式传 div 时行为与改造前一致（旧调用不受影响）。"""
+    monkeypatch.setattr(_fdu, "history_dir", lambda: tmp_path)
+    for div in DEFAULT_DIVS:
+        _write_csv(tmp_path, div, 2024, n=6)
+
+    repo = PredictionRepository(str(tmp_path / "c.db"))
+    _, info = load_corpus(repo, "PL", div="E0")
+    assert info["by_div"] == {"E0": 6}
+    assert info["total"] == 6

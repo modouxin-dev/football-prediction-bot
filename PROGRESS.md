@@ -280,7 +280,7 @@ Elo 专项校验（脚本第 5 节）
 | 文件 | 内容 |
 |---|---|
 | `backtest.py` | 滚动前进回测引擎 + 指标（对数损失 / RPS / Brier / 校准曲线 / ECE） |
-| `backtest_cli.py` | 命令行入口，支持真实库、模拟数据、blend 扫描 |
+| `/backtest`（机器人命令） | 回测入口，支持纯泊松 / +Elo / +DC 变体对比 |
 | `repository.py` | `atomic()` 加指数退避重试（悲观并发） |
 | 2 个测试文件 | 27 + 8 个新测试 |
 
@@ -374,7 +374,7 @@ low    0.436 (n=234)   ← 最低
 |---|---|
 | `analyzer.py` | `dc_tau` / `dc_rho_bounds` / `clamp_rho` / `dc_score_matrix` / `fit_rho` |
 | `backtest.py` | `use_dc` 开关 + ρ 周期重拟合 |
-| `backtest_cli.py` | 模拟器支持 `dc_rho`（生成带真实相关性的数据） |
+| `/backtest` | 变体参数解析改为看全部 args，避免「/backtest\n/backtest elo」被静默吞掉 |
 | `tests/test_dixon_coles.py` | 29 个测试，含手算值验证（精度 1e-12） |
 
 ### 🔴 先说测试方法的错误（差点得出假结论）

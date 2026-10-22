@@ -294,41 +294,22 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 """
 
-QUOTA_SCHEMA = """
-CREATE TABLE IF NOT EXISTS api_quota (
-    day      TEXT NOT NULL,
-    source   TEXT NOT NULL,
-    n        INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, source)
-);
+def _ddl_of(table: str) -> str:
+    """从 SCHEMA 里切出某张表的建表语句。
 
--- 回测结果留档：每次回测都落盘，重启可查、跨部署保留。
--- 没有它，回测结论只活在进程内存里，容器一重启就丢失，
--- 也就无从判断"模型是在变好还是在变差"。
-CREATE TABLE IF NOT EXISTS backtest_runs (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    competition   TEXT NOT NULL,
-    season        TEXT,             -- NULL = 全部赛季
-    variant       TEXT NOT NULL,
-    min_history   INTEGER NOT NULL,
-    n             INTEGER NOT NULL, -- 评估场次
-    hits          INTEGER NOT NULL,
-    accuracy      REAL,
-    log_loss      REAL,
-    rps           REAL,
-    brier         REAL,
-    ece           REAL,
-    rho           REAL,
-    corpus_db     INTEGER,          -- 语料中来自数据库的场数
-    corpus_csv    INTEGER,          -- 语料中来自内置 CSV 的场数
-    verdict       TEXT,
-    by_level      TEXT,             -- JSON：各信心等级的命中率
-    calibration   TEXT,             -- JSON：分档校准
-    created_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_bt_comp_created
-    ON backtest_runs(competition, created_at);
-"""
+    配额模块（record_quota / read_quota）会用**独立的 sqlite 连接**写
+    api_quota，且可能在主库初始化之前就被调用。它需要一份能保证表存在的
+    DDL。早先这里是把整段 DDL 又抄了一遍，和 SCHEMA 里的那份形成双份定义
+    ——两份当时一致，但将来给表加字段时只改一处就会埋雷。
+    现在改为直接从 SCHEMA 切，物理上只有一份文本，不可能再走偏。
+    """
+    marker = f"CREATE TABLE IF NOT EXISTS {table} "
+    start = SCHEMA.index(marker)
+    return SCHEMA[start:SCHEMA.index(");", start) + 2]
+
+
+# 配额模块专用：内容与 SCHEMA 中的 api_quota 定义逐字同源。
+QUOTA_SCHEMA = _ddl_of("api_quota")
 
 _local = threading.local()
 
