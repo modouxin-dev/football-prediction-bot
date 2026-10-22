@@ -276,3 +276,33 @@ def test_single_div_keeps_backward_compat(tmp_path, monkeypatch):
     _, info = load_corpus(repo, "PL", div="E0")
     assert info["by_div"] == {"E0": 6}
     assert info["total"] == 6
+
+
+def test_by_div_is_observable_not_claimed(tmp_path, monkeypatch):
+    """``by_div`` 必须反映真实入库样本，而不是"声称支持"的联赛清单。
+
+    这条用例同时是验收命令 ``pytest -k by_div`` 的落点：
+    多联赛断言原先都写在 test_multi_div_* 里，``-k by_div`` 一条都选不中，
+    验收跑出来是 "28 deselected"，看起来像通过、实际什么都没验。
+    补一条名字里带 by_div 的用例，让验收命令真的跑到东西。
+
+    关键语义：显式请求了五个分区时，``by_div`` 必须**把缺数据的分区也列成 0**，
+    而不是悄悄略过——"SP1: 0" 本身就是盲区的证据，藏起来才会让人误以为
+    五联赛都验过了。（若改用自动模式 available_divs()，则只列真有 CSV 的分区。）
+    """
+    monkeypatch.setattr(_fdu, "history_dir", lambda: tmp_path)
+
+    # 阶段一：只放英超 CSV（当前 data/history 的真实状态）
+    _write_csv(tmp_path, "E0", 2024, n=6)
+    repo = PredictionRepository(str(tmp_path / "c.db"))
+    _, info = load_corpus(repo, "", divs=list(DEFAULT_DIVS))
+    assert info["by_div"] == {"E0": 6, "SP1": 0, "I1": 0, "D1": 0, "F1": 0}, \
+        f"盲区未暴露（应为 0 而非缺失）: {info['by_div']}"
+
+    # 阶段二：补齐另四个联赛后，五个分区都要真的出现且非零
+    for div in ("SP1", "I1", "D1", "F1"):
+        _write_csv(tmp_path, div, 2024, n=6)
+    repo2 = PredictionRepository(str(tmp_path / "c2.db"))
+    _, info2 = load_corpus(repo2, "", divs=list(DEFAULT_DIVS))
+    assert len(info2["by_div"]) == 5, f"分区数不足: {info2['by_div']}"
+    assert info2["total"] == 30
