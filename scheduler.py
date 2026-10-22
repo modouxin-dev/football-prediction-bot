@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from telegram import InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from backtester_fixed import BacktesterFixed
+from backtester_with_db import BacktesterWithDB
 from bot_handler import BotUI
 from config import Settings
 from keyboards import Keyboards
@@ -429,7 +429,11 @@ async def backtest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # 口径必须显式对齐线上：线上推送是 w·市场+(1−w)·模型 的融合口径，
         # 不传 market_weight 就退化成纯泊松，回测分数代表不了线上真实表现。
         # 这里用 settings 的真实生效值，而不是写死 0.75 —— 改了配置必须跟着变。
-        bt = BacktesterFixed(
+        # 统一走兼容层 BacktesterWithDB：数据源与评估仍委托底层真实回测引擎
+        # （见 backtester_with_db 模块头），但对外只保留这一个入口，
+        # 避免"两个回测器各有各的默认值"。
+        # market_weight / min_history 必须继续显式传——口径说明见 BacktesterWithDB。
+        bt = BacktesterWithDB(
             league_id=service.settings.league_id,
             db_path=getattr(service.settings, "db_path", None),
             market_weight=getattr(service.settings, "market_weight", None),

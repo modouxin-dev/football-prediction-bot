@@ -36,9 +36,20 @@ class BacktesterWithDB:
         season: int | None = None,
         db_path: str | None = None,
         variant: str = "poisson",
+        min_history: int | None = None,
+        market_weight: float | None = None,
     ) -> None:
         """
         :param season: None（默认）= 全部可用赛季；滚动前进需要历史积累。
+        :param min_history: 预热场次数；None = 交给 BacktesterFixed 取默认 30。
+        :param market_weight: 市场锚定融合权重 w（0~1）。
+
+        ⚠️ 口径对齐（迁移时补上的关键参数）：
+        线上推送是 ``w·市场 + (1−w)·模型`` 的融合口径，**不是纯泊松**。
+        本层原先不接受 ``market_weight``，若定时回测改走本类而不透传它，
+        回测会静默退化成纯泊松 —— 分数代表不了线上真实表现，
+        且与 ``backtest_runs`` 表里历史记录不再可比。
+        因此这里必须显式透传给 ``BacktesterFixed``。
         """
         self.league_id = int(league_id)
         self.season = season
@@ -47,6 +58,7 @@ class BacktesterWithDB:
         self._impl = BacktesterFixed(
             league_id=self.league_id, season=self.season,
             db_path=self.db_path, variant=self.variant,
+            min_history=min_history, market_weight=market_weight,
         )
         self.results: dict[str, Any] = {
             "total_predictions": 0,
@@ -55,6 +67,24 @@ class BacktesterWithDB:
             "predictions": [],
             "accuracy_by_type": {},
         }
+
+    # ---- 属性代理 ----------------------------------------------------------
+    # 调用方（scheduler / 看板）需要从回测器上直接读到这些元信息；
+    # 不代理的话要么重复实现一份，要么调用方被迫穿透 _impl 拿私有属性。
+    @property
+    def competition_code(self) -> str:
+        """联赛 ID → 竞赛代码（委托实现，未知联赛照旧报错）。"""
+        return self._impl.competition_code
+
+    @property
+    def min_history(self) -> int:
+        """预热场次数（真实生效值，不是 None）。"""
+        return self._impl.min_history
+
+    @property
+    def market_weight(self) -> float | None:
+        """市场融合权重；None = 纯泊松口径。"""
+        return self._impl.market_weight
 
     # ---- 数据源 ------------------------------------------------------------
     async def load_from_db(self) -> list[dict]:
@@ -98,8 +128,29 @@ class BacktesterWithDB:
             "ece": result["ece"],
             "verdict": result["verdict"],
             "corpus": result["corpus"],
+            # ↓ 迁移补回：这些字段 BacktesterFixed 算了，但本层原先丢弃了。
+            # save_backtest_run 会把 calibration / by_level 写进 backtest_runs，
+            # 丢了它们 = 落库记录的分档校准恒为空，看板"模型是否校准"直接失明。
+            "calibration": result.get("calibration"),
+            "by_level": result.get("by_level"),
+            "rho": result.get("rho"),
+            "scheme": result.get("scheme"),
+            "market_weight": result.get("market_weight"),
+            "min_history": result.get("min_history"),
+            "comparison": result.get("comparison"),
+            "baseline_levels": result.get("baseline_levels"),
+            "challenger_levels": result.get("challenger_levels"),
         }
         return self.results
+
+    async def backtest(self) -> dict[str, Any]:
+        """``run_backtest`` 的同义入口。
+
+        定时链路（scheduler）与看板历史代码调用的是 ``backtest()``，
+        兼容层如果只留 ``run_backtest()``，迁移时就得改所有调用点，
+        或者调用方穿透到 ``_impl``。这里给一个薄别名，语义完全等价。
+        """
+        return await self.run_backtest()
 
     @staticmethod
     def _accuracy_by_type(predictions: list[dict]) -> dict[str, dict]:

@@ -112,7 +112,7 @@
 | `analyzer.py` | 469 | 泊松模型 + Dixon-Coles + 赔率工具（纯计算） |
 | `elo.py` | 278 | Elo 评分（已实现，**未接入预测**，回测证明无效） |
 | `backtest.py` | 478 | 滚动前进回测 + 校准曲线 |
-| `backtest_cli.py` | 235 | 回测命令行工具（`--db` 跑真实库 / `--simulate` 自检） |
+| `backtest.py` | — | 回测核心：指标（log_loss/rps/brier/ECE）+ 走前回测器 |
 | `commands/admin.py` | — | `/backtest`：用本地真实赛果回测，**零 API 开销** |
 | `analytics.py` | 270 | 看板只读分析层 |
 | `api_client.py` | 226 | API-Football 异步客户端 |
