@@ -88,6 +88,17 @@ def accuracy(predicted: int, actual: int) -> int:
     return 1 if predicted == actual else 0
 
 
+def poisson_mode(lam: float) -> int:
+    """泊松分布的最可能进球数（众数）= floor(λ)。
+
+    λ 为整数时 λ 与 λ−1 同为该众数，这里取 λ（更贴近"预期进球"直觉）。
+    λ 为负（异常）时归零，避免负比分参与比对。
+    """
+    if lam is None or lam < 0:
+        return 0
+    return int(lam)  # floor：正数下与 math.floor 等价
+
+
 def favorite_index(probs: tuple[float, float, float]) -> int:
     return max(range(3), key=lambda i: probs[i])
 
@@ -151,10 +162,22 @@ class BacktestReport:
     brier_sum: float = 0.0
     by_level: dict[str, dict[str, Any]] = field(default_factory=dict)
     records: list[dict[str, Any]] = field(default_factory=list)
+    # 精确比分口径：**与方向命中率是两回事**，长期混用会让人误判模型好坏。
+    # 方向命中（主/平/客）随机基线 33.3%，业界 45~55% 算良好；
+    # 精确比分（猜中 "2-1"）业界只有 5~8%，20 倍量差。
+    # 看板若只写一个「命中率」，读者默认理解成方向命中，
+    # 看到 5% 会以为模型崩了——其实是两个口径被装进了同一列。
+    exact_n: int = 0        # 参与精确比分评估的场次（λ 可得才计入）
+    exact_hits: int = 0
 
     @property
     def accuracy_rate(self) -> float | None:
         return self.hits / self.n if self.n else None
+
+    @property
+    def exact_rate(self) -> float | None:
+        """精确比分命中率（猜中具体比分，如 2-1）。"""
+        return self.exact_hits / self.exact_n if self.exact_n else None
 
     @property
     def log_loss(self) -> float | None:
@@ -181,7 +204,12 @@ class BacktestReport:
         return {
             "label": self.label,
             "n": self.n,
+            # accuracy = 方向命中率（主/平/客），随机基线 33.3%
             "accuracy": self.accuracy_rate,
+            # exact_rate = 精确比分命中率（猜中 2-1 这种），业界 5~8%
+            "exact_rate": self.exact_rate,
+            "exact_n": self.exact_n,
+            "exact_hits": self.exact_hits,
             "log_loss": self.log_loss,
             "rps": self.rps_score,
             "brier": self.brier_score,
@@ -497,7 +525,9 @@ class WalkForwardBacktester:
                     ):
                         self.temperature = fit_temperature(self._calib_observations)
                         self._temp_fitted = True
-                    probs: Sequence[float] = self._predict(hid, aid)
+                    # 一次算出 (probs, λ主, λ客)：λ 既用于精确比分口径，
+                    # 也避免为拿 λ 再算一遍模型（build_league_model 很贵）。
+                    probs, lam_h, lam_a = self._predict_detail(hid, aid)
                     if self.use_calib and self.temperature != 1.0:
                         probs = apply_temperature(probs, self.temperature)
                     if self.use_market:
@@ -519,6 +549,15 @@ class WalkForwardBacktester:
                     hit = accuracy(pred, actual)
                     report.n += 1
                     report.hits += hit
+                    # 精确比分口径：用模型 λ 的泊松众数作预测比分。
+                    # 注意这里的 probs 可能已被市场融合替换，但 λ 始终是**纯模型**的，
+                    # 精确比分因此代表模型自身、不受赔率影响——这是刻意的：
+                    # 市场融合只调整三项概率，不该把比分的功劳算到模型头上。
+                    if lam_h is not None and lam_a is not None:
+                        report.exact_n += 1
+                        if (poisson_mode(lam_h) == hs
+                                and poisson_mode(lam_a) == as_):
+                            report.exact_hits += 1
                     report.log_loss_sum += log_loss(probs, actual)
                     report.rps_sum += rps(probs, actual)
                     report.brier_sum += brier(probs, actual)

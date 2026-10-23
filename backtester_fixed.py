@@ -171,6 +171,10 @@ class BacktesterFixed:
             # 逐场明细（含预测概率与真实结果），供二次分析
             "predictions": challenger.records,
             "accuracy": challenger.accuracy_rate or 0.0,
+            # 精确比分命中率：与方向命中率是两个量级的尺子，必须分开透传
+            "exact_rate": challenger.exact_rate,
+            "exact_n": challenger.exact_n,
+            "exact_hits": challenger.exact_hits,
         }
 
         out = dict(self.results)
