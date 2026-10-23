@@ -5,6 +5,6 @@ pytest>=9.1.1
 # supported" 并让 CI 直接变红——本机装过所以看不出来，全新 CI 环境必现。
 pytest-asyncio>=1.4.0
 # Web 看板为可选功能，但 api.py 的测试需要在 CI 里跑，故开发环境装上
-fastapi>=0.143.0
+fastapi>=0.143.3
 uvicorn>=0.27
 pyflakes>=4.0.3  # 静态检查：undefined name 门禁（tests/test_static_gate.py）
