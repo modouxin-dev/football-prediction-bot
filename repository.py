@@ -29,6 +29,21 @@ log = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = None  # 由 paths.DB_PATH 统一决定（默认 /data/football.db）
 
+
+def _dump_fixture_json(fixture: Any) -> str | None:
+    """把单场原始赛程序列化成 JSON；不可序列化或为空时返回 None。
+
+    序列化失败绝不能让「保存预测」整条链路失败——赛程快照只是可追溯性数据，
+    丢了大不了回到「重新拉取」，但不该把预测结果一起弄丢。
+    """
+    if not isinstance(fixture, dict) or not fixture:
+        return None
+    try:
+        return json.dumps(fixture, ensure_ascii=False, default=str)
+    except (TypeError, ValueError) as exc:
+        log.warning("赛程快照序列化失败，本次不落盘：%s", exc)
+        return None
+
 # 写锁重试：云环境（Railway Volume）下 SQLite 并发写冲突远高于本地
 DEFAULT_WRITE_RETRIES = 3        # 取锁失败后的重试次数
 BACKOFF_BASE_SECONDS = 0.02      # 退避基数：20ms → 40ms → 80ms
@@ -472,6 +487,55 @@ class PredictionRepository:
         self._ensure_backtest_run_columns()
         self._ensure_signal_ab_columns()
         self._seed_signal_registry()
+        self._ensure_prediction_fixture_column()
+
+    PREDICTION_FIXTURE_COLUMN = "fixture_json"
+
+    def _ensure_prediction_fixture_column(self) -> None:
+        """为旧库补上 predictions.fixture_json：单场比赛的原始赛程快照。
+
+        没有它，赛程缓存（TTL 10 分钟）过期或机器人重启后，用户点开历史推送
+        卡片就会误报「该场比赛已不在今日赛程中」——预测明明算过、记录还在，
+        却因为重新拉取的今日赛程里没有它而打不开。快照落库后，
+        只要这场比赛算过一次，任何时候都能点开。补列幂等，失败不拖垮启动。
+        """
+        try:
+            conn = self._connect()
+            existing = {r["name"] for r in conn.execute("PRAGMA table_info(predictions)")}
+            if self.PREDICTION_FIXTURE_COLUMN not in existing:
+                conn.execute("ALTER TABLE predictions ADD COLUMN fixture_json TEXT")
+            conn.commit()
+        except Exception as exc:
+            log.warning("补建 predictions.fixture_json 列失败：%s", exc)
+
+    def get_fixture_json(self, fixture_id) -> dict[str, Any] | None:
+        """取回该场比赛的原始赛程快照；没有快照返回 None（不抛异常）。
+
+        快照缺失有两种正常情况：旧库补列前保存的预测、以及从未算过的比赛。
+        两种情况都由上层按「确实找不到」处理，不伪装成数据源故障。
+        """
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT fixture_json FROM predictions WHERE fixture_id = ?",
+                (str(fixture_id),),
+            ).fetchone()
+        except Exception as exc:
+            log.warning("读取赛程快照失败：%s", exc)
+            return None
+        if row is None:
+            return None
+        try:
+            raw = row["fixture_json"]
+        except (IndexError, KeyError, TypeError):
+            return None
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        return data if isinstance(data, dict) else None
 
     # 旧库补列：精确的比分口径与语料窗口。与 signal_ab 同一套幂等机制。
     BACKTEST_RUN_COLUMNS = {
@@ -642,15 +706,17 @@ class PredictionRepository:
                 """INSERT INTO predictions
                    (fixture_id, season, league, home, away, kickoff, model_version,
                     source, level_key, result, home_prob, draw_prob, away_prob,
-                    best_score, created_at, inputs)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    best_score, created_at, inputs, fixture_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(fixture_id) DO UPDATE SET
                      season=excluded.season, kickoff=excluded.kickoff,
                      model_version=excluded.model_version, source=excluded.source,
                      level_key=excluded.level_key, result=excluded.result,
                      home_prob=excluded.home_prob, draw_prob=excluded.draw_prob,
                      away_prob=excluded.away_prob, best_score=excluded.best_score,
-                     created_at=excluded.created_at, inputs=excluded.inputs""",
+                     created_at=excluded.created_at, inputs=excluded.inputs,
+                     -- 新快照为空时保留旧快照：重算预测不该把已保存的赛程数据抹掉
+                     fixture_json=COALESCE(excluded.fixture_json, predictions.fixture_json)""",
                 (
                     str(prediction.fixture_id),
                     int(prediction.season or 0),
@@ -668,6 +734,7 @@ class PredictionRepository:
                     best_score,
                     prediction.created_at.isoformat(),
                     json.dumps(getattr(prediction, "inputs", {}), ensure_ascii=False),
+                    _dump_fixture_json(getattr(prediction, "fixture", None)),
                 ),
             )
             conn.commit()
