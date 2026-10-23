@@ -232,6 +232,7 @@ def load_corpus(repo, competition: str = "", *, div: str = DEFAULT_DIV,
         merged.values(),
         key=lambda m: (m.get("utc_date") or "", str(m.get("fixture_id") or "")),
     )
+    _dates = sorted(m.get("utc_date") or "" for m in matches if m.get("utc_date"))
     info = {
         "db": len(db_rows),
         "history": history_added,
@@ -247,5 +248,10 @@ def load_corpus(repo, competition: str = "", *, div: str = DEFAULT_DIV,
             str(m.get("competition") or "") for m in matches
             if m.get("competition")
         }),
+        # 语料窗口：回测每天都跑，但语料固定时 20 条记录会一字不差，
+        # 看不出模型在变好还是变坏。把窗口边界一起存下来，
+        # 配合 n_new（相对上次的增量）才能判断"这次到底新增了多少样本"。
+        "window_start": _dates[0][:10] if _dates else None,
+        "window_end": _dates[-1][:10] if _dates else None,
     }
     return matches, info

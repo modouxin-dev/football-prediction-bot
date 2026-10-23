@@ -429,19 +429,36 @@ function backtestCard(bt, noHead){
   }
   const rows = (bt.items||[]).map(r => {
     const acc  = r.accuracy  == null ? '—' : (r.accuracy*100).toFixed(2)+'%';
+    // 精确比分：与方向命中是两把不同的尺子，绝不合并成一列显示
+    const ex   = r.exact_rate == null ? '—' : (r.exact_rate*100).toFixed(2)+'%';
     const ll   = r.log_loss  == null ? '—' : Number(r.log_loss).toFixed(4);
     const rps  = r.rps       == null ? '—' : Number(r.rps).toFixed(4);
     const dbc  = r.corpus_db ?? 0, cvc = r.corpus_csv ?? 0;
+    // 样本增量：0 表示这次语料没长，数字与上次完全一样属于正常
+    const nw   = r.n_new == null ? '—' : (r.n_new > 0 ? '+'+r.n_new : '0');
     return `<tr><td>${esc(String(r.created_at||'').slice(0,16).replace('T',' '))}</td>`
       + `<td>${esc(r.variant||'')}</td><td class="num">${r.n ?? 0}</td>`
-      + `<td class="num">${acc}</td><td class="num">${ll}</td><td class="num">${rps}</td>`
+      + `<td class="num" title="方向命中率：猜中主胜/平/客胜">${acc}</td>`
+      + `<td class="num" title="精确比分命中率：猜中具体比分如 2-1">${ex}</td>`
+      + `<td class="num">${ll}</td><td class="num">${rps}</td>`
+      + `<td class="num" title="相比上次回测，语料新增的场次数">${nw}</td>`
       + `<td class="num">${dbc}/${cvc}</td><td>${esc(r.verdict||'')}</td></tr>`;
   }).join('');
+  const win = (bt.items && bt.items[0] && (bt.items[0].window_start || bt.items[0].window_end))
+    ? ` · 语料窗口 ${esc(String(bt.items[0].window_start||'')).slice(0,10)} → ${esc(String(bt.items[0].window_end||'')).slice(0,10)}`
+    : '';
   return head + `<div class="tblwrap"><table><thead><tr><th>时间</th><th>口径</th><th class="num">场次</th>`
-    + `<th class="num">命中率</th><th class="num">Log Loss</th><th class="num">RPS</th>`
-    + `<th class="num">库内/语料</th><th>判定</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    + `<th class="num">方向命中</th><th class="num">比分命中</th>`
+    + `<th class="num">Log Loss</th><th class="num">RPS</th>`
+    + `<th class="num">新增</th><th class="num">库内/语料</th><th>判定</th></tr></thead>`
+    + `<tbody>${rows}</tbody></table></div>`
     + `<div style="font-size:12px;color:var(--dim);margin-top:8px">`
-    + `共 ${bt.count} 条记录 · 「库内/语料」说明结论基于多少真实赛果，库内越多越贴近线上`
+    + `共 ${bt.count} 条记录 · 「库内/语料」说明结论基于多少真实赛果，库内越多越贴近线上${win}`
+    + `</div>`
+    + `<div style="font-size:12px;color:var(--dim);margin-top:4px">`
+    + `<b>两个口径不要混看</b>：方向命中 = 猜中主胜/平/客胜（随机基线 33%，45~55% 算良好）；`
+    + `比分命中 = 猜中具体比分如 2-1（业界仅 5~8%）。`
+    + `看到比分命中 5% 不是模型崩了，两把尺子差约 10 倍。`
     + `</div></div>`;
 }
 

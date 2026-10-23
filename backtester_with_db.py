@@ -120,6 +120,12 @@ class BacktesterWithDB:
             "total_predictions": result["total_predictions"],
             "correct_predictions": result["correct_predictions"],
             "accuracy": result["accuracy"],
+            # ↓ 与 accuracy 同批补回：精确比分口径若在这里丢掉，
+            # backtest_runs 的 exact_rate 恒为 NULL，看板那列永远显示 "—"，
+            # 于是又只剩「命中率」一个数字，口径混淆的问题原样复现。
+            "exact_rate": result.get("exact_rate"),
+            "exact_n": result.get("exact_n"),
+            "exact_hits": result.get("exact_hits"),
             "predictions": predictions,
             "accuracy_by_type": self._accuracy_by_type(predictions),
             "log_loss": result["log_loss"],
