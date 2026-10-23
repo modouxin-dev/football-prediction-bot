@@ -88,7 +88,7 @@ class _Ctx:
 
 
 class _Service:
-    """只提供 run_push 需要的 build_predictions。"""
+    """只提供 run_push 需要的 build_predictions / select_top_predictions。"""
 
     def __init__(self, predictions) -> None:
         self._p = predictions
@@ -96,6 +96,11 @@ class _Service:
 
     async def build_predictions(self, **kw):
         return self._p
+
+    def select_top_predictions(self, predictions, **kw):
+        # 本批测试断言的是收件人路由，不是筛选逻辑（筛选由 test_topn_* 覆盖），
+        # 这里必须原样返回，否则 1 场候选会被下限逻辑改写，测的就跑偏了。
+        return list(predictions)
 
 
 def _pred(fid: int = 1, minutes_ahead: int = 30):

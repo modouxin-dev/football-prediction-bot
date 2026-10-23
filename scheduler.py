@@ -192,6 +192,14 @@ async def run_push(app, *, widen: bool = False, chat_id: object = None) -> PushR
         elif service.last_note:
             note = service.last_note  # 降级/空结果的真实原因，必须让用户看到
 
+    # 只推最有把握的 N 场：场次铺满会把重点淹没，低把握场次还会拉低整体命中率。
+    # 砍掉的场数必须写进 note，否则用户无从判断是「今天只有 3 场」还是「被砍到 3 场」。
+    picked = service.select_top_predictions(predictions)
+    topn_note = service.last_note if service.last_note != note else None
+    if topn_note:
+        note = f"{note}\n{topn_note}" if note else topn_note
+    predictions = picked
+
     sender = NotificationManager(app)
     await sender.send_digest(predictions, note=note, chat_id=chat_id)
     # PushResult.sent 语义保持「推送了多少场比赛」；分页只是传输细节，

@@ -132,6 +132,10 @@ class Settings:
     log_level: str
     max_matches: int
     lookahead_hours: int
+    topn_enabled: bool
+    topn_min: int
+    topn_max: int
+    topn_min_confidence: float
     season_mode: str  # "auto"（自动识别可用赛季并降级）/ "fixed"（只用目标赛季，不降级）
     allow_season_fallback: bool
     # 备用数据源 football-data.org（主源不可用时接管赛程/赛果/积分榜）
@@ -213,6 +217,20 @@ def _get_int(env: Mapping[str, str], name: str, default: int, minimum: int = 1) 
         raise ConfigError(f"{name} 必须是整数，当前值：{raw!r}") from None
     if value < minimum:
         raise ConfigError(f"{name} 不能小于 {minimum}，当前值：{value}")
+    return value
+
+
+def _get_float(env: Mapping[str, str], name: str, default: float,
+               minimum: float = 0.0, maximum: float = 1.0) -> float:
+    raw = _get(env, name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(f"{name} 必须是数字，当前值：{raw!r}") from None
+    if not (minimum <= value <= maximum):
+        raise ConfigError(f"{name} 必须在 {minimum}~{maximum} 之间，当前值：{value}")
     return value
 
 
@@ -487,6 +505,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         # 默认 3 会让「赛程 4 场 / 预测 3 场」这种不一致成为常态。
         max_matches=_get_int(env, "MAX_MATCHES", 50),
         lookahead_hours=_get_int(env, "LOOKAHEAD_HOURS", 36),
+        # 只推最有把握的 N 场：场次铺满会把重点淹没，且低把握场次拉低整体命中率。
+        # 下限保证「有东西可推」，上限保证「宁缺毋滥」，两者之间是弹性区间。
+        topn_enabled=parse_bool(_get(env, "TOPN_ENABLED"), True),
+        topn_min=_get_int(env, "TOPN_MIN", 3),
+        topn_max=_get_int(env, "TOPN_MAX", 7),
+        topn_min_confidence=_get_float(env, "TOPN_MIN_CONFIDENCE", 0.0),
         season=season,
         season_mode=season_mode,
         allow_season_fallback=allow_season_fallback,
