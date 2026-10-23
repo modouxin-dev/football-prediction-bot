@@ -13,6 +13,48 @@
 > CHANGELOG 描述**从哪个版本变成现在这样**。
 ---
 
+## [待提交] 2026-10-24 · 文档-代码一致性全量审计与同步
+
+> 触发：审计发现 36 份文档与 188 个 `.py` 之间存在系统性漂移。
+> 方法：脚本化提取 MD 中对命令 / 环境变量 / 函数 / 文件的引用，逐一比对代码实体。
+> 本次**只改文档**，未改动任何运行期代码。
+
+### 实测发现（脚本可复现）
+
+| 类别 | 数量 | 处置 |
+| --- | --- | --- |
+| 代码注册但 README 未记录的命令 | 3（`/panel` `/sotprobe` `/teammiss`） | 已补入命令表 |
+| 代码读取但 `.env.example` 未记录的环境变量 | 27 | 已补入并注明默认值 |
+| README 声称可调、实为代码常量的配置 | 2（`SIGNAL_STRONG_THRESHOLD` `SIGNAL_MIN_SAMPLES`） | 已注明需改代码 |
+| 文档与代码均已不存在的配置项 | 1（`SAVE_CHARTS`） | 已标注移除 |
+| 头部声明过时 / 作废的文档 | 13 | README 建索引分区 |
+| ⛔ 已作废文档 | 2 | 移入 `archive/` |
+
+### 改动文件
+
+- `README.md`：命令表补 3 项；signal 配置表区分「环境变量 vs
+  代码常量」；`SAVE_CHARTS` 标注移除；「文档」章节重建为
+  **当前有效 / 已过时**两个分区
+- `.env.example`：补 27 个变量（多联赛、市场锚定、赛前信号、强度权重、
+  推送时间、子目录、部署平台注入），`SAVE_CHARTS` 注释为已移除
+- `archive/P1_DEFECT_FIX_REPORT.md`、`archive/PHASE5_COMPLETION.md`
+  （自根目录移入）
+
+### 同步复核的前期结论（仍成立）
+
+- `backtest*.py` = 5 个（`backtest_cli.py` 已删除）
+- `scheduler.py` 中 `BacktesterFixed` 残留 = 0
+- `repository.py` 中 `api_quota` / `backtest_runs` 各仅 1 处建表定义
+- `backtester.py` 假数据已改为委托 `BacktesterFixed` 真实链路
+- `backtest_corpus.py` 的 `DEFAULT_DIVS = ("E0","SP1","I1","D1","F1")`
+
+### 未闭环（沿用既有阻塞）
+
+`data/history/` 仍只有英超 3 份 CSV（源站 403，非脚本问题），
+故 `by_div` 中非 E0 分区恒为 0，多联赛回测对比表仍无法产出。
+
+---
+
 ## [补录] 2026-10-03 → 2026-10-22 · 194 笔提交的集中补录
 
 > **为什么是补录**：上一笔记录 `f34632e9` 之后累计 **194 笔提交**未入档
