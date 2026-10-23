@@ -1619,6 +1619,42 @@ class PredictionService:
             log.warning("今日赛程：%s", note)
         return fixtures
 
+    def _match_fixture(self, fixtures: list[dict[str, Any]] | None, fixture_id) -> dict[str, Any] | None:
+        """在一批赛程里按 ID 找单场比赛；赛程为空返回 None。"""
+        if not fixtures:
+            return None
+        return next(
+            (f for f in fixtures if str((f.get("fixture") or {}).get("id")) == str(fixture_id)),
+            None,
+        )
+
+    async def _resolve_fixture(self, fixture_id, fixtures: list[dict[str, Any]] | None) -> dict[str, Any]:
+        """三级查找单场比赛：传入缓存 → 重新拉取今日赛程 → 库内赛程快照。
+
+        前两级任一命中即用；都不命中才读库里保存的快照。第三级是修复
+        「点开历史推送卡片提示『该场比赛已不在今日赛程中』」的关键——
+        赛程缓存 TTL 只有 10 分钟，比赛一旦开赛或跨天，重新拉取的今日赛程里
+        就没有它了，可用户手上的卡片还在。只要这场比赛算过一次，快照就在库里，
+        卡片就永远点得开（含机器人重启后）。快照也没有才抛 KeyError，
+        由上层如实提示，不把「缓存过期」伪装成「比赛不存在」。
+        """
+        fx = self._match_fixture(fixtures, fixture_id)
+        if fx is not None:
+            return fx
+        if fixtures is None:
+            try:
+                fx = self._match_fixture(await self.get_today_fixtures(), fixture_id)
+            except Exception as exc:  # 拉取失败不吞掉：继续用快照，但留下真实原因
+                log.warning("重新拉取今日赛程失败，改用库内快照（fixture=%s）：%s", fixture_id, exc)
+                fx = None
+            if fx is not None:
+                return fx
+        fx = self.repo.get_fixture_json(fixture_id) if self.repo is not None else None
+        if fx is None:
+            raise KeyError(fixture_id)
+        log.info("赛程缓存已失效，用库内快照恢复比赛 fixture=%s", fixture_id)
+        return fx
+
     # ---- 单场比赛预测 ----------------------------------------------------------
     def _lookup_fixture(self, fixture_id, fixtures: list[dict[str, Any]] | None) -> dict[str, Any] | None:
         """在给定赛程列表里按 ID 找原始赛程数据（主源数字 ID / 备用源 fd- ID 统一按字符串比）。"""
