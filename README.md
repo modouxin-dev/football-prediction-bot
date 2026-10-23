@@ -25,6 +25,9 @@ Telegram 足球量化预测机器人：泊松模型给出内部基准，赔率�
 | `/backfill` | 整季赛程回填入库：`/backfill` 当前赛季 · `/backfill 2024` 指定赛季 · `/backfill all` 全部可用赛季 | 管理员 |
 | `/storage` | 存储自检：写入/读取/数据库/挂载/最后写入时间 | 管理员 |
 | `/diag` | 主源自诊断：绕开调度层直连主源，多联赛探测赛程 / 赔率 / 伤停端点，显示真实失败原因 | 管理员 |
+| `/sotprobe` | 数据源契约探测：逐端点验证返回结构是否符合预期，输出缺口清单 | 管理员 |
+| `/teammiss` | 队名埋点排查：列出未收录的队名及其出现次数，用于补齐队名索引 | 管理员 |
+| `/panel` | 展开 / 收起底部快捷面板 | 所有人 |
 
 推送消息下方的按钮会**在原消息上切换视图**：📈 预测 · 🔍 深度分析（比分 Top5、大小球、双方进球、球队强度）· 📊 历史交锋 · 💰 赔率对比 · 🔄 刷新赔率。
 
@@ -73,7 +76,7 @@ Telegram 足球量化预测机器人：泊松模型给出内部基准，赔率�
 | `DATA_DIR` | 数据目录，默认 `/data`。**必须挂载持久卷** |
 | `DATABASE_PATH` | SQLite 路径，默认 `$DATA_DIR/football.db`。`DB_PATH` 与其等价，前者优先 |
 | `CACHE_DIR` / `CHART_DIR` / `EXPORT_DIR` / `BACKUP_DIR` | 各类子目录，默认在 `DATA_DIR` 下 |
-| `SAVE_CHARTS` | 默认 `false`，图表只在内存生成不落盘 |
+| ~~`SAVE_CHARTS`~~ | **已移除**：代码不再读取该变量，图表始终只在内存生成、不落盘 |
 
 > ⚠️ **未挂载持久卷时，预测记录、赛果回写、Elo 评分会在容器重启后全部清零。**
 > `/data` 不可写时容器会**拒绝启动**（`docker-entrypoint.sh` 里 `exit 1`），
@@ -233,15 +236,34 @@ bot_handler.py (88 行)  ── 纯门面：Mixin 组装 BotUI + 兼容导出
 
 ## 文档
 
+**当前有效**（可据此判断项目状态）：
+
 | 文档 | 用途 |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 最终架构图、分层依赖规则、模块清单 |
-| [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md) | 部署清单与故障速查 |
-| [PROGRESS.md](PROGRESS.md) | 各阶段详情与实测记录 |
 | [CHANGELOG.md](CHANGELOG.md) | **每次提交改了什么**（含实测证据）—— 想知道「哪里动过」先看这个 |
+| [PROGRESS.md](PROGRESS.md) | 各阶段详情与实测记录（**第 27 阶段**为最新） |
+| [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md) | 部署清单与故障速查 |
+| [CI.md](CI.md) | CI 工作流与本地复现 |
+| [SECURITY_HARDENING.md](SECURITY_HARDENING.md) | 密钥与日志脱敏处理 |
+| [docs/MARKET_FUSION_EVAL.md](docs/MARKET_FUSION_EVAL.md) | 市场锚定融合的评估方法 |
+
+**已过时**（2026-10-11 复核，作者本人已在文首标注，**请勿据此判断现状**）：
+
+| 文档 | 状态 |
+|---|---|
+| `DEFECT_ANALYSIS.md` / `DEFECT_FIXES.md` / `FINAL_DEFECT_SUMMARY.md` | 部分过时 |
+| `FINAL_DELIVERY_REPORT.md` / `FINAL_PROJECT_SUMMARY.md` | 部分数字过时 |
+| `DISASTER_RECOVERY.md` / `PROJECT_COMPLETION_CHECKLIST.md` | 部分过时 |
+| `PHASE3_SUMMARY.md` / `PHASE6_7_SUMMARY.md` / `UPGRADE_ROADMAP.md` | 部分过时 |
+| `ARCHITECTURE.md` | 部分过时（模块清单已增删，以代码为准） |
+| `archive/P1_DEFECT_FIX_REPORT.md` | ⛔ 已作废 |
+| `archive/PHASE5_COMPLETION.md` | ⛔ 已作废 |
 
 > 📌 文档与代码同步维护：**每次推送都会同步更新 CHANGELOG**，
 > 涉及命令 / 环境变量 / 展示变化时同时更新本文件与 PROGRESS.md。
+>
+> ⚠️ 上表「已过时」清单由 2026-10-24 全量审计实测得出：比对 188 个 `.py`
+> 与 36 个 `.md`，逐条验证命令、环境变量、函数引用的真实存在性。
 
 ## 部署到 Railway
 
@@ -480,12 +502,15 @@ xG 等实时数据），见下文「尚未考虑」。
 
 配置项：
 
-| 变量 | 默认 | 说明 |
+| 变量 / 常量 | 默认 | 说明 |
 | --- | --- | --- |
 | `SIGNAL_AB_ENABLED` | 开启 | 关闭后不再写入对照记录（预测行为不变） |
-| `SIGNAL_STRONG_THRESHOLD` | `0.15` | 强信号阈值，主指标只统计达到该强度的场次 |
-| `SIGNAL_MIN_SAMPLES` | `30` | 复盘「样本不足」阈值，低于该值只报数量不报命中率 |
 | `SIGNAL_AB_WRITE_ENABLED` | 关闭 | 权重**写**权限，默认只读；开启后才允许改信号权重 |
+
+> ⚠️ `SIGNAL_STRONG_THRESHOLD`（强信号阈值）与 `SIGNAL_MIN_SAMPLES`（样本不足阈值）
+> **不是环境变量**，而是 `signal_ab.py` 里的代码常量
+> （`DEFAULT_STRONG_THRESHOLD = 0.15` / `DEFAULT_MIN_SAMPLES = 30`）。
+> 改它们需要改代码，不能靠改 `.env` 生效。此前本表把它们列为可配置项，属文档错误，已更正。
 
 ### 权重治理：先模拟、再确认、只追加
 
