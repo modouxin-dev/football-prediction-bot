@@ -527,6 +527,68 @@ class PredictionService:
             predictions.append(prediction)
         return predictions
 
+    @staticmethod
+    def confidence_of(pred: Prediction) -> float:
+        """把握度：模型给出的最高结果概率（0~1）。
+
+        用它排序而不是任何人工规则——它就是模型自己认为「最可能发生的那个结果」
+        的概率，是模型真实置信程度的直接读数。
+        """
+        a = getattr(pred, "analysis", None) or {}
+        vals = []
+        for key in ("win_prob", "draw_prob", "loss_prob"):
+            try:
+                vals.append(float(a.get(key) or 0.0))
+            except (TypeError, ValueError):
+                vals.append(0.0)
+        return max(vals) if vals else 0.0
+
+    def select_top_predictions(
+        self, predictions: list[Prediction], *,
+        min_n: int | None = None, max_n: int | None = None,
+        enabled: bool | None = None, min_confidence: float | None = None,
+    ) -> list[Prediction]:
+        """只保留最有把握的 N 场（默认 3~7 场）。
+
+        为什么砍场次：一天 30 场全推等于没推，重点被淹没；而且低把握场次会把
+        整体命中率往下拉。「少而精」是唯一能同时提高可读性和命中率的手段。
+
+        下限 / 上限语义：
+            - 可用场次 >= 上限：只推上限场（宁缺毋滥）；
+            - 下限 <= 可用 < 上限：全部推出，不再凑数；
+            - 可用 < 下限：今天确实没那么多比赛，全推，不虚构。
+
+        质量线（TOPN_MIN_CONFIDENCE > 0 时生效）：连门槛都没够到的场次直接不推。
+        默认 0（不启用），保证「今天有球就有推送」的既有行为不被意外改变。
+        """
+        s = self.settings
+        pool = list(predictions or [])
+        if not (getattr(s, "topn_enabled", True) if enabled is None else enabled):
+            return pool
+        lo = int(getattr(s, "topn_min", 3) if min_n is None else min_n)
+        hi = int(getattr(s, "topn_max", 7) if max_n is None else max_n)
+        if hi < lo:
+            lo, hi = hi, lo
+        floor = float(getattr(s, "topn_min_confidence", 0.0) if min_confidence is None else min_confidence)
+        if floor > 0:
+            pool = [p for p in pool if self.confidence_of(p) >= floor]
+        ranked = sorted(pool, key=lambda p: (-self.confidence_of(p), p.kickoff))
+        keep = ranked[:hi]
+        # 截断必须留痕：砍掉多少、按什么标准砍，都要让用户看得见
+        dropped = len(ranked) - len(keep)
+        if dropped > 0:
+            tail = f"；把握度门槛 {floor:.0%}" if floor > 0 else ""
+            self.last_note = (
+                f"ℹ️ 今日共 {len(ranked)} 场候选，只推送把握度最高的 "
+                f"{len(keep)} 场（上限 {hi} 场）{tail}。"
+            )
+        elif floor > 0 and not keep:
+            self.last_note = (
+                f"ℹ️ 今日 {len(predictions or [])} 场候选均未达到把握度门槛 "
+                f"{floor:.0%}，本次不推送。"
+            )
+        return keep
+
     async def auto_predict_store(
         self, league_ids: tuple[int, ...], days: int = 2, cap: int = 60
     ) -> dict[str, Any]:
@@ -1558,17 +1620,46 @@ class PredictionService:
         return fixtures
 
     # ---- 单场比赛预测 ----------------------------------------------------------
+    def _lookup_fixture(self, fixture_id, fixtures: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+        """在给定赛程列表里按 ID 找原始赛程数据（主源数字 ID / 备用源 fd- ID 统一按字符串比）。"""
+        key = str(fixture_id)
+        for fx in (fixtures or ()):
+            if str((fx.get("fixture") or {}).get("id")) == key:
+                return fx
+        return None
+
+    async def _resolve_fixture(self, fixture_id, fixtures: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """按 ID 取原始赛程数据，三级兜底，取不到才抛 KeyError。
+
+        为什么必须三级：赛程缓存 TTL 只有 10 分钟（football_data.py:TTL_MATCHES），
+        过期后用户再点昨天/几小时前的卡片，列表里已经没有这场，于是上层只能报
+        「该场比赛已不在今日赛程中」——明明卡片还摆在屏幕上。
+
+        1) 调用方传入的赛程缓存；
+        2) 已预测过的记录：Prediction.fixture 保存了当时的原始数据快照，
+           只要这场算过一次，缓存过期、比赛已开赛都还能点开；
+        3) 重新拉取今日赛程（含已开赛 / 已完场，不做未开赛过滤）。
+        """
+        fx = self._lookup_fixture(fixture_id, fixtures)
+        if fx is not None:
+            return fx
+        # 2) 预测快照兜底：机器人重启或缓存过期后仍能点开
+        snap = self._store.get(str(fixture_id))
+        if snap is not None and getattr(snap, "fixture", None):
+            return snap.fixture
+        # 3) 重新拉取，仍找不到才认定真的不在
+        fx = self._lookup_fixture(fixture_id, await self.get_today_fixtures())
+        if fx is not None:
+            return fx
+        raise KeyError(fixture_id)
+
     async def predict_fixture(self, fixture_id: int, fixtures: list[dict[str, Any]] | None = None) -> Prediction:
         """为指定的一场比赛生成预测。
 
-        fixtures 为今日赛程缓存；不传则重新拉取一次。找不到该场比赛抛 KeyError，
-        API 失败抛 APIError（由上层展示真实原因）。
+        fixtures 为今日赛程缓存；不传则先查预测快照、再重新拉取一次。
+        找不到该场比赛抛 KeyError，API 失败抛 APIError（由上层展示真实原因）。
         """
-        if fixtures is None:
-            fixtures = await self.get_today_fixtures()
-        fx = next((f for f in fixtures if str((f.get("fixture") or {}).get("id")) == str(fixture_id)), None)
-        if fx is None:
-            raise KeyError(fixture_id)
+        fx = await self._resolve_fixture(fixture_id, fixtures)
         # 无比赛数据时禁止生成预测：缺开赛时间或队伍信息的比赛，预测无从谈起
         kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
         if kickoff is None:
@@ -1588,11 +1679,7 @@ class PredictionService:
         近期状态与历史交锋属于可选数据，失败时降级为「暂无可靠数据」并附上真实原因，
         绝不把权限错误伪装成「没有比赛 / 没有数据」。
         """
-        if fixtures is None:
-            fixtures = await self.get_today_fixtures()
-        fx = next((f for f in fixtures if str((f.get("fixture") or {}).get("id")) == str(fixture_id)), None)
-        if fx is None:
-            raise KeyError(fixture_id)
+        fx = await self._resolve_fixture(fixture_id, fixtures)
         kickoff = parse_kickoff((fx.get("fixture") or {}).get("date"))
         if kickoff is None:
             raise APIError("该场比赛缺少开赛时间，无法分析")

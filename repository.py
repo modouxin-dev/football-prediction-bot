@@ -184,6 +184,18 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     verdict       TEXT,
     by_level      TEXT,             -- JSON：各信心等级的命中率
     calibration   TEXT,             -- JSON：分档校准
+    -- 精确比分口径：与 accuracy（方向命中）是两个量级的尺子，
+    -- 早期只存 accuracy，看板写「命中率」时读者一律理解成方向命中，
+    -- 于是 5% 被当成模型崩了。两个口径必须分列存储，不可再合并。
+    exact_n       INTEGER,          -- 参与精确比分评估的场次
+    exact_hits    INTEGER,
+    exact_rate    REAL,             -- 精确比分命中率（猜中 2-1），业界 5~8%
+    -- 语料窗口：回测每天跑，但语料固定时结果逐字相同（20 条记录一模一样），
+    -- 看不出模型在变好还是变坏。记录窗口边界 + 相对上次的增量，
+    -- 才能让「每天跑一次」产生可观测的变化。
+    window_start  TEXT,             -- 语料最早比赛日期
+    window_end    TEXT,             -- 语料最晚比赛日期
+    n_new         INTEGER,          -- 相比上次同口径回测，语料新增的场次数
     created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bt_comp_created
@@ -294,41 +306,22 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 """
 
-QUOTA_SCHEMA = """
-CREATE TABLE IF NOT EXISTS api_quota (
-    day      TEXT NOT NULL,
-    source   TEXT NOT NULL,
-    n        INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (day, source)
-);
+def _ddl_of(table: str) -> str:
+    """从 SCHEMA 里切出某张表的建表语句。
 
--- 回测结果留档：每次回测都落盘，重启可查、跨部署保留。
--- 没有它，回测结论只活在进程内存里，容器一重启就丢失，
--- 也就无从判断"模型是在变好还是在变差"。
-CREATE TABLE IF NOT EXISTS backtest_runs (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    competition   TEXT NOT NULL,
-    season        TEXT,             -- NULL = 全部赛季
-    variant       TEXT NOT NULL,
-    min_history   INTEGER NOT NULL,
-    n             INTEGER NOT NULL, -- 评估场次
-    hits          INTEGER NOT NULL,
-    accuracy      REAL,
-    log_loss      REAL,
-    rps           REAL,
-    brier         REAL,
-    ece           REAL,
-    rho           REAL,
-    corpus_db     INTEGER,          -- 语料中来自数据库的场数
-    corpus_csv    INTEGER,          -- 语料中来自内置 CSV 的场数
-    verdict       TEXT,
-    by_level      TEXT,             -- JSON：各信心等级的命中率
-    calibration   TEXT,             -- JSON：分档校准
-    created_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_bt_comp_created
-    ON backtest_runs(competition, created_at);
-"""
+    配额模块（record_quota / read_quota）会用**独立的 sqlite 连接**写
+    api_quota，且可能在主库初始化之前就被调用。它需要一份能保证表存在的
+    DDL。早先这里是把整段 DDL 又抄了一遍，和 SCHEMA 里的那份形成双份定义
+    ——两份当时一致，但将来给表加字段时只改一处就会埋雷。
+    现在改为直接从 SCHEMA 切，物理上只有一份文本，不可能再走偏。
+    """
+    marker = f"CREATE TABLE IF NOT EXISTS {table} "
+    start = SCHEMA.index(marker)
+    return SCHEMA[start:SCHEMA.index(");", start) + 2]
+
+
+# 配额模块专用：内容与 SCHEMA 中的 api_quota 定义逐字同源。
+QUOTA_SCHEMA = _ddl_of("api_quota")
 
 _local = threading.local()
 
@@ -476,8 +469,47 @@ class PredictionRepository:
             conn.commit()
         except Exception as exc:  # 补列失败不能拖垮启动
             log.warning("补建比赛统计列失败：%s", exc)
+        self._ensure_backtest_run_columns()
         self._ensure_signal_ab_columns()
         self._seed_signal_registry()
+
+    # 旧库补列：精确的比分口径与语料窗口。与 signal_ab 同一套幂等机制。
+    BACKTEST_RUN_COLUMNS = {
+        "exact_n": "INTEGER",
+        "exact_hits": "INTEGER",
+        "exact_rate": "REAL",
+        "window_start": "TEXT",
+        "window_end": "TEXT",
+        "n_new": "INTEGER",
+    }
+
+    def _ensure_backtest_run_columns(self) -> None:
+        """为旧库补上「精确比分口径」与「语料窗口」列。
+
+        缺列时 INSERT 会因列数不匹配直接失败（回测白跑），
+        但这里只补列、不改 INSERT 语义，因此新老代码共用同一张表是安全的。
+        """
+        name = "backtest_runs_exact_and_window_v1"
+        if self._migration_done(name):
+            return
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='backtest_runs'").fetchall()
+            if not rows:
+                self._mark_migration(name)
+                return
+            existing = {r["name"] for r in
+                        conn.execute("PRAGMA table_info(backtest_runs)")}
+            for col, ddl in self.BACKTEST_RUN_COLUMNS.items():
+                if col not in existing:
+                    conn.execute(
+                        f"ALTER TABLE backtest_runs ADD COLUMN {col} {ddl}")
+            conn.commit()
+            self._mark_migration(name)
+        except Exception as exc:  # 补列失败不能拖垮启动
+            log.warning("补建回测口径列失败：%s", exc)
 
     # 旧库补列必须幂等：跑两次不能报错、不能重复补。
     # 完成后写一条迁移标记，下次启动先查标记，避免每次扫全表。
@@ -982,11 +1014,30 @@ class PredictionRepository:
         corpus = result.get("corpus") or {}
         try:
             conn = self._connect()
+
+            # 语料增量：与上一次同口径回测比，语料多了多少场。
+            # 没有这个数字，每天一条一模一样的记录会让人误以为"跑了很多次验证"，
+            # 实际是同一次验证重复了 N 遍。n_new=0 就是在明确说：样本没长。
+            n_new = None
+            try:
+                prev = conn.execute(
+                    "SELECT corpus_db, corpus_csv FROM backtest_runs "
+                    "WHERE competition=? AND variant=? ORDER BY id DESC LIMIT 1",
+                    (str(competition), str(variant))).fetchone()
+                if prev is not None:
+                    prev_total = (prev["corpus_db"] or 0) + (prev["corpus_csv"] or 0)
+                    cur_total = (corpus.get("db") or 0) + (corpus.get("history") or 0)
+                    n_new = max(0, cur_total - prev_total)
+            except Exception as exc:
+                log.warning("计算语料增量失败（不影响落盘）：%s", exc)
+
             cur = conn.execute(
                 "INSERT INTO backtest_runs (competition, season, variant, min_history, "
                 "n, hits, accuracy, log_loss, rps, brier, ece, rho, "
-                "corpus_db, corpus_csv, verdict, by_level, calibration, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "corpus_db, corpus_csv, verdict, by_level, calibration, "
+                "exact_n, exact_hits, exact_rate, window_start, window_end, n_new, "
+                "created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     str(competition), season, str(variant), int(min_history),
                     int(result.get("total_predictions") or 0),
@@ -998,6 +1049,11 @@ class PredictionRepository:
                     result.get("verdict"),
                     json.dumps(result.get("by_level") or {}, ensure_ascii=False),
                     json.dumps(result.get("calibration") or {}, ensure_ascii=False),
+                    int(result.get("exact_n") or 0),
+                    int(result.get("exact_hits") or 0),
+                    result.get("exact_rate"),
+                    corpus.get("window_start"), corpus.get("window_end"),
+                    n_new,
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 ),
             )
@@ -1042,7 +1098,8 @@ class PredictionRepository:
             conn = self._connect()
             rows = list(conn.execute(
                 "SELECT id, competition, season, variant, n, accuracy, log_loss, "
-                "rps, corpus_db, corpus_csv, verdict, created_at "
+                "rps, corpus_db, corpus_csv, verdict, created_at, "
+                "exact_n, exact_hits, exact_rate, window_start, window_end, n_new "
                 "FROM backtest_runs WHERE competition=? ORDER BY id DESC LIMIT ?",
                 (str(competition), int(limit))))
         except Exception as exc:

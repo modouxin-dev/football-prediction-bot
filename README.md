@@ -25,6 +25,9 @@ Telegram 足球量化预测机器人：泊松模型给出内部基准，赔率�
 | `/backfill` | 整季赛程回填入库：`/backfill` 当前赛季 · `/backfill 2024` 指定赛季 · `/backfill all` 全部可用赛季 | 管理员 |
 | `/storage` | 存储自检：写入/读取/数据库/挂载/最后写入时间 | 管理员 |
 | `/diag` | 主源自诊断：绕开调度层直连主源，多联赛探测赛程 / 赔率 / 伤停端点，显示真实失败原因 | 管理员 |
+| `/sotprobe` | 数据源契约探测：逐端点验证返回结构是否符合预期，输出缺口清单 | 管理员 |
+| `/teammiss` | 队名埋点排查：列出未收录的队名及其出现次数，用于补齐队名索引 | 管理员 |
+| `/panel` | 展开 / 收起底部快捷面板 | 所有人 |
 
 推送消息下方的按钮会**在原消息上切换视图**：📈 预测 · 🔍 深度分析（比分 Top5、大小球、双方进球、球队强度）· 📊 历史交锋 · 💰 赔率对比 · 🔄 刷新赔率。
 
@@ -73,7 +76,7 @@ Telegram 足球量化预测机器人：泊松模型给出内部基准，赔率�
 | `DATA_DIR` | 数据目录，默认 `/data`。**必须挂载持久卷** |
 | `DATABASE_PATH` | SQLite 路径，默认 `$DATA_DIR/football.db`。`DB_PATH` 与其等价，前者优先 |
 | `CACHE_DIR` / `CHART_DIR` / `EXPORT_DIR` / `BACKUP_DIR` | 各类子目录，默认在 `DATA_DIR` 下 |
-| `SAVE_CHARTS` | 默认 `false`，图表只在内存生成不落盘 |
+| ~~`SAVE_CHARTS`~~ | **已移除**：代码不再读取该变量，图表始终只在内存生成、不落盘 |
 
 > ⚠️ **未挂载持久卷时，预测记录、赛果回写、Elo 评分会在容器重启后全部清零。**
 > `/data` 不可写时容器会**拒绝启动**（`docker-entrypoint.sh` 里 `exit 1`），
@@ -233,15 +236,34 @@ bot_handler.py (88 行)  ── 纯门面：Mixin 组装 BotUI + 兼容导出
 
 ## 文档
 
+**当前有效**（可据此判断项目状态）：
+
 | 文档 | 用途 |
 |---|---|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 最终架构图、分层依赖规则、模块清单 |
-| [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md) | 部署清单与故障速查 |
-| [PROGRESS.md](PROGRESS.md) | 各阶段详情与实测记录 |
 | [CHANGELOG.md](CHANGELOG.md) | **每次提交改了什么**（含实测证据）—— 想知道「哪里动过」先看这个 |
+| [PROGRESS.md](PROGRESS.md) | 各阶段详情与实测记录（**第 27 阶段**为最新） |
+| [DEPLOY_CHECKLIST.md](DEPLOY_CHECKLIST.md) | 部署清单与故障速查 |
+| [CI.md](CI.md) | CI 工作流与本地复现 |
+| [SECURITY_HARDENING.md](SECURITY_HARDENING.md) | 密钥与日志脱敏处理 |
+| [docs/MARKET_FUSION_EVAL.md](docs/MARKET_FUSION_EVAL.md) | 市场锚定融合的评估方法 |
+
+**已过时**（2026-10-11 复核，作者本人已在文首标注，**请勿据此判断现状**）：
+
+| 文档 | 状态 |
+|---|---|
+| `DEFECT_ANALYSIS.md` / `DEFECT_FIXES.md` / `FINAL_DEFECT_SUMMARY.md` | 部分过时 |
+| `FINAL_DELIVERY_REPORT.md` / `FINAL_PROJECT_SUMMARY.md` | 部分数字过时 |
+| `DISASTER_RECOVERY.md` / `PROJECT_COMPLETION_CHECKLIST.md` | 部分过时 |
+| `PHASE3_SUMMARY.md` / `PHASE6_7_SUMMARY.md` / `UPGRADE_ROADMAP.md` | 部分过时 |
+| `ARCHITECTURE.md` | 部分过时（模块清单已增删，以代码为准） |
+| `archive/P1_DEFECT_FIX_REPORT.md` | ⛔ 已作废 |
+| `archive/PHASE5_COMPLETION.md` | ⛔ 已作废 |
 
 > 📌 文档与代码同步维护：**每次推送都会同步更新 CHANGELOG**，
 > 涉及命令 / 环境变量 / 展示变化时同时更新本文件与 PROGRESS.md。
+>
+> ⚠️ 上表「已过时」清单由 2026-10-24 全量审计实测得出：比对 188 个 `.py`
+> 与 36 个 `.md`，逐条验证命令、环境变量、函数引用的真实存在性。
 
 ## 部署到 Railway
 
@@ -264,10 +286,11 @@ cp .env.example .env   # 填好之后
 python main.py
 pytest                 # 不联网，使用仿真的 API 响应
 
-# 回测：验证模型改动是否真的有效（真实数据）
-python backtest_cli.py --db /data/football.db
-# 或用模拟数据自检管线
-python backtest_cli.py --simulate 1140 --seeds 1,2,3
+# 回测：验证模型改动是否真的有效（真实数据，走机器人内命令）
+# 在 Telegram 里发送：
+#   /backtest          → 纯泊松（线上口径）
+#   /backtest elo      → 额外对比 泊松+Elo
+#   /backtest dc       → 额外对比 泊松+DC
 ```
 
 机器人内 `/backtest` 的样本为**库内赛果 ＋ 镜像内置历史赛季**
@@ -302,7 +325,7 @@ python backtest_cli.py --simulate 1140 --seeds 1,2,3
 - **⚠️ Value Bet 标记已移除**。1110 场实测：按 `edge > 5%` 下注的 ROI = **−16.26%**，且阈值越高亏得越多（>10% −17.85%、>15% −20.61%）；对照组「无脑跟市场热门」为 −5.04%，与庄家抽水 5.48% 的理论下限吻合，说明市场接近有效、模型挑不出便宜。原 🚀 标记会把「模型与市场分歧大」误示为「有便宜可捡」，与实测结论相反。推送中改以「模型差异」客观陈述，分歧大时标 ⚠️（提示模型不可信，而非机会）。
 - **Elo 融合**：赛果回写后更新各队 Elo 评分（基准 1500，主场加成 65 分，净胜球加权，新队 K=40 / 老队 K=20）。预测时用「份额归一」把 Elo 差融进 λ：主队进球占比按系数平移后按总进球数还原，因此 λ主+λ客 精确守恒，**不影响大小球判断**；系数夹在 [0.8, 1.25]，实测极端分差下胜率偏移不超过 ±7.4pp。
 - **冷启动**：`python migrate_elo.py --dry-run` 可预览；正式执行会把库里已有的历史赛果按时间正序重放一遍，可重复执行（幂等）。免费套餐若拿不到历史赛季，机器人从 1500 分起步，靠 `PRIOR_GAMES` 收缩保证赛季初不失真。
-- **⚠️ Elo 已实现但刻意未接入预测主流程**。回测（`python backtest_cli.py --db /data/football.db`）在 7 个随机种子 + 真实结构数据上一致显示：接入 Elo 后对数损失、RPS、Brier、校准误差**全部变差**（对数损失改善均值 −0.0033），且 blend 参数扫描呈单调恶化（最佳值 0.0，即完全不用）。原因：积分榜攻防强度已充分捕捉球队实力，Elo 提供的是冗余信息加噪声。**在拿出有效证据前不接入**，避免让线上预测变糟。
+- **⚠️ Elo 已实现但刻意未接入预测主流程**。回测（`机器人内 /backtest 命令`）在 7 个随机种子 + 真实结构数据上一致显示：接入 Elo 后对数损失、RPS、Brier、校准误差**全部变差**（对数损失改善均值 −0.0033），且 blend 参数扫描呈单调恶化（最佳值 0.0，即完全不用）。原因：积分榜攻防强度已充分捕捉球队实力，Elo 提供的是冗余信息加噪声。**在拿出有效证据前不接入**，避免让线上预测变糟。
 - **回测方法**：滚动前进（walk-forward），预测第 i 场时只允许使用第 i 场之前的数据，杜绝前视偏差。主判据为对数损失与 RPS（越低越好），准确率仅作参考——准确率把「预测 30% 却说成 90%」和「诚实预测 30%」同等对待，会掩盖过度自信。
 - **⚠️ Dixon-Coles 已实现但同样未接入预测主流程**（原因见下）。
 - 尚未考虑：伤停、赛程密度、近期状态权重。**伤停能拿到并在深度分析里展示，但不参与概率计算**——`get_injuries` 只返回球员名与伤因，没有出场时间/身价等重要性字段，历史语料也无伤停字段，接进模型只能靠拍系数且无法回测验证；市场赔率已间接消化了伤停信息，融合市场概率是拿到该信息的成本更低且可验证的方式。
@@ -479,12 +502,15 @@ xG 等实时数据），见下文「尚未考虑」。
 
 配置项：
 
-| 变量 | 默认 | 说明 |
+| 变量 / 常量 | 默认 | 说明 |
 | --- | --- | --- |
 | `SIGNAL_AB_ENABLED` | 开启 | 关闭后不再写入对照记录（预测行为不变） |
-| `SIGNAL_STRONG_THRESHOLD` | `0.15` | 强信号阈值，主指标只统计达到该强度的场次 |
-| `SIGNAL_MIN_SAMPLES` | `30` | 复盘「样本不足」阈值，低于该值只报数量不报命中率 |
 | `SIGNAL_AB_WRITE_ENABLED` | 关闭 | 权重**写**权限，默认只读；开启后才允许改信号权重 |
+
+> ⚠️ `SIGNAL_STRONG_THRESHOLD`（强信号阈值）与 `SIGNAL_MIN_SAMPLES`（样本不足阈值）
+> **不是环境变量**，而是 `signal_ab.py` 里的代码常量
+> （`DEFAULT_STRONG_THRESHOLD = 0.15` / `DEFAULT_MIN_SAMPLES = 30`）。
+> 改它们需要改代码，不能靠改 `.env` 生效。此前本表把它们列为可配置项，属文档错误，已更正。
 
 ### 权重治理：先模拟、再确认、只追加
 
