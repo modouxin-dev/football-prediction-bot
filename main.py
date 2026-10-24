@@ -101,6 +101,32 @@ class RedactingFormatter(logging.Formatter):
         return text
 
 
+async def _show_stored_card(query, service, fixture_id, settings, note: str) -> bool:
+    """赛程查不到时的兜底：展示库里已落盘的预测结论。
+
+    返回 True 表示已展示存档卡（调用方应直接 return），False 表示库里也没有。
+
+    为什么需要它：赛程快照是后来才加的列，更早的预测只有结论没有快照；
+    比赛一旦开赛或跨天，今日赛程里也查不到。此前这类点击一律报
+    「该场比赛已不在今日赛程中」——可结论明明躺在库里。
+    用户点旧卡片的目的是**回看已算过的结论**，不是重算一遍，
+    所以只要落盘数字在，就该展示出来，而不是报错。
+
+    注意：只兜「找不到赛程」，不吞 API 故障。API 异常由调用方原样上报，
+    绝不把「取数失败」伪装成「没有比赛」。
+    """
+    try:
+        row = service.stored_prediction(fixture_id)
+    except Exception as exc:  # 读库失败不能连累机器人，按「没有存档」处理
+        log.warning("读取预测存档失败（fixture=%s）：%s", fixture_id, exc)
+        return False
+    if not row:
+        return False
+    text = note + "\n\n" + ui.format_stored_card(row, settings.timezone)
+    await edit_view(query, text, back_to_menu_markup())
+    return True
+
+
 def setup_logging(settings: Settings) -> None:
     handler = logging.StreamHandler(sys.stdout)  # 输出到 stdout，Railway 才会按 info 级别显示
     handler.setFormatter(
@@ -513,6 +539,9 @@ async def on_analysis_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             report = await service.analyze_fixture(fixture_id, fixtures)
         except KeyError:
+            if await _show_stored_card(query, service, fixture_id, settings,
+                                       "该场比赛已开赛或已过期，无法做深度分析；以下是当时的预测存档。"):
+                return
             await edit_view(query, "⚠️ 该场比赛已不在今日赛程中，请返回赛程重新选择。", back_to_menu_markup())
             return
         except APIError as exc:
@@ -612,6 +641,9 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "h2h": "📊 历史交锋",
             }[kind] + " · " + esc(report["home"]) + " vs " + esc(report["away"])
     except (KeyError, ValueError):
+        if await _show_stored_card(query, service, fixture_id, settings,
+                                   "该场比赛已开赛或已过期，无法生成图表；以下是当时的预测存档。"):
+            return
         await query.answer("该场比赛已不在今日赛程中，请返回赛程重新选择。", show_alert=True)
         return
     except APIError as exc:
@@ -747,6 +779,9 @@ async def on_predict_fixture(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             prediction = await service.predict_fixture(fixture_id, fixtures)
         except KeyError:
+            if await _show_stored_card(query, service, fixture_id, settings,
+                                       "该场比赛已开赛或已过期，无法重新计算；以下是当时的预测存档。"):
+                return
             await edit_view(query, "⚠️ 该场比赛已不在今日赛程中，请返回赛程重新选择。", back_to_menu_markup())
             return
         except APIError as exc:

@@ -1923,6 +1923,21 @@ class PredictionService:
         """取不到（机器人重启过或已被淘汰）时抛 KeyError。"""
         return self._store[str(fixture_id)]
 
+    def stored_prediction(self, fixture_id) -> dict[str, Any] | None:
+        """库里已落盘的预测结论；没有（或概率不全）返回 None。
+
+        与 get() 的区别：get() 取内存里的完整 Prediction（重启即失），
+        这个只读库里的落盘数字，**重启后依然可用**，且不依赖赛程快照。
+
+        用途：赛程快照是后来才加的列，更早的预测只有结论没有快照；
+        比赛开赛或跨天后今日赛程里也查不到，用户点旧卡片会撞上
+        「该场比赛已不在今日赛程中」——可结论就在库里。
+        回看旧结论不需要重算，所以这里直接把落盘数字交出去展示。
+        """
+        if self.repo is None:
+            return None
+        return self.repo.get_stored_prediction(fixture_id)
+
     async def refresh(self, fixture_id) -> Prediction:
         """重新拉取最新赔率并重算价值偏差（球队强度沿用当时的模型）。"""
         old = self.get(fixture_id)
