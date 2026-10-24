@@ -537,6 +537,37 @@ class PredictionRepository:
             return None
         return data if isinstance(data, dict) else None
 
+    def get_stored_prediction(self, fixture_id) -> dict[str, Any] | None:
+        """取回已落盘的预测结果（不看赛程快照），没有则返回 None。
+
+        与 get_fixture_json 的区别：那个取的是**原始赛程**（用于重新计算），
+        这个取的是**预测结论本身**（用于直接展示）。
+
+        为什么需要它：赛程快照是后来才加的列，此前算过的预测只有结论、
+        没有快照；比赛一旦开赛或跨天，今日赛程里也查不到了。用户点旧卡片时
+        会撞上「该场比赛已不在今日赛程中」——可结论明明就躺在库里。
+        这类请求的目标是**看已算过的结论**，不是重新算一遍，
+        所以只要结论在，就该展示出来，而不是报错。
+        """
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT fixture_id, league, home, away, kickoff, home_prob, "
+                "draw_prob, away_prob, best_score, result, actual_home, actual_away "
+                "FROM predictions WHERE fixture_id = ?",
+                (str(fixture_id),),
+            ).fetchone()
+        except Exception as exc:
+            log.warning("读取已存预测失败：%s", exc)
+            return None
+        if row is None:
+            return None
+        d = dict(row)
+        # 三合一概率缺任一，这份结论就不完整，宁可不展示也不造数
+        if d.get("home_prob") is None or d.get("draw_prob") is None or d.get("away_prob") is None:
+            return None
+        return d
+
     # 旧库补列：精确的比分口径与语料窗口。与 signal_ab 同一套幂等机制。
     BACKTEST_RUN_COLUMNS = {
         "exact_n": "INTEGER",

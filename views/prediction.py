@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from analyzer import (OUTCOMES, calculate_prediction_level,
                       implied_probabilities, market_gap, overround)
 from formatkit import (BLANK, _is_fallback, align_cjk, bar, esc, hbar, kv_line,
@@ -24,6 +27,68 @@ CORE_LABEL_WIDTH = 12
 
 
 class PredictionView:
+    @staticmethod
+    def format_stored_card(row: dict, tz) -> str:
+        """存档预测卡：直接展示库里已落盘的结论，不重新计算。
+
+        为什么单独一个渲染入口：赛程快照是后来才加的列，更早的预测只有结论、
+        没有快照；比赛开赛或跨天后今日赛程里也查不到，于是旧卡片一点就报
+        「该场比赛已不在今日赛程中」。可结论明明就在库里。
+        用户点旧卡片的目的是**回看已算过的结论**，不是重算一遍，
+        所以这里绕过模型与赛程，直接用落盘数字渲染。
+
+        与 format_prediction_card 的关系：那个吃完整 Prediction 对象、
+        依赖积分榜与近期战绩；这个只吃一行落盘数据，字段少一个就少显示一项，
+        绝不补占位数字。
+        """
+        home = esc(team_mobile(row.get("home") or "?"))
+        away = esc(team_mobile(row.get("away") or "?"))
+        hp, dp, ap = row["home_prob"], row["draw_prob"], row["away_prob"]
+
+        lines = [f"🏟 <b>{home} vs {away}</b>", SEP, BLANK]
+
+        # 开赛时间：存的是 UTC ISO，转成用户时区；解析失败就只显示原值，不编造
+        when = row.get("kickoff") or ""
+        shown = when
+        try:
+            dt = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            shown = dt.astimezone(tz).strftime("%m-%d %H:%M")
+        except Exception:
+            pass
+        if row.get("league"):
+            lines.append(f"🏆 {esc(row['league'])}")
+        if shown:
+            lines.append(f"🕐 {esc(shown)}")
+        lines.append(BLANK)
+
+        # 三合一概率：数值 + 条形，与预测主卡同一套字形
+        lines.append("📊 <b>模型预测（存档）</b>")
+        for label, prob in (("主胜", hp), ("平局", dp), ("客胜", ap)):
+            icon = OUTCOME_ICON.get(label, "")
+            lines.append(f"{icon} {label} {prob * 100:.0f}%  {hbar(prob)}")
+        lines.append(BLANK)
+
+        top_label, top_prob = max(
+            (("主胜", hp), ("平局", dp), ("客胜", ap)), key=lambda kv: kv[1])
+        lines.append(f"🎯 <b>最可能结果：{top_label}（{top_prob * 100:.0f}%）</b>")
+        if row.get("best_score"):
+            lines.append(f"⚽ 最可能比分：{esc(row['best_score'])}")
+        lines.append(BLANK)
+
+        # 已结算的比赛顺带给出实际比分与命中情况——这本来就是用户最想回看的
+        ah, aw = row.get("actual_home"), row.get("actual_away")
+        if ah is not None and aw is not None:
+            lines.append(f"✅ <b>实际比分：{esc(ah)}-{esc(aw)}</b>")
+            if row.get("result"):
+                lines.append(f"📌 预测结果：{esc(row['result'])}")
+            lines.append(BLANK)
+
+        lines.append("🗂 本条为历史存档，赛程已过期，无法重新计算或深度分析。")
+        lines.append(DISCLAIMER)
+        return "\n".join(lines)
+
     @staticmethod
     def format_prediction(p, tz) -> str:
         a = p.analysis
