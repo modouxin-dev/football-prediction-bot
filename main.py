@@ -122,6 +122,11 @@ async def _show_stored_card(query, service, fixture_id, settings, note: str) -> 
         return False
     if not row:
         return False
+    # 不造数：三合一概率缺任一，这份结论就不完整。这里再查一次而不是只靠
+    # repository 层——校验跟着渲染走，任何调用路径都不会渲出半张卡。
+    if any(row.get(k) is None for k in ("home_prob", "draw_prob", "away_prob")):
+        log.warning("预测存档概率不全，按无存档处理（fixture=%s）", fixture_id)
+        return False
     text = note + "\n\n" + ui.format_stored_card(row, settings.timezone)
     await edit_view(query, text, back_to_menu_markup())
     return True
@@ -952,6 +957,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         prediction = service.get(fixture_id)
     except KeyError:
+        # 内存里没有：可能机器人重启过，也可能被 STORE_LIMIT 淘汰。
+        # 自动推送的预测全部落盘，所以先查库——结论还在就展示存档，
+        # 而不是让用户干等下一次推送。
+        if await _show_stored_card(query, service, fixture_id, settings,
+                                   "该场预测的完整视图已失效（机器人重启或已过期）；"
+                                   "以下是当时的预测存档。"):
+            return
         await query.answer("这条预测已过期（机器人重启过），请等待下一次推送或让管理员使用 /test。", show_alert=True)
         return
     await query.answer()  # 先应答，避免按钮一直转圈
