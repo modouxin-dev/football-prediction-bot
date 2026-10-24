@@ -138,3 +138,22 @@ def test_snapshot_not_wiped_by_resave(tmp_path):
     service.repo.save(p)
     assert service.repo.get_fixture_json(1001), "旧快照必须保留"
     p.fixture = original  # 还原，避免影响后续断言
+
+
+# ---- 重启场景（真正的回归点）-------------------------------------------------
+def test_stale_card_opens_after_process_restart(tmp_path):
+    """核心回归：**全新实例**（内存 _store 为空，等价机器人重启）点旧卡片仍能打开。
+
+    这是本 bug 的真正暴露点：进程内内存快照一直在，所以旧实现在单进程测试里
+    永远通过；只有重启后内存清空，才会回落到「不在今日赛程」。
+    库内快照是唯一能跨重启存活的兜底，必须覆盖这条路径。
+    """
+    service, s, _ = svc(tmp_path)
+    run(service.predict_fixture(1001, None))   # 算一次，快照落库
+
+    # 全新实例：内存为空，且今日赛程里已无此场
+    api2 = API(flatten_standings(standings_response()))
+    api2.empty = True
+    service2 = PredictionService(s, api2, MatchAnalyzer())
+    p2 = run(service2.predict_fixture(1001, []))
+    assert str(p2.fixture_id) == "1001", "重启后必须靠库内快照点得开"
