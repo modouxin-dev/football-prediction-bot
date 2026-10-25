@@ -303,6 +303,14 @@ async def on_menu_key(update: Update, context: ContextTypes.DEFAULT_TYPE, key: s
         await show_fixtures(update, context, page=0)  # 比赛预测要先选比赛 / pick a match first
     elif key == "storage":
         await storage_cmd(update, context)
+    elif key == "stats":
+        # 走 dispatcher 而非直接调函数：stats 是 admin_only 指令，
+        # execute() 会先做权限拦截，非管理员点击会被拒而不是看到统计内容。
+        dispatcher = context.application.bot_data.get("dispatcher")
+        if dispatcher is not None and "stats" in dispatcher:
+            await dispatcher.execute("stats", update, context)
+        else:
+            await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
     else:
         await edit_view(query, ui.format_coming(key), ui.menu_keyboard())
 
@@ -1090,6 +1098,9 @@ def register_commands(app: Application) -> int:
     # 已注册指令名的全集。兜底 handler 必须先查这张表，否则会把正常指令
     # 也当成「未识别」——见 on_unknown_command 里的说明。
     app.bot_data["known_commands"] = {spec.name.lower() for spec in dispatcher.specs}
+    # 存进 bot_data 供内联菜单按钮复用：按钮回调要走 dispatcher.execute()，
+    # 才能带上 admin_only 的权限拦截。直接调函数会绕过判权。
+    app.bot_data["dispatcher"] = dispatcher
     return len(dispatcher)
 
 

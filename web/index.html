@@ -1075,6 +1075,14 @@ function liveCard(lv, noHead){
     // 「订阅不含 live 能力但 API 静默返回空」，两者处置完全不同。
     if(st === 'empty' && lv && lv.diag)
       return head + `<div class="empty">📭 ${m}<div class="why">${esc(lv.diag)}</div></div>`;
+    // 失败态：主文案已改成中文，英文原文降到辅助行——
+    // 一眼看到的是「该怎么办」，排查时才去看原始报错。
+    if((st === 'quota_exhausted' || st === 'unsupported') && lv){
+      const icon = st === 'quota_exhausted' ? '⏳' : '🔒';
+      const raw = lv.error_raw
+        ? `<div class="why">原始报错：${esc(String(lv.error_raw))}</div>` : '';
+      return head + `<div class="empty">${icon} ${m}${raw}</div>`;
+    }
     return head + `<div class="empty">${m}</div></div>`;
   }
   const n = items.length;
