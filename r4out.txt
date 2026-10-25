@@ -1,0 +1,14 @@
+BRANCH=main SHA=910587b
+--- main 全量 ---
+tests/test_bot.py::test_application_wires_up_cache_manager
+tests/test_bot.py::test_application_registers_handlers_and_schedules_daily_job_in_local_time
+tests/test_bot.py::test_no_daily_job_without_chat_id
+tests/test_prematch_refresh.py::test_job_registered_when_enabled
+tests/test_prematch_refresh.py::test_job_not_registered_when_interval_is_zero
+tests/test_prematch_refresh.py::test_job_not_registered_when_prematch_disabled
+tests/test_prematch_refresh.py::test_job_registered_without_chat_id
+  /home/runner/work/football-prediction-bot/football-prediction-bot/main.py:1111: PTBDeprecationWarning: Deprecated since version 21.10: Support for pytz timezones is deprecated and will be removed in future versions.
+    .defaults(Defaults(tzinfo=settings.timezone))  # 定时任务按 TIMEZONE 计时
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1794 passed, 1 skipped, 21 warnings in 43.84s
