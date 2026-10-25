@@ -716,6 +716,40 @@ class PredictionRepository:
             return None
         return d
 
+    def predicted_fixture_ids(self, ids) -> set[str]:
+        """批量判断哪些比赛**本模型做过预测**（自动推送或手动点过）。
+
+        实时板块用它把「全网进行中的比赛」收敛到「我们推送过的比赛」——
+        看板的价值在于跟踪自己推送的命中情况，而不是转播全部比赛。
+
+        入参可能是任意可迭代对象（含生成器）；空输入直接返回空集，
+        不拼 SQL（拼了会生成 `IN ()` 这种非法语句）。
+        """
+        wanted = {str(i).strip() for i in (ids or []) if str(i).strip()}
+        if not wanted:
+            return set()
+        try:
+            conn = self._connect()
+        except Exception as exc:
+            log.warning("判断预测归属失败（库不可用）：%s", exc)
+            return set()
+        found: set[str] = set()
+        # 分批：SQLite 的变量数上限通常 999，场次再多也不该一次拼完
+        chunk = 500
+        batch = list(wanted)
+        for start in range(0, len(batch), chunk):
+            part = batch[start:start + chunk]
+            marks = ",".join("?" * len(part))
+            try:
+                rows = conn.execute(
+                    f"SELECT fixture_id FROM predictions WHERE fixture_id IN ({marks})",
+                    part,
+                )
+                found.update(str(r["fixture_id"]) for r in rows)
+            except Exception as exc:
+                log.warning("批量判断预测归属失败：%s", exc)
+        return found
+
     def get_prediction_detail(self, fixture_id) -> dict[str, Any] | None:
         """单场预测的完整详情，含 inputs 里落盘的派生量。
 
