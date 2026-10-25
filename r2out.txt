@@ -1,0 +1,45 @@
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 26085 (\N{CJK UNIFIED IDEOGRAPH-65E5}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_chart.py::test_schedule_chart_single_day_and_multi_day
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 26399 (\N{CJK UNIFIED IDEOGRAPH-671F}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_chart.py::test_schedule_chart_single_day_and_multi_day
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 20849 (\N{CJK UNIFIED IDEOGRAPH-5171}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_templates.py::test_brand_banner_generates_png
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 20107 (\N{CJK UNIFIED IDEOGRAPH-4E8B}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_templates.py::test_brand_banner_generates_png
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 24773 (\N{CJK UNIFIED IDEOGRAPH-60C5}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_templates.py::test_brand_banner_generates_png
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 25253 (\N{CJK UNIFIED IDEOGRAPH-62A5}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_templates.py::test_brand_banner_generates_png
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 39537 (\N{CJK UNIFIED IDEOGRAPH-9A71}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_templates.py::test_brand_banner_generates_png
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 21160 (\N{CJK UNIFIED IDEOGRAPH-52A8}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_templates.py::test_brand_banner_generates_png
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 27934 (\N{CJK UNIFIED IDEOGRAPH-6D1E}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+tests/test_templates.py::test_brand_banner_generates_png
+  /home/runner/work/football-prediction-bot/football-prediction-bot/chart.py:81: UserWarning: Glyph 23519 (\N{CJK UNIFIED IDEOGRAPH-5BDF}) missing from current font.
+    fig.savefig(buf, format="png", facecolor=BG, bbox_inches="tight")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_chart.py::test_chinese_font_is_configured - AssertionError: 未找到可用中文字体
+assert ''
+ +  where '' = chart.FONT_IN_USE
+1 failed, 1803 passed, 1 skipped, 321 warnings in 63.98s (0:01:03)
