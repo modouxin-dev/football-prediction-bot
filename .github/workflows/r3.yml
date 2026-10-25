@@ -12,22 +12,20 @@ jobs:
         with: {ref: "main"}
       - uses: actions/setup-python@v7
         with: {python-version: "3.10"}
-      - name: Install
-        run: |
+      - run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
           sudo apt-get update -qq
           sudo apt-get install -y -qq fonts-noto-cjk
           fc-cache -f > /dev/null 2>&1 || true
-      - name: main 基线跑字体测试
-        run: |
+      - run: |
           OUT=$RUNNER_TEMP/o.txt
           : > $OUT
-          echo "BRANCH=$(git rev-parse --abbrev-ref HEAD)" >> $OUT
-          python -m pytest tests/test_chart.py -q --tb=line 2>&1 | tail -10 >> $OUT
+          echo "BRANCH=$(git rev-parse --abbrev-ref HEAD) SHA=$(git rev-parse --short HEAD)" >> $OUT
+          echo "--- main 全量 ---" >> $OUT
+          python -m pytest -q --tb=line -rf 2>&1 | tail -12 >> $OUT
           B64=$(base64 -w0 $OUT)
           curl -s -X PUT -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/contents/r3out.txt" \
-            -d "{\"message\":\"r3\",\"content\":\"$B64\",\"branch\":\"tmp-r3-out\"}" > /dev/null
-          echo done
+            -d "{\"message\":\"r3b\",\"content\":\"$B64\",\"branch\":\"tmp-r3-out\"}" > /dev/null
