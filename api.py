@@ -945,10 +945,25 @@ async def live(detail: int = 1) -> JSONResponse:
         if not live_rows:
             # 空列表必须解释清楚，否则用户无从判断是该等还是该换套餐
             if err:
-                msg = (f"实时端点不可用：{err}。"
-                       "若提示套餐或权限，说明当前订阅不含 live 能力，"
-                       "需在 API-Football 控制台确认套餐。")
-                status = "unsupported"
+                # 两种失败必须分开说，处置完全不同：
+                #   额度用尽 → 等次日重置（或查是否有任务在空转烧额度）
+                #   套餐不含 → 必须升级订阅，等也没用
+                # 实测生产返回的原文是 "You have reached the request limit
+                # for the day"，把这种也说成「套餐不含 live」会误导升级。
+                low = str(err).lower()
+                if "request limit" in low or "reached the" in low or "too many" in low:
+                    msg = ("实时端点不可用：当日请求额度已用尽。"
+                           "这不是套餐不支持——额度次日重置，"
+                           "届时无需任何改动即会自动恢复。")
+                    status = "quota_exhausted"
+                elif "not subscribed" in low or "permission" in low or "do not have access" in low:
+                    msg = ("实时端点不可用：当前订阅不含 live 能力，"
+                           "需在 API-Football 控制台确认套餐。")
+                    status = "unsupported"
+                else:
+                    msg = ("实时端点不可用：原因未归类。"
+                           "若长期如此，请在控制台确认套餐与当日用量。")
+                    status = "unsupported"
             else:
                 msg = "此刻没有正在进行的比赛。比赛开始后本板块会自动出现。"
                 status = "empty"
@@ -958,6 +973,7 @@ async def live(detail: int = 1) -> JSONResponse:
             # 前者要换套餐，后者只需等待，处置完全不同。
             return {"status": status, "count": 0, "items": [],
                     "updated_at": _now_iso(), "message": msg,
+                    "error_raw": str(err) if err else None,
                     "raw_count": len(raw or []),
                     "diag": ("live=all 返回 %d 条原始记录（未筛出进行中）。"
                              "若长期为 0 且从无比赛出现，多为订阅不含 live 能力"
