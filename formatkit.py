@@ -54,7 +54,11 @@ import unicodedata as _ud  # noqa: E402
 # 俱乐部通用词缀：剥离后 "Liverpool FC" 与 "Liverpool" 归一到同一个键
 _CLUB_TOKENS = frozenset(
     "fc afc cf sc sv bv vfb vfl ac cd ud rc ca ec aa sk jk if bk fk ff "
-    "club de del della the 1909 1899 1846 1848 05 98 08".split()
+    # 补录：这些通名此前未收录，导致 "Coritiba FBC" 匹配不到已收录的
+    # "Coritiba"、看板上同一支队忽中忽英。均为确认无歧义的俱乐部通名。
+    "fbc fbg fcx acf ssc us usl asd ss srl sd sad sl skc gf agf b fc "
+    "nk sd hnk gnk nk2 ifk tb tvm bsv"
+    " club de del della the 1909 1899 1846 1848 05 98 08".split()
 )
 
 
