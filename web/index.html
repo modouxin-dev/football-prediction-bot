@@ -1071,6 +1071,10 @@ function liveCard(lv, noHead){
     }
     if(lv && lv.stale && lv.updated_at)
       m += `（最后一次成功拉取：${esc(String(lv.updated_at).slice(11,19))} UTC）`;
+    // empty 状态下把诊断信息露出来：区分「此刻确实没比赛」与
+    // 「订阅不含 live 能力但 API 静默返回空」，两者处置完全不同。
+    if(st === 'empty' && lv && lv.diag)
+      return head + `<div class="empty">📭 ${m}<div class="why">${esc(lv.diag)}</div></div>`;
     return head + `<div class="empty">${m}</div></div>`;
   }
   const n = items.length;
