@@ -1,0 +1,41 @@
+name: r3
+on:
+  push:
+    branches: [tmp-r3]
+permissions:
+  contents: write
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: {ref: "modouxin-dev/football-prediction-bot@main"}
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.10"}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+          fc-cache -f > /dev/null 2>&1 || true
+      - name: 只跑字体测试（main 分支基线）
+        run: |
+          OUT=$RUNNER_TEMP/o.txt
+          : > $OUT
+          echo "=== main 基线：test_chart ===" >> $OUT
+          python -m pytest tests/test_chart.py -q --tb=line 2>&1 | tail -8 >> $OUT
+          echo "=== 字体文件是否存在 ===" >> $OUT
+          fc-list | grep -i -c "noto.*cjk" >> $OUT || echo 0 >> $OUT
+          echo "=== matplotlib 找到的字体数 ===" >> $OUT
+          python -c "
+          import matplotlib.font_manager as fm
+          names=[f.name for f in fm.fontManager.ttflist]
+          print('total',len(names))
+          print('has Noto Sans CJK:', any('Noto Sans CJK' in n for n in names))
+          " >> $OUT 2>&1
+          B64=$(base64 -w0 $OUT)
+          curl -s -X PUT -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/r3out.txt" \
+            -d "{\"message\":\"r3\",\"content\":\"$B64\",\"branch\":\"tmp-r3-out\"}" > /dev/null
