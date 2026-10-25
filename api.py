@@ -510,6 +510,60 @@ async def jobs(limit: int = 20) -> JSONResponse:
     })
 
 
+@app.get("/quota")
+async def quota() -> JSONResponse:
+    """当日额度消耗：主源自报 + 本地按任务明细。
+
+    为什么两者都要：
+        主源自报的「剩余次数」是权威值，但它只在**发过请求之后**才有读数，
+        且答不了「是谁在用」。本地按任务计数正好补上这一半——
+        额度打光时要能一眼看出该停哪个任务，而不是靠猜。
+
+    quota_left 为 None 表示尚未观测到（进程刚重启 / 还没发过请求），
+    此时**不猜、不填 0**：填 0 会立刻触发熔断，把整个系统停掉。
+    """
+    try:
+        from repository import quota_tasks_today, quota_today
+        by_source = quota_today()
+        by_task = quota_tasks_today()
+    except Exception as exc:
+        log.exception("/quota 读取失败")
+        raise HTTPException(status_code=500, detail=f"读取额度失败：{exc}") from exc
+
+    left = None
+    remaining_raw = None
+    try:
+        # 看板进程有自己的 client（--mode web 时机器人侧连接并未建立），
+        # 因此这里读的是**本进程**观测到的剩余次数。它只在自己发过请求后
+        # 才有值；机器人进程的读数写不进来（两个进程不共享内存）。
+        client = _live_client()
+        if client and client is not True and client is not False:
+            primary = getattr(client, "primary", None) or client
+            left = getattr(primary, "quota_left", None)
+            remaining_raw = getattr(primary, "quota_remaining", None)
+    except Exception:  # noqa: BLE001 - 额度是旁路信息，读不到不影响其它字段
+        left = None
+
+    total = sum(int(v) for v in by_source.values())
+    ranked = sorted(by_task.items(), key=lambda kv: kv[1], reverse=True)
+    return JSONResponse({
+        "version": _VERSION,
+        "status": "ok",
+        "day": _now_iso()[:10],
+        "total": total,
+        "by_source": by_source,
+        "by_task": dict(ranked),
+        "top_task": (ranked[0][0] if ranked else None),
+        "quota_left": left,
+        "quota_remaining": remaining_raw,
+        "note": (
+            "quota_left 为主源上报的剩余次数，只有本进程自己发过请求才有读数；"
+            "为 null 表示尚未观测到（不代表余额未知或已耗尽）。"
+            "by_source / by_task 来自共享数据库，是机器人与看板的合并计数。"
+        ),
+    })
+
+
 @app.get("/backtest")
 async def backtest(limit: int = 20, competition: str | None = None) -> JSONResponse:
     """历史回测结论（新→旧），用于观察指标随样本积累的变化。
