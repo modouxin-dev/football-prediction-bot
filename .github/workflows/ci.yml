@@ -40,7 +40,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          # 仓库有三个依赖文件，只监视 dev 时另两个变更不会刷新缓存键，
+          # 会命中旧缓存导致新声明的依赖根本没装——表现同样是 INTERNALERROR。
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-web.txt
 
       - name: Install dependencies
         run: |
@@ -57,6 +62,45 @@ jobs:
           sudo apt-get install -y -qq fonts-noto-cjk
           fc-cache -f > /dev/null 2>&1 || true
 
+      - name: Verify dependencies installed
+        # 依赖缺失若不在这一步拦住，会以 pytest INTERNALERROR / api.py SystemExit
+        # 的形式暴露，根因埋在堆栈中段，排查要翻好几屏。
+        # 此步骤把失败信号前移成「缺哪个包」一句话。
+        run: |
+          python - <<'PY'
+          import importlib
+          import sys
+          from typing import Final
+
+          # 关键依赖清单：(导入名, 声明所在文件)。新增门禁依赖时同步追加。
+          REQUIRED: Final[tuple[tuple[str, str], ...]] = (
+              ("pytest", "requirements-dev.txt"),
+              ("pytest_asyncio", "requirements-dev.txt"),
+              ("telegram", "requirements.txt"),
+              ("apscheduler", "requirements.txt (job-queue extra)"),
+              ("fastapi", "requirements-dev.txt"),
+              ("uvicorn", "requirements-dev.txt"),
+          )
+
+          def verify() -> list[str]:
+              """逐个导入关键依赖，返回缺失项描述。空列表表示全部就绪。"""
+              missing: list[str] = []
+              for module, source in REQUIRED:
+                  try:
+                      importlib.import_module(module)
+                  except ImportError:
+                      missing.append(f"{module} (声明于 {source})")
+              return missing
+
+          gaps = verify()
+          if gaps:
+              print("::error::关键依赖未安装，后续 pytest 将以 INTERNALERROR 崩溃：")
+              for g in gaps:
+                  print(f"::error::  - {g}")
+              sys.exit(1)
+          print("依赖校验通过：关键包全部就绪")
+          PY
+
       - name: Run tests
         # pytest.ini 已配置 pythonpath = . 与 testpaths = tests
         # 测试不联网，使用 tests/sample_data.py 的仿真响应
@@ -69,7 +113,7 @@ jobs:
           # 2) 不能把 pytest 输出重定向进文件，否则 job 日志里只剩脚本回声。
           #    用 tee 让输出实时打到日志上，手机端展开即可看到。
           set +e
-          python -m pytest -q --tb=line -rf 2>&1 | tee /tmp/pytest.txt
+          python -m pytest -q --tb=line -rf --strict-markers 2>&1 | tee /tmp/pytest.txt
           code=${PIPESTATUS[0]}
           set -e
           if [ "$code" -ne 0 ]; then
