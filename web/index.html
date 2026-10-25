@@ -1059,7 +1059,16 @@ function liveCard(lv, noHead){
     + (noHead ? '' : '<h2>🔴 正在进行 <span>实时比分 · 阵容 · 伤停 · 赔率</span></h2>');
   const items = (lv && lv.items) || [];
   if(!items.length){
+    // 「有进行中的比赛，但都不是本模型推送过的」必须单独成段说明。
+    // 混在通用空态里，用户会一直等一个永远不会出现的板块。
+    const st = (lv && lv.status) || '';
     let m = esc(lv && lv.message ? lv.message : '此刻没有正在进行的比赛。');
+    if(st === 'not_predicted'){
+      const total = lv.live_total != null ? lv.live_total : 0;
+      return head + `<div class="empty">📭 ${m}`
+        + `<div class="why">全网进行中 ${esc(String(total))} 场，`
+        + `本板块只显示已生成预测（自动推送或手动点过）的比赛。</div></div>`;
+    }
     if(lv && lv.stale && lv.updated_at)
       m += `（最后一次成功拉取：${esc(String(lv.updated_at).slice(11,19))} UTC）`;
     return head + `<div class="empty">${m}</div></div>`;
@@ -1071,7 +1080,7 @@ function liveCard(lv, noHead){
   const stale = lv.stale
     ? ` <span class="warn">· 实时拉取失败，此为最后一次成功的快照</span>` : '';
   return head
-    + `<div class="livemeta">${n} 场进行中`
+    + `<div class="livemeta">🔴 ${n} 场进行中（仅显示已推送预测）`
     + (upd ? ` · 数据时间 ${esc(upd)} UTC` : '')
     + stale
     + `</div>`
