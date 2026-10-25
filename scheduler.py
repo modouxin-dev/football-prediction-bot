@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from telegram import InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
+import joblog
 from backtester_with_db import BacktesterWithDB
 from bot_handler import BotUI
 from config import Settings
@@ -67,9 +68,24 @@ AUTO_PREDICT_EXTRA_LEAGUES: tuple[int, ...] = (2,)  # 2 = 欧洲冠军联赛
 # 再远则赛程会变（改期、阵容未定、赔率未开），提前算好的概率是噪音。
 AUTO_PREDICT_DAYS = 3
 
-# 复盘回看窗口（天）。7 天能在样本量与时效性之间取得平衡：
-# 太短（1 天）样本个位数，归因全是噪音；太长（30 天）会掩盖近期劣化。
-REVIEW_WINDOW_DAYS = 7
+# 复盘的两个窗口（天），各司其职、不可合并。
+#
+# 归因窗口（REVIEW_ATTRIBUTION_DAYS）：分组统计、Brier 分解、标定判定用它。
+#   原实现只有一个 7 天窗口，实测线上 7 天只结算约 40 场，而复盘要按
+#   联赛 / 方向 / 信心档 / 口径 四个维度分组——40 场切成 6 个联赛后每组
+#   不足 MIN_SAMPLE(8)，全部标 thin，"样本不足"天天报。
+#   关键在于它**永远自愈不了**：窗口写死 7 天，样本上限就被钉死，
+#   攒再多历史数据也进不来。放到 30 天（约 160 场）分组才有统计意义。
+#   时效性损失由下面的近期窗口补回。
+REVIEW_ATTRIBUTION_DAYS = 30
+#
+# 近期窗口（REVIEW_RECENT_DAYS）：只报一个数字，不参与任何归因。
+#   它必然样本不足（7 天约 40 场），用来归因就是噪音，
+#   但用来回答"最近手感如何"足够，且是归因窗口给不了的时效信息。
+REVIEW_RECENT_DAYS = 7
+#
+# 兼容旧名：仍指向近期窗口，避免既有引用报错。
+REVIEW_WINDOW_DAYS = REVIEW_RECENT_DAYS
 
 # 自动预测执行间隔（小时）。6 小时一轮既能在赛前刷新概率，
 # 又不至于频繁重算——同一场重复预测只会用更新的赔率覆盖旧值，
@@ -222,18 +238,23 @@ async def settle_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """定时结算：把已完场比赛的真实比分回写，供命中率统计。"""
     app = context.application
     service: PredictionService = app.bot_data["service"]
+    db_path = getattr(service.settings, "db_path", None)
     try:
         done = await service.sync_results()
         if done:
             log.info("定时结算完成：%d 场", done)
+        joblog.ok(db_path, SETTLE_JOB)
     except Exception as exc:  # 结算失败绝不能影响主流程
         log.warning("定时结算失败：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), SETTLE_JOB, exc)
 
 
 async def sync_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """定时同步：把赛程拉到本地 SQLite（查询优先读本地库，省 API 额度）。"""
     app = context.application
     service: PredictionService = app.bot_data["service"]
+    db_path = getattr(service.settings, "db_path", None)
     try:
         up = await service.sync.sync_upcoming()
         recent = await service.sync.sync_recent()
@@ -241,8 +262,11 @@ async def sync_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             "赛程同步完成：未来 %d 场 / 最近 %d 场，本地库共 %d 场",
             up.get("saved", 0), recent.get("saved", 0), service.repo.matches_count(),
         )
+        joblog.ok(db_path, SYNC_JOB)
     except Exception as exc:  # 同步失败不能影响主流程
         log.warning("赛程同步失败：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), SYNC_JOB, exc)
 
 
 async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -263,6 +287,7 @@ async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     app = context.application
     service: PredictionService = app.bot_data["service"]
+    db_path = getattr(service.settings, "db_path", None)
     try:
         # 必须用「全部启用联赛」，不能用主联赛。
         # 赛程同步（sync.py）遍历 settings.league_ids 拉取 10 个联赛 × 30 天，
@@ -278,11 +303,14 @@ async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info(
             "自动预测落盘：%d 场（联赛 %s，窗口 %d 天）",
             r["saved"], list(r["per_league"]), r["window_days"],
+        joblog.ok(db_path, AUTO_PREDICT_JOB)
         )
         for err in r["errors"]:
             log.warning("自动预测：%s", err)
     except Exception as exc:  # 自动预测失败绝不能影响推送主流程
         log.warning("自动预测失败（不影响主流程）：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), AUTO_PREDICT_JOB, exc)
 
 
 PREMATCH_PUSH_NOTE = (
@@ -364,8 +392,11 @@ async def prematch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 log.info("赛前更新已推送 %d 条", pushed)
         except Exception as exc:  # 推送失败绝不能影响刷新与主流程
             log.warning("赛前推送失败（不影响主流程）：%s", exc)
+            joblog.fail(getattr(service.settings, "db_path", None), PREMATCH_JOB, exc)
     except Exception as exc:  # 刷新失败绝不能影响推送主流程
         log.warning("赛前刷新失败（不影响主流程）：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), PREMATCH_JOB, exc)
 
 
 async def review_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -386,10 +417,13 @@ async def review_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     service: PredictionService = app.bot_data["service"]
     try:
         rv = daily_review(getattr(service.settings, "db_path", None),
-                          since_days=REVIEW_WINDOW_DAYS)
+                          since_days=REVIEW_ATTRIBUTION_DAYS,
+                          recent_days=REVIEW_RECENT_DAYS)
         text = render_review(rv)
     except Exception as exc:
         log.warning("复盘生成失败：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), REVIEW_JOB, exc)
         return
     if rv.get("status") != "ok":
         # 无样本时静默：每天发「暂无数据」是纯噪音，看板里能看到
@@ -403,6 +437,8 @@ async def review_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                  rv["settled"], rv["accuracy"] * 100)
     except Exception as exc:
         log.warning("复盘推送失败：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), REVIEW_JOB, exc)
 
 
 async def history_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -413,12 +449,16 @@ async def history_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     app = context.application
     service: PredictionService = app.bot_data["service"]
+    db_path = getattr(service.settings, "db_path", None)
     try:
         r = await service.sync.sync_history()
         log.info("历史赛季回填完成：赛季 %d 个，收到 %d 保存 %d",
                  r.get("seasons", 0), r.get("received", 0), r.get("saved", 0))
+        joblog.ok(db_path, HISTORY_JOB)
     except Exception as exc:  # 回填失败不能影响主流程
         log.warning("历史赛季回填失败：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), HISTORY_JOB, exc)
 
 
 async def backtest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -433,6 +473,7 @@ async def backtest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     app = context.application
     service: PredictionService = app.bot_data["service"]
+    db_path = getattr(service.settings, "db_path", None)
     try:
         # 口径必须显式对齐线上：线上推送是 w·市场+(1−w)·模型 的融合口径，
         # 不传 market_weight 就退化成纯泊松，回测分数代表不了线上真实表现。
@@ -463,8 +504,11 @@ async def backtest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         app.bot_data.setdefault("last_backtest_at",
                                 datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        joblog.ok(db_path, BACKTEST_JOB)
     except Exception as exc:  # 回测失败绝不能影响推送主流程
         log.warning("回测失败（不影响主流程）：%s", exc)
+        # 失败落库：只写日志的话，用户要翻 Railway 日志才知道它挂了。
+        joblog.fail(getattr(service.settings, "db_path", None), BACKTEST_JOB, exc)
 
 
 def setup_scheduler(app, settings: Settings) -> int:

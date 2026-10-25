@@ -127,6 +127,58 @@
   }
   .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .tblwrap>table{min-width:680px}
+
+  /* ===== 移动端适配：消除表格横向溢出 ===== */
+  @media(max-width:680px){
+    body{padding:12px;font-size:14px}
+    .card{padding:13px;border-radius:14px}
+    .grid{grid-template-columns:1fr 1fr;gap:8px}
+    .stat{padding:10px 8px}
+    .stat b{font-size:21px}
+    .stat i{font-size:11px}
+    table{white-space:normal}
+    .tblwrap>table{min-width:0;width:100%}
+    th,td{padding:8px 5px;font-size:12px}
+    /* 回测表在手机上保留：时间 / 场次 / 方向命中 / 比分命中 / 判定。
+       其余列收起——10 列铺在 375px 上必然溢出，表头被切成「库内/」。 */
+    .tbl-bt th:nth-child(2),.tbl-bt td:nth-child(2),
+    .tbl-bt th:nth-child(6),.tbl-bt td:nth-child(6),
+    .tbl-bt th:nth-child(7),.tbl-bt td:nth-child(7),
+    .tbl-bt th:nth-child(8),.tbl-bt td:nth-child(8),
+    .tbl-bt th:nth-child(9),.tbl-bt td:nth-child(9){display:none}
+    /* 强度榜：收起「场次」 */
+    .tbl-st th:nth-child(3),.tbl-st td:nth-child(3){display:none}
+  }
+
+  /* ===== 审计：宽屏表格 / 窄屏卡片流 ===== */
+  .audit-list{display:none}
+  @media(max-width:680px){
+    .audit-tbl{display:none}
+    .audit-list{display:block}
+  }
+  .arow{background:#12151b;border:1px solid var(--line);border-left:3px solid var(--accent);
+        border-radius:10px;padding:10px 12px;margin-bottom:8px}
+  .arow .at{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600}
+  .arow .at .sc{margin-left:auto;font-size:14px;font-variant-numeric:tabular-nums}
+  .arow .am{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--dim);margin-top:6px}
+  .arow .am .tag{font-size:11px;padding:1px 8px;border-radius:999px;background:#1d2430;color:var(--dim)}
+  .arow .am .tag.ok{color:var(--good);background:#14301d}
+  .arow .am .tag.no{color:var(--bad);background:#331616}
+  .arow .am .dt{margin-left:auto}
+
+  /* ===== 空态说明：让「为什么没有」可见 ===== */
+  .why{background:#1d2230;border-left:3px solid var(--accent);padding:8px 11px;
+       border-radius:0 8px 8px 0;font-size:12px;color:var(--dim);margin-top:8px}
+
+  /* ===== 任务状态 ===== */
+  .jb{display:inline-block;width:17px;height:17px;line-height:17px;text-align:center;
+      border-radius:4px;font-size:11px;font-weight:700;color:#0b0e13;margin-right:4px}
+  .jb.jok{background:var(--good)} .jb.jfail{background:var(--bad)}
+  .jb.jskip{background:#8b96a8} .jb.junknown{background:#4a5464}
+  td.jmsg{font-size:11.5px;color:var(--dim);white-space:normal;min-width:120px}
+  @media(max-width:680px){
+    .tbl-jobs th:nth-child(2),.tbl-jobs td:nth-child(2){display:none}
+  }
 </style>
 </head>
 <body>
@@ -145,6 +197,7 @@
   <button data-sec="sec-bt" onclick="goSec('sec-bt')">🧪 历史回测</button>
   <button data-sec="sec-audit" onclick="goSec('sec-audit')">🔍 预测审计</button>
   <button data-sec="sec-team" onclick="goSec('sec-team')">🏆 球队强度</button>
+  <button data-sec="sec-jobs" onclick="goSec('sec-jobs')">⚙️ 任务状态</button>
 </nav>
 
 <div id="debug-panel" style="display:none">
@@ -382,6 +435,11 @@ function trendCard(health){
 
 function calibCard(health){
   if(health.status === 'empty') return '';
+  if(!(health.calibration||[]).length){
+    return `<div class="card"><h2>校准曲线 <span>说的 vs 发生的</span></h2>`
+      + `<div class="empty">暂无校准数据。</div>`
+      + `<div class="why">校准需要已结算场次按置信度分档统计，样本积累后自动出现。</div></div>`;
+  }
   return `<div class="card">
     <h2>校准曲线 <span>说的 vs 发生的</span></h2>
     ${calibChart(health.calibration)}
@@ -390,8 +448,12 @@ function calibCard(health){
 
 function levelCard(health){
   const lv = health.by_level || {};
-  const keys = Object.keys(lv);
-  if(!keys.length) return '';
+  const keys = Object.keys(lv).filter(k => lv[k] && lv[k].total);
+  if(!keys.length){
+    return `<div class="card"><h2>信心等级命中率 <span>高信心应高于低信心</span></h2>`
+      + `<div class="empty">暂无分级数据。</div>`
+      + `<div class="why">需要已结算的预测带信心等级（level_key）才能统计。</div></div>`;
+  }
   let rows = '';
   ['high','medium','low','unknown'].filter(k=>lv[k]).forEach(k=>{
     const s = lv[k], rate = s.rate ?? 0;
@@ -414,11 +476,43 @@ function strengthCard(st, noHead){
       <td class="num">${t.played}</td><td class="num">${t.attack.toFixed(2)}</td>
       <td class="num">${t.defense.toFixed(2)}</td><td class="num"><b>${t.overall.toFixed(2)}</b></td></tr>`;
   });
-  return head + `<div class="tblwrap"><table>
+  return head + `<div class="tblwrap"><table class="tbl-st">
     <thead><tr><th>#</th><th>球队</th><th class="num">场次</th><th class="num">进攻</th><th class="num">防守</th><th class="num">综合</th></tr></thead>
     <tbody>${rows}</tbody></table></div>
     <div style="font-size:12px;color:var(--dim);margin-top:8px">进攻越大越强；防守越大表示失球越多（越差）。综合 = 进攻 − 防守。</div>
   </div>`;
+}
+
+function jobsCard(jb, noHead){
+  const head = `<div class="card">`
+    + (noHead ? '' : '<h2>定时任务状态 <span>最近一次执行结果</span></h2>');
+  const last = (jb && jb.last) || {};
+  const keys = Object.keys(last);
+  if(!keys.length){
+    return head + `<div class="empty">尚无任务记录。</div>`
+      + `<div class="why">${esc((jb && jb.message) || '定时任务按各自间隔启动。')}</div></div>`;
+  }
+  // 故障排最前：一眼先看到坏掉的
+  const ORDER = {fail:0, unknown:1, skip:2, ok:3};
+  const JNAME = {sync:'赛程同步', history:'历史回填', backtest:'回测',
+                 auto_predict:'自动预测', settle:'赛果结算', prematch:'赛前刷新',
+                 review:'每日复盘', daily:'每日推送'};
+  let rows = '';
+  keys.sort((a,b)=>(ORDER[last[a].status]??9)-(ORDER[last[b].status]??9));
+  for(const k of keys){
+    const v = last[k], st = v.status || 'unknown';
+    const cls = st==='ok' ? 'jok' : (st==='fail' ? 'jfail' : 'jskip');
+    const mark = st==='ok' ? '✓' : (st==='fail' ? '✗' : (st==='skip' ? '–' : '?'));
+    const msg = v.message ? esc(v.message) : (st==='ok' ? '正常' : '');
+    rows += `<tr><td><span class="jb ${cls}">${mark}</span> ${esc(JNAME[k] || k)}</td>`
+      + `<td class="num">${esc(String(v.created_at||'').slice(5,16).replace('T',' '))}</td>`
+      + `<td class="jmsg">${msg}</td></tr>`;
+  }
+  return head + `<div class="tblwrap"><table class="tbl-jobs">
+    <thead><tr><th>任务</th><th class="num">时间</th><th>说明</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="why">✗ = 最近一次失败（需排查） · – = 主动跳过（非故障） · ? = 从未记录</div>
+    </div>`;
 }
 
 function backtestCard(bt, noHead){
@@ -447,7 +541,7 @@ function backtestCard(bt, noHead){
   const win = (bt.items && bt.items[0] && (bt.items[0].window_start || bt.items[0].window_end))
     ? ` · 语料窗口 ${esc(String(bt.items[0].window_start||'')).slice(0,10)} → ${esc(String(bt.items[0].window_end||'')).slice(0,10)}`
     : '';
-  return head + `<div class="tblwrap"><table><thead><tr><th>时间</th><th>口径</th><th class="num">场次</th>`
+  return head + `<div class="tblwrap"><table class="tbl-bt"><thead><tr><th>时间</th><th>口径</th><th class="num">场次</th>`
     + `<th class="num">方向命中</th><th class="num">比分命中</th>`
     + `<th class="num">Log Loss</th><th class="num">RPS</th>`
     + `<th class="num">新增</th><th class="num">库内/语料</th><th>判定</th></tr></thead>`
@@ -462,23 +556,48 @@ function backtestCard(bt, noHead){
     + `</div></div>`;
 }
 
+/* 预测方向 → 中文。后端存的是 home/draw/away，直接显示英文不利于快速扫读。 */
+const PRED = {home:'主胜', draw:'平局', away:'客胜'};
+
 function auditCard(a, noHead){
   const head = `<div class="card">`
     + (noHead ? '' : '<h2>预测审计 <span>预测 vs 实际</span></h2>');
   const items = a.items || [];
-  if(!items.length) return head + `<div class="empty">暂无已结算的预测。</div></div>`;
+  if(!items.length){
+    return head + `<div class="empty">暂无已结算的预测。</div>`
+      + `<div class="why">比赛结束后赛果由 settle_job 每 6 小时同步结算一次，`
+      + `结算完成才会出现在这里。</div></div>`;
+  }
+
+  // 宽屏：表格
   let rows = '';
   items.slice(0,30).forEach(it=>{
     rows += `<tr>
-      <td>${esc(it.kickoff||'').slice(0,10)}</td>
+      <td>${esc(String(it.kickoff||'').slice(0,10))}</td>
       <td>${esc(it.home_cn || it.home)} vs ${esc(it.away_cn || it.away)}</td>
-      <td>${esc(it.predicted)}</td>
+      <td>${esc(PRED[it.predicted] || it.predicted || '—')}</td>
       <td class="num">${esc(it.score)}</td>
       <td class="${it.hit?'hit':'miss'}">${it.hit?'✓':'✗'}</td></tr>`;
   });
-  return head + `<div class="tblwrap"><table>
+  const tbl = `<div class="tblwrap audit-tbl"><table>
     <thead><tr><th>日期</th><th>比赛</th><th>预测</th><th class="num">比分</th><th>结果</th></tr></thead>
-    <tbody>${rows}</tbody></table></div></div>`;
+    <tbody>${rows}</tbody></table></div>`;
+
+  // 窄屏：卡片流。表格 5 列在手机上横向溢出，预测/比分/结果三列
+  // 被推到屏幕外——表现为「板块只有日期和比赛两列」。
+  let cards = '';
+  items.slice(0,30).forEach(it=>{
+    cards += `<div class="arow">
+      <div class="at"><span>${esc(it.home_cn || it.home)} vs ${esc(it.away_cn || it.away)}</span>
+        <span class="sc">${esc(it.score || '—')}</span></div>
+      <div class="am">
+        <span class="tag ${it.hit?'ok':'no'}">${it.hit?'命中':'未中'}</span>
+        <span>预测 ${esc(PRED[it.predicted] || it.predicted || '—')}</span>
+        <span class="dt">${esc(String(it.kickoff||'').slice(0,10))}</span>
+      </div></div>`;
+  });
+
+  return head + tbl + `<div class="audit-list">${cards}</div>` + `</div>`;
 }
 
 /* ---------- 今日赛程：与 Telegram 推送同源 ---------- */
@@ -583,13 +702,14 @@ async function load(){
   $('root').innerHTML = '<div class="empty">正在加载数据…</div>';
   addDebugLog('=== 开始加载页面数据 ===');
   try{
-    const [h, health, audit, strength, fx, bt] = await Promise.all([
+    const [h, health, audit, strength, fx, bt, jb] = await Promise.all([
       get('/health').catch(() => ({status:'error', version:'?', persistent:false})),
       get('/health/model').catch(() => ({status:'empty'})),
       get('/audit?limit=50').catch(() => ({status:'empty', items:[]})),
       get('/strength').catch(() => ({status:'empty', items:[]})),
       get('/fixtures?days=' + RANGE).catch(() => ({status:'empty', date:'', total:0, leagues:[]})),
-      get('/backtest').catch(() => ({status:'empty', count:0, items:[]}))
+      get('/backtest').catch(() => ({status:'empty', count:0, items:[]})),
+      get('/jobs').catch(() => ({status:'empty', last:{}, recent:[]}))
     ]);
     $('ver').textContent = 'v' + (h.version || '?');
     // 页脚版本取自 /health 的真实部署版本（RAILWAY_GIT_COMMIT_SHA），
@@ -616,7 +736,9 @@ async function load(){
       + section('sec-audit', '🔍', '预测审计', '最近已结算的预测 vs 实际',
           auditCard(audit, true))
       + section('sec-team', '🏆', '球队强度榜', '模型在用的攻防强度',
-          strengthCard(strength, true));
+          strengthCard(strength, true))
+      + section('sec-jobs', '⚙️', '定时任务状态', '跑没跑 · 成功没成功',
+          jobsCard(jb, true));
     addDebugLog('✅ 页面加载成功');
   }catch(err){
     $('health').className = 'pill bad';

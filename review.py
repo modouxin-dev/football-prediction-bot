@@ -36,6 +36,19 @@ MID_CONF = 0.40
 # 3 场全中显示 100% 会误导人去相信一个根本不存在的规律。
 MIN_SAMPLE = 8
 
+# 归因窗口（分组统计 / Brier 分解）的默认天数。
+#
+# 为什么不是 7 天：实测线上 7 天只结算约 40 场，而复盘要按
+# 联赛 / 方向 / 信心档 / 口径 四个维度分组——40 场切成 6 个联赛后
+# 每组不足 8 场，全部标 thin，于是"样本不足"天天报、且**永远自愈不了**：
+# 窗口写死 7 天，样本量上限就被钉死，攒再多历史数据也进不来。
+# 放到 30 天（约 160 场）后分组才有统计意义。
+DEFAULT_ATTRIBUTION_DAYS = 30
+
+# 近期状态窗口：只看时效，不参与归因。
+# 归因要样本量、近期要时效性，两者不可兼得，因此拆成两层各司其职。
+DEFAULT_RECENT_DAYS = 7
+
 _OUTCOMES = ("主胜", "平局", "客胜")
 
 
@@ -187,8 +200,24 @@ def murphy_verdict(dec: dict | None,
     return "✅ 标定与区分度都在正常区间，暂无单点瓶颈"
 
 
-def _hit_rate(hits: int, total: int) -> float | None:
-    """命中率；样本不足返回 None（不报数字比报错觉的数字更诚实）。"""
+def _hit_rate(hits: int, total: int, min_total: int = 1) -> float | None:
+    """命中率；样本不足返回 None（不报数字比报错觉的数字更诚实）。
+
+    Args:
+        hits: 命中场次数。
+        total: 总场次数。
+        min_total: 报率所需的最小样本量，默认 1（即只要有样本就报）。
+            分组归因必须显式传 MIN_SAMPLE——3 场全中显示 100% 会误导人
+            去相信一个根本不存在的规律。
+
+    Returns:
+        float 或 None。None 表示"样本不足，不下结论"。
+    """
+    # 原实现只在 total=0 时返回 None，与 docstring 承诺的"样本不足返回 None"
+    # 不符——MIN_SAMPLE 的判定根本没有生效，导致 thin 分组照样报出
+    # 100%（3/3）这种假规律。这里补齐。
+    if total < min_total:
+        return None
     return hits / total if total else None
 
 
@@ -285,7 +314,9 @@ def _group(items: list[dict], key) -> list[dict]:
         hits = sum(1 for g in group if g["hit"])
         out.append({
             "name": str(name), "n": len(group), "hits": hits,
-            "rate": _hit_rate(hits, len(group)),
+            # 显式传 MIN_SAMPLE：thin 分组的 rate 必须是 None，
+            # 否则 _fmt_group 会把 100%（3/3）当成真规律报出去。
+            "rate": _hit_rate(hits, len(group), MIN_SAMPLE),
             "thin": len(group) < MIN_SAMPLE,
         })
     # 样本多的排前面：让结论先落在有统计意义的地方
@@ -316,10 +347,22 @@ def _baselines(items: list[dict]) -> dict:
 # 三、主入口
 # ============================================================================
 
-def daily_review(db_path: str, since_days: int = 7) -> dict:
+def daily_review(db_path: str, since_days: int = 7,
+                 recent_days: int | None = None) -> dict:
     """生成复盘报告。
 
-    返回 status=empty（无已结算样本）/ ok。
+    Args:
+        db_path: SQLite 路径。
+        since_days: **归因窗口**天数，决定分组统计、Brier 分解、标定判定
+            用哪些样本。<=0 表示不限时间（全量）。
+        recent_days: **近期窗口**天数，只用于报"最近这几天手感如何"。
+            None（默认）= 不额外计算。近期窗口只报数字、不参与归因，
+            因为它的样本量不足以支撑任何分组结论。
+
+    Returns:
+        dict，status 为 "empty"（无已结算样本）或 "ok"。
+        另含 "recent" 键：近 recent_days 天的 {days, settled, hits, accuracy}，
+        样本不足 8 场时 accuracy 为 None（不报率，避免假规律）。
     """
     items = _load(db_path, since_days)
     if not items:
@@ -338,6 +381,23 @@ def daily_review(db_path: str, since_days: int = 7) -> dict:
     by_dir = _group(items, lambda it: it["pred"])
     by_conf = _group(items, lambda it: it["conf"])
     by_src = _group(items, lambda it: "市场融合" if it["market"] else "泊松回落")
+
+    # 近期状态：只报数字，不做任何分组归因。
+    # 样本不足 MIN_SAMPLE 时 accuracy 为 None——宁可不报，也不用 3 场 100%
+    # 去暗示一个根本不存在的规律。
+    recent: dict | None = None
+    if recent_days:
+        r_items = _load(db_path, recent_days)
+        if r_items:
+            r_hits = sum(1 for it in r_items if it["hit"])
+            recent = {
+                "days": recent_days,
+                "settled": len(r_items),
+                "hits": r_hits,
+                # 显式传 MIN_SAMPLE：近期窗口必然样本不足（7 天约 40 场），
+                # 但报一个 3 场 100% 的"近期命中率"会让人误判手感。
+                "accuracy": _hit_rate(r_hits, len(r_items), MIN_SAMPLE),
+            }
 
     # 高信心档是否真的更准：这是「模型有没有自知之明」的核心检验
     conf_ok = None
@@ -382,6 +442,7 @@ def daily_review(db_path: str, since_days: int = 7) -> dict:
         "hits": hits,
         "accuracy": overall,
         "baselines": base,
+        "recent": recent,
         # Brier 分解：回答「失分失在哪」，而不是只报命中率
         "murphy": murphy_decomposition(items),
         "edge_vs_home": overall - base["always_home"],
@@ -402,10 +463,17 @@ def daily_review(db_path: str, since_days: int = 7) -> dict:
 # ============================================================================
 
 def _fmt_group(g: dict | None) -> str:
+    """渲染一个分组。样本不足时**只报数不报率**。
+
+    原实现把 rate 和「⚠️样本少」一起显示——问题是 100%（3/3）这个数字
+    本身就足够误导，加个警告标记并不能抵消它。不足 MIN_SAMPLE 时
+    直接不显示百分比，只说「n 场（不足 8 场）」。
+    """
     if not g:
         return "—"
-    thin = " ⚠️样本少" if g["thin"] else ""
-    return f"{g['name']} {_pct(g['rate'])}（{g['hits']}/{g['n']}）{thin}"
+    if g.get("thin") or g.get("rate") is None:
+        return f"{g['name']} {g['n']} 场（不足 {MIN_SAMPLE} 场，不报率）"
+    return f"{g['name']} {_pct(g['rate'])}（{g['hits']}/{g['n']}）"
 
 
 def render_review(rv: dict) -> str:
@@ -418,16 +486,33 @@ def render_review(rv: dict) -> str:
         )
 
     b = rv["baselines"]
+    wd = rv['window_days']
+    win = "全量" if (not wd or wd <= 0) else f"近 {wd} 天"
     lines = [
-        f"📊 <b>每日复盘</b> · 近 {rv['window_days']} 天",
+        f"📊 <b>每日复盘</b> · 归因 {win}（{rv['settled']} 场）",
         "",
         f"✅ 命中 <b>{rv['hits']}/{rv['settled']}</b> · <b>{_pct(rv['accuracy'])}</b>",
+    ]
+    # 近期状态单独一行：归因要样本量、近期要时效性，两者不可兼得，
+    # 分开报才不会让人误以为「最近不准 = 模型不行」。
+    rc = rv.get("recent")
+    if rc:
+        if rc["accuracy"] is None:
+            lines.append(
+                f"🕐 近 {rc['days']} 天 {rc['settled']} 场（不足 {MIN_SAMPLE} 场，暂不报率）"
+            )
+        else:
+            lines.append(
+                f"🕐 近 {rc['days']} 天 {rc['hits']}/{rc['settled']} · "
+                f"<b>{_pct(rc['accuracy'])}</b>"
+            )
+    lines.extend([
         f"📉 基线：永远猜主胜 {_pct(b['always_home'])} · 猜最高频 {_pct(b['best_freq'])} · 瞎猜 33.3%",
         f"📈 相对基线 <b>{rv['edge_vs_home'] * 100:+.1f}pt</b>（vs 主胜）"
         f" / {rv['edge_vs_freq'] * 100:+.1f}pt（vs 高频）",
         "",
         "<b>哪类准 / 哪类不准</b>",
-    ]
+    ])
     if rv["best_group"] and rv["worst_group"]:
         lines.append(f"· 最好：{_fmt_group(rv['best_group'])}")
         lines.append(f"· 最差：{_fmt_group(rv['worst_group'])}")
@@ -481,5 +566,21 @@ def render_review(rv: dict) -> str:
     else:
         lines.append("ℹ️ 信心档样本还不足，暂不判断标定好坏")
 
-    lines.append("<i>样本不足 8 场的分组只计数不报率，避免假规律</i>")
+    # 把「样本不足」讲具体：哪一维、差多少、多久能补上。
+    # 原来那句「样本不足 8 场的分组只计数不报率」只解释规则，
+    # 不告诉用户该等还是该改，天天发就成了噪音。
+    thin_dims = []
+    for dim, groups in (("联赛", rv["by_league"]), ("方向", rv["by_dir"]
+
+                        if "by_dir" in rv else rv["by_direction"]),
+                        ("信心档", rv["by_confidence"]), ("口径", rv["by_source"])):
+        t = [g for g in groups if g["thin"]]
+        if t:
+            need = max(MIN_SAMPLE - g["n"] for g in t)
+            thin_dims.append(f"{dim}（还差 {need} 场）")
+    if thin_dims:
+        lines.append(f"<i>· {'、'.join(thin_dims)}样本不足 {MIN_SAMPLE} 场，"
+                     f"只计数不报率，避免假规律</i>")
+    else:
+        lines.append(f"<i>· 各分组样本均≥{MIN_SAMPLE} 场，分组结论可用</i>")
     return "\n".join(lines)

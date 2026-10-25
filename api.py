@@ -42,6 +42,7 @@ except ImportError as exc:  # pragma: no cover - 未装可选依赖时给出明�
     ) from exc
 
 import analytics  # noqa: E402
+import joblog  # noqa: E402
 import paths  # noqa: E402
 from repository import PredictionRepository  # noqa: E402
 
@@ -441,6 +442,40 @@ async def fixtures(date: str | None = None, days: int = 1, limit: int = 100) -> 
         "total": total,
         "leagues": payload,
         "message": message,
+    })
+
+
+@app.get("/jobs")
+async def jobs(limit: int = 20) -> JSONResponse:
+    """定时任务执行状态：每个 job 最近一次是成功还是失败。
+
+    为什么需要这个端点：此前 7 个 job 的失败只写日志，机器人照常推送、
+    看板显示旧数据，用户以为一切正常。落进 job_runs 表后，
+    「回测到底跑没跑」变成看板上一行字，而不是一次日志考古。
+
+    status 语义：
+        ok   —— 最近一次执行成功
+        fail —— 最近一次失败（message 为原因摘要）
+        skip —— 主动跳过（无样本 / 未启用），**不是故障**
+        unknown —— 从未记录（尚未到首次执行时间，或 job 未注册）
+    """
+    limit = max(1, min(int(limit), 100))
+    try:
+        last = joblog.last_status(_DB_PATH)
+        recent = joblog.recent(_DB_PATH, limit=limit)
+    except Exception as exc:
+        log.exception("/jobs 读取失败")
+        raise HTTPException(status_code=500, detail=f"读取任务状态失败：{exc}") from exc
+    return JSONResponse({
+        "version": _VERSION,
+        "status": "ok" if last else "empty",
+        "count": len(last),
+        "last": last,
+        "recent": recent,
+        "message": (
+            "" if last else
+            "尚无任务记录。定时任务按各自间隔启动，首次生效在启动后数分钟。"
+        ),
     })
 
 
