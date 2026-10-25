@@ -21,7 +21,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -329,6 +329,23 @@ CREATE TABLE IF NOT EXISTS job_runs (
 CREATE INDEX IF NOT EXISTS idx_job_runs_job_time
     ON job_runs(job, created_at DESC);
 
+-- 外部数据缓存：看板「正在进行」与「预测详情」的阵容/赔率都来自外网。
+-- 为什么必须落库而不是靠进程内缓存：
+--   1. 进程内缓存随容器重启清空，Railway 每次部署后第一轮全打外网；
+--   2. 看板是多人共用的，十个人先后点同一场比赛就发十次一模一样的请求，
+--      而这些数据本身几分钟内根本不会变；
+--   3. 订阅额度虽然充裕，但配额是按天结算的硬上限，打光后整套系统停摆，
+--      不该让「刷新页面」这种只读动作具备耗尽额度的能力。
+-- 缓存键含数据类型与比赛 ID，过期时间随类型不同（见 CACHE_TTL）。
+CREATE TABLE IF NOT EXISTS external_cache (
+    key         TEXT PRIMARY KEY,   -- 如 live:list、lineups:12345、odds:12345
+    payload     TEXT NOT NULL,      -- JSON 字符串
+    fetched_at  TEXT NOT NULL,      -- 实际拉取时刻（ISO8601 UTC）
+    expires_at  TEXT NOT NULL       -- 过期时刻，用于一次查询判断有效性
+);
+CREATE INDEX IF NOT EXISTS idx_external_cache_expires
+    ON external_cache(expires_at);
+
 -- 迁移完成标记：补列脚本必须幂等，且跑过一次后不必每次启动都扫全表。
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name        TEXT PRIMARY KEY,
@@ -522,6 +539,92 @@ class PredictionRepository:
             conn.commit()
         except Exception as exc:
             log.warning("补建 predictions.fixture_json 列失败：%s", exc)
+
+    # 外部数据缓存 TTL（秒）。按「数据本身多长时间会变一次」定，
+    # 而不是按「额度还剩多少」定——额度是结果不是依据。
+    #   live_list：比分，场上随时可能变，60 秒
+    #   lineups ：首发，公布后基本不动，10 分钟
+    #   odds    ：赔率，赛前缓慢波动，10 分钟
+    CACHE_TTL = {"live": 60, "lineups": 600, "odds": 600}
+
+    def cache_read(self, key: str, *, allow_stale: bool = True):
+        """读外部数据缓存。
+
+        返回 (payload, fetched_at, stale)。payload 为 None 表示完全没缓存。
+
+        allow_stale=True 时，即使已过期也把旧值返回出去并置 stale=True——
+        用途是外网拉取失败时的兜底：看板宁可显示「10 分钟前的阵容」
+        并注明时间，也不要在额度耗尽或主源抖动时整块空白。
+        但**过期数据在新鲜数据可得时绝不使用**，调用方必须先试新鲜值。
+        """
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT payload, fetched_at, expires_at FROM external_cache WHERE key = ?",
+                (key,),
+            ).fetchone()
+        except Exception as exc:
+            log.warning("读取外部缓存失败（key=%s）：%s", key, exc)
+            return None, None, False
+        if row is None:
+            return None, None, False
+        try:
+            payload = json.loads(row["payload"])
+        except (ValueError, TypeError) as exc:
+            log.warning("外部缓存内容损坏（key=%s）：%s", key, exc)
+            return None, None, False
+        now = datetime.now(timezone.utc).isoformat()
+        stale = bool(row["expires_at"]) and now > row["expires_at"]
+        if stale and not allow_stale:
+            return None, row["fetched_at"], False
+        return payload, row["fetched_at"], stale
+
+    def cache_write(self, key: str, payload: Any, kind: str = "odds") -> str | None:
+        """写外部数据缓存，成功返回写入的 fetched_at，失败返回 None。
+
+        kind 决定 TTL（见 CACHE_TTL）。
+
+        为什么要把 fetched_at 返回出去：调用方拿到数据后要告诉用户
+        「这份数据是什么时候取的」。如果它自己再调一次 now()，
+        返回的时间戳就和库里记的那一次差上几微秒——两次取值不一致，
+        排查缓存问题时会对不上账。所以以库里落下的那一版为准。
+
+        写入失败只告警：缓存是优化手段，不是数据来源，
+        缓存写不进去不该让本次请求失败。
+        """
+        ttl = int(self.CACHE_TTL.get(kind, 600))
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(seconds=ttl)).isoformat()
+        try:
+            conn = self._connect()
+            conn.execute(
+                "INSERT INTO external_cache(key, payload, fetched_at, expires_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                "payload=excluded.payload, fetched_at=excluded.fetched_at, "
+                "expires_at=excluded.expires_at",
+                (key, json.dumps(payload, ensure_ascii=False), now.isoformat(), expires),
+            )
+            conn.commit()
+            return now.isoformat()
+        except Exception as exc:
+            log.warning("写入外部缓存失败（key=%s）：%s", key, exc)
+            return None
+
+    def cache_purge_expired(self, *, keep_stale_hours: int = 24) -> int:
+        """清掉过期超过 keep_stale_hours 的缓存行，返回删除行数。
+
+        为什么不是过期即删：过期缓存还要留着当外网失败时的兜底，
+        立刻删掉等于把兜底也扔了。留 24 小时足够覆盖一次主源长时间故障。
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=keep_stale_hours)).isoformat()
+        try:
+            conn = self._connect()
+            cur = conn.execute("DELETE FROM external_cache WHERE expires_at < ?", (cutoff,))
+            conn.commit()
+            return int(cur.rowcount or 0)
+        except Exception as exc:
+            log.warning("清理外部缓存失败：%s", exc)
+            return 0
 
     def get_fixture_json(self, fixture_id) -> dict[str, Any] | None:
         """取回该场比赛的原始赛程快照；没有快照返回 None（不抛异常）。

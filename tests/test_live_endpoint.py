@@ -18,6 +18,23 @@ import json
 import pytest
 
 import api as apimod
+from repository import PredictionRepository
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache():
+    """/live 现在走 60 秒 TTL 的库级缓存，测试之间会互相污染：
+    前一个用例写进去的结果会被下一个用例直接命中，
+    导致「本该重新拉取」的场景拿到别人的旧数据。
+    缓存是被测行为的一部分，所以只能在用例之间清库，
+    不能在端点里关掉它。"""
+    yield
+    try:
+        conn = PredictionRepository(apimod._DB_PATH)._connect()
+        conn.execute("DELETE FROM external_cache")
+        conn.commit()
+    except Exception:
+        pass
 
 
 def mk_fx(fid, home, away, hs, as_, status="2H", elapsed=67):

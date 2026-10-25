@@ -48,6 +48,7 @@ HISTORY_JOB = "sync_history"
 AUTO_PREDICT_JOB = "auto_predict"
 PREMATCH_JOB = "prematch_refresh"
 REVIEW_JOB = "daily_review"
+CACHE_JOB = "cache_purge"
 
 # 历史赛季回填与回测都是重活：前者要拉整季（数百场，吃 API 额度），
 # 后者要逐场滚动预测（1100 场约数十秒）。默认每天各一次即可，
@@ -461,6 +462,28 @@ async def history_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         joblog.fail(getattr(service.settings, "db_path", None), HISTORY_JOB, exc)
 
 
+async def cache_purge_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """清掉过期很久的外部数据缓存。
+
+    为什么必须有个任务来扫：external_cache 每取一次外部数据就多一行，
+    键是「类型+比赛ID」，一场比赛赛前赛后能被取很多次。只增不删的话
+    表会一直涨，而它里面装的都是几十分钟后就没用的临时数据。
+
+    为什么不是过期即删（见 cache_purge_expired 的 24 小时宽限）：
+    过期缓存还要留着当外网失败时的兜底，立刻删等于把兜底也扔了。
+    """
+    app = context.application
+    service: PredictionService = app.bot_data["service"]
+    db_path = getattr(service.settings, "db_path", None)
+    try:
+        n = service.repo.cache_purge_expired()
+        log.info("外部缓存清理完成：删除 %d 条过期记录", n)
+        joblog.ok(db_path, CACHE_JOB)
+    except Exception as exc:
+        log.warning("外部缓存清理失败：%s", exc)
+        joblog.fail(db_path, CACHE_JOB, exc)
+
+
 async def backtest_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """跑一次全量回测并把结论落盘。
 
@@ -568,8 +591,13 @@ def setup_scheduler(app, settings: Settings) -> int:
     app.job_queue.run_repeating(
         settle_job, interval=6 * 3600, first=300, name=SETTLE_JOB,
     )
-    # 5 = 同步 / 历史回填 / 回测 / 自动预测 / 结算；赛前刷新按开关另计。
-    registered = 6 if prematch_registered else 5
+    # 缓存清理：每天扫一次足够，过期缓存本来还要留 24 小时当兜底。
+    app.job_queue.run_repeating(
+        cache_purge_job, interval=24 * 3600, first=3600, name=CACHE_JOB,
+    )
+    # 6 = 同步 / 历史回填 / 回测 / 自动预测 / 结算 / 缓存清理；
+    # 赛前刷新按开关另计。
+    registered = 7 if prematch_registered else 6
     if settings.chat_id:
         app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
         # 每日复盘：把「准在哪、不准在哪」讲清楚，是进步型机器人的反馈回路

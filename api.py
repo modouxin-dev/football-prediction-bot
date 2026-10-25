@@ -694,6 +694,66 @@ def _live_shape(fx: dict, detail: dict) -> dict:
     }
 
 
+async def _cached_fetch(key: str, kind: str, fetch_factory, *, allow_stale: bool = True,
+                        should_cache=None):
+    """先查缓存，未命中才打外网，外网失败时退回过期缓存。
+
+    为什么必须拦截在端点之前：
+      看板是多人共用的，十个人先后点同一场比赛就发十次一模一样的请求，
+      而这些数据几分钟内根本不会变。额度是按天结算的硬上限，打光后整套
+      系统停摆——不该让「刷新页面」这种只读动作具备耗尽额度的能力。
+
+    返回 (value, fetched_at, stale, error)：
+      value      数据；None 表示这次确实没拿到
+      fetched_at **实际拉取时刻**（不是当前时刻）——缓存命中时返回旧时间戳，
+                 这样前端能如实显示「截至 10:32」，而不是假装刚取到
+      stale      是否使用了过期缓存（True 时必须提示用户数据可能滞后）
+      error      拉取失败原因；缓存命中时为 None
+
+    fetch_factory 是**工厂而非协程**：缓存命中时根本不该创建协程，
+    否则每次都会留下一个 never-awaited 的协程对象（运行时告警 + 资源泄漏）。
+
+    allow_stale=False 用于不允许糊弄的场合（如比分），此时过期即视为无缓存。
+
+    should_cache(value) → bool，返回 False 时不写入缓存。
+    用于「空结论」——见 /live：没比赛这个事实随时可能变，缓存它会让
+    「比赛刚开始」最多延迟一个 TTL 才显示，而省下的只是每人一次请求，
+    明显不划算。
+    """
+    repo = _repo()
+    try:
+        payload, fetched, _ = repo.cache_read(key, allow_stale=False)
+    except Exception as exc:
+        log.warning("读缓存异常（key=%s）：%s", key, exc)
+        payload, fetched = None, None
+    if payload is not None:
+        return payload, fetched, False, None
+
+    try:
+        value = await fetch_factory()
+        written_at = None
+        keep = should_cache(value) if should_cache else True
+        if keep:
+            try:
+                # 以库里落下的那一版时间戳为准，不在这里再取一次 now()——
+                # 两次取值会差几微秒，缓存命中时返回的时间戳就对不上库里的记录。
+                written_at = repo.cache_write(key, value, kind)
+            except Exception as exc:
+                log.warning("写缓存异常（key=%s）：%s", key, exc)
+        return value, written_at or _now_iso(), False, None
+    except Exception as exc:
+        if not allow_stale:
+            return None, None, False, str(exc)
+        try:
+            payload, fetched, _ = repo.cache_read(key, allow_stale=True)
+        except Exception as exc2:
+            log.warning("读过期缓存异常（key=%s）：%s", key, exc2)
+            payload, fetched = None, None
+        if payload is not None:
+            return payload, fetched, True, str(exc)
+        return None, None, False, str(exc)
+
+
 @app.get("/prediction/{fixture_id}")
 async def prediction_detail(fixture_id: str) -> JSONResponse:
     """单场预测的完整详情：方向 / 比分 / 大小球 / 信心等级 / 阵容 / 赔率。
@@ -730,10 +790,11 @@ async def prediction_detail(fixture_id: str) -> JSONResponse:
     # 温度校准开关变化而与当初推送给用户的结论不一致。
     top_scores = inputs.get("top_scores") or []
 
-    # 阵容/赔率实时取，失败降级为空但保留原因
+    # 阵容/赔率：走缓存，未过期直接复用（多人点同一场只发一次请求）
     lineups: list[dict] = []
     odds: dict | None = None
     detail_errors: dict[str, str] = {}
+    detail_fetched: dict[str, str] = {}
     client = _live_client()
     if client:
         try:
@@ -744,19 +805,26 @@ async def prediction_detail(fixture_id: str) -> JSONResponse:
         if fid is not None:
             import asyncio
 
-            async def _one(coro, key: str):
-                try:
-                    return await coro
-                except Exception as exc:  # noqa: BLE001
-                    detail_errors[key] = str(exc)
-                    return None
+            raw_lineups, lu_at, lu_stale, lu_err = await _cached_fetch(
+                f"lineups:{fid}", "lineups", lambda: client.get_lineups(fid))
+            raw_odds, od_at, od_stale, od_err = await _cached_fetch(
+                f"odds:{fid}", "odds", lambda: client.get_odds(fid))
 
-            raw_lineups, raw_odds = await asyncio.gather(
-                _one(client.get_lineups(fid), "lineups"),
-                _one(client.get_odds(fid), "odds"),
-            )
+            if lu_err and raw_lineups is None:
+                detail_errors["lineups"] = lu_err
+            if od_err and raw_odds is None:
+                detail_errors["odds"] = od_err
             lineups = _norm_lineups(raw_lineups or [])
             odds = _norm_odds(raw_odds)
+            # 告诉前端这份数据是何时真拉取的，以及是否用了过期缓存
+            if lu_at:
+                detail_fetched["lineups"] = lu_at
+            if od_at:
+                detail_fetched["odds"] = od_at
+            if lu_stale:
+                detail_fetched["lineups_stale"] = "true"
+            if od_stale:
+                detail_fetched["odds_stale"] = "true"
     else:
         detail_errors["client"] = "实时客户端不可用，阵容与赔率未取"
 
@@ -788,9 +856,10 @@ async def prediction_detail(fixture_id: str) -> JSONResponse:
         "top_scores": top_scores,
         "data_completeness": inputs.get("data_completeness"),
         "odds_error": inputs.get("odds_error"),
-        # 以下为实时取回
+        # 以下为实时取回（可能来自缓存，fetched_at 为实际拉取时刻）
         "lineups": lineups,
         "odds": odds,
+        "fetched_at": detail_fetched,
         "errors": detail_errors,
     })
 
@@ -800,10 +869,14 @@ async def live(detail: int = 1) -> JSONResponse:
     """正在进行的比赛：实时比分 + 阵容 + 伤停 + 赔率。
 
     `detail=0` 只取赛况列表（1 次请求），`detail=1`（默认）再逐场并发取
-    阵容/伤停/赔率。前端轮询时可用 detail=0 省额度，用户点开某场再取详情。
+    阵容/伤停/赔率。
 
     ⚠️ 依赖付费能力 `fixtures?live=all`。取不到时**明确告知原因**，
     绝不能显示成「当前没有进行中的比赛」——那会让人一直等下去。
+
+    结果按 60 秒 TTL 落库缓存：看板多人共用，先后打开同一页面不该
+    各打一次外网。缓存命中时 `updated_at` 返回**实际拉取时刻**，
+    由前端如实显示「截至 10:32」，而不是假装刚取到。
     """
     client = _live_client()
     if not client:
@@ -812,73 +885,88 @@ async def live(detail: int = 1) -> JSONResponse:
             "items": [], "updated_at": _now_iso(),
             "message": "实时赛况不可用：未配置 API Key 或客户端初始化失败。",
         })
-    try:
+
+    async def _build() -> dict[str, Any]:
+        """真正打外网并组装响应体。只在缓存未命中时执行。"""
         raw = await client.get_live_fixtures()
-    except Exception as exc:
-        log.warning("/live 拉取失败：%s", exc)
+        live_rows = _pick_live(raw)
+        err = getattr(getattr(client, "primary", None), "last_live_error", None)
+
+        if not live_rows:
+            # 空列表必须解释清楚，否则用户无从判断是该等还是该换套餐
+            if err:
+                msg = (f"实时端点不可用：{err}。"
+                       "若提示套餐或权限，说明当前订阅不含 live 能力，"
+                       "需在 API-Football 控制台确认套餐。")
+                status = "unsupported"
+            else:
+                msg = "此刻没有正在进行的比赛。比赛开始后本板块会自动出现。"
+                status = "empty"
+            return {"status": status, "count": 0, "items": [],
+                    "updated_at": _now_iso(), "message": msg}
+
+        picked = live_rows[:LIVE_MAX_MATCHES]
+        truncated = max(0, len(live_rows) - len(picked))
+
+        items: list[dict] = []
+        if detail:
+            import asyncio
+
+            async def _one(fx: dict) -> dict:
+                fid = (fx.get("fixture") or {}).get("id")
+                det: dict[str, Any] = {"errors": {}}
+                calls = {
+                    "lineups": lambda: client.get_lineups(fid),
+                    "injuries": lambda: client.get_injuries(fid),
+                    "odds": lambda: client.get_odds(fid),
+                }
+                results = await asyncio.gather(
+                    *[c() for c in calls.values()], return_exceptions=True)
+                for key, value in zip(calls, results):
+                    if isinstance(value, BaseException):
+                        # 单个可选字段失败不影响整场展示，但原因要留痕
+                        det["errors"][key] = str(value)
+                        det[key] = [] if key != "odds" else None
+                    else:
+                        det[key] = value
+                return _live_shape(fx, det)
+
+            items = list(await asyncio.gather(*[_one(fx) for fx in picked]))
+        else:
+            items = [_live_shape(fx, {}) for fx in picked]
+
+        return {
+            "status": "ok", "count": len(items), "items": items,
+            "updated_at": _now_iso(), "truncated": truncated,
+            "message": (f"另有 {truncated} 场进行中未展示（单轮上限 "
+                        f"{LIVE_MAX_MATCHES} 场，避免额度过快耗尽）。"
+                        if truncated else ""),
+        }
+
+    body, fetched_at, stale, err = await _cached_fetch(
+        f"live:list:{1 if detail else 0}", "live", _build,
+        # 只缓存「有比赛」的结果。empty / unsupported 随时可能变，
+        # 缓存它们会让刚开踢的比赛迟迟不出现，也会把「套餐不支持」
+        # 这个需要及时发现的状态盖住。
+        should_cache=lambda v: v.get("status") == "ok")
+
+    if body is None:
         return JSONResponse({
             "version": _VERSION, "status": "error", "count": 0,
             "items": [], "updated_at": _now_iso(),
-            "message": f"实时赛况拉取失败：{exc}",
+            "message": f"实时赛况拉取失败：{err}",
         })
 
-    live_rows = _pick_live(raw)
-    err = getattr(getattr(client, "primary", None), "last_live_error", None)
-
-    if not live_rows:
-        # 空列表必须解释清楚，否则用户无从判断是该等还是该换套餐
-        if err:
-            msg = (f"实时端点不可用：{err}。"
-                   "若提示套餐或权限，说明当前订阅不含 live 能力，"
-                   "需在 API-Football 控制台确认套餐。")
-            status = "unsupported"
-        else:
-            msg = "此刻没有正在进行的比赛。比赛开始后本板块会自动出现。"
-            status = "empty"
-        return JSONResponse({
-            "version": _VERSION, "status": status, "count": 0,
-            "items": [], "updated_at": _now_iso(), "message": msg,
-        })
-
-    picked = live_rows[:LIVE_MAX_MATCHES]
-    truncated = max(0, len(live_rows) - len(picked))
-
-    items: list[dict] = []
-    if detail:
-        import asyncio
-
-        async def _one(fx: dict) -> dict:
-            fid = (fx.get("fixture") or {}).get("id")
-            det: dict[str, Any] = {"errors": {}}
-            calls = {
-                "lineups": lambda: client.get_lineups(fid),
-                "injuries": lambda: client.get_injuries(fid),
-                "odds": lambda: client.get_odds(fid),
-            }
-            results = await asyncio.gather(
-                *[c() for c in calls.values()], return_exceptions=True)
-            for key, value in zip(calls, results):
-                if isinstance(value, BaseException):
-                    # 单个可选字段失败不影响整场展示，但原因要留痕
-                    det["errors"][key] = str(value)
-                    det[key] = [] if key != "odds" else None
-                else:
-                    det[key] = value
-            return _live_shape(fx, det)
-
-        items = list(await asyncio.gather(*[_one(fx) for fx in picked]))
-    else:
-        items = [_live_shape(fx, {}) for fx in picked]
-
-    return JSONResponse({
-        "version": _VERSION, "status": "ok",
-        "count": len(items), "items": items,
-        "updated_at": _now_iso(),
-        "truncated": truncated,
-        "message": (f"另有 {truncated} 场进行中未展示（单轮上限 "
-                    f"{LIVE_MAX_MATCHES} 场，避免额度过快耗尽）。"
-                    if truncated else ""),
-    })
+    body = dict(body)
+    body["version"] = _VERSION
+    # 用实际拉取时刻，不用当前时刻——缓存命中时两者不同，
+    # 显示当前时刻等于把旧数据伪装成刚取到的。
+    body["updated_at"] = fetched_at or body.get("updated_at")
+    if stale:
+        body["stale"] = True
+        body["message"] = (body.get("message") or "")
+        body["message"] += f"（最后一次成功拉取的快照，本次实时拉取失败：{err}）"
+    return JSONResponse(body)
 
 
 def main() -> None:  # pragma: no cover
