@@ -314,6 +314,21 @@ CREATE TABLE IF NOT EXISTS prematch_push (
     pushed_at   TEXT NOT NULL
 );
 
+-- 定时任务执行流水：回答「这个 job 到底跑没跑、成功没成功」。
+-- 为什么必须有：此前 7 个 job 的失败全部只写 log.warning，既不落库也不告警。
+-- 后果是机器人照常推送、看板显示旧数据，用户以为一切正常，
+-- 只有去翻 Railway 日志才知道某个 job 已经连续失败好几天。
+CREATE TABLE IF NOT EXISTS job_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job         TEXT NOT NULL,      -- 任务名（sync / backtest / settle ...）
+    status      TEXT NOT NULL,      -- ok / fail / skip
+    message     TEXT,               -- 失败原因或跳过原因，成功时为 NULL
+    duration_ms INTEGER,            -- 耗时，用于发现「跑得越来越慢」
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_job_runs_job_time
+    ON job_runs(job, created_at DESC);
+
 -- 迁移完成标记：补列脚本必须幂等，且跑过一次后不必每次启动都扫全表。
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name        TEXT PRIMARY KEY,
