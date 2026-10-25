@@ -184,6 +184,7 @@ class FootballAPI:
         retries: int = 2,
         retry_delay: float = 1.5,
         base_url: str | None = None,
+        quota_floor: int = 0,
     ) -> None:
         if provider not in PROVIDERS:
             raise ValueError(f"未知的数据源渠道：{provider}")
@@ -200,6 +201,12 @@ class FootballAPI:
         # 实现，容量上限与过期淘汰都保留。
         self._cache = _new_response_cache()
         self.quota_remaining: str | None = None
+        # 额度熔断阈值：剩余次数低于/等于此值时主动停手。
+        # 此前 quota_remaining 只被记录、从未被读取——有计数、有展示，
+        # 唯独没有熔断。额度打光后会一直发无效请求，直到各调用点各自失败，
+        # 期间整套系统处于无人知晓的停摆状态。
+        self.quota_floor = int(quota_floor) if quota_floor else 0
+        self._quota_left: int | None = None
         # 实时端点最后一次失败原因（None = 最近一次成功或从未调用）。
         # 用于区分「没有进行中的比赛」与「套餐不支持 live」。
         self.last_live_error: str | None = None
@@ -230,6 +237,15 @@ class FootballAPI:
         return data
 
     async def _request(self, path: str, params: dict[str, Any]) -> Any:
+        # ── 额度熔断 ────────────────────────────────────────────────
+        # 已知额度不足时直接拒发，不再消耗最后一次机会。
+        # 额度是按天结算的硬上限，打光后所有数据接口同时失效；
+        # 主动熔断能让失败发生在「可预期、可定位」的位置，
+        # 而不是散落在几十个调用点里各自超时。
+        if self.quota_exhausted:
+            raise APIError(
+                f"数据源额度已耗尽（剩余 {self.quota_remaining}），已主动停止请求。"
+                "额度每日重置，请稍后重试。")
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         url = f"{self._base_url}/{path}"
@@ -271,6 +287,29 @@ class FootballAPI:
         remaining = resp.headers.get("x-ratelimit-requests-remaining")
         if remaining is not None:
             self.quota_remaining = remaining
+            try:
+                self._quota_left = int(str(remaining).strip())
+            except (TypeError, ValueError):
+                # 头部不是整数（部分网关返回带引号的字符串），保持未知
+                self._quota_left = None
+
+    @property
+    def quota_left(self) -> int | None:
+        """数据源上报的剩余请求次数；未知返回 None（不猜）。"""
+        return self._quota_left
+
+    @property
+    def quota_exhausted(self) -> bool:
+        """额度是否已被判定为不足。
+
+        只在**明确知道**剩余次数时才熔断；未知（None）一律不触发——
+        否则一次头部解析失败就会让整套系统拒发所有请求，
+        那比额度打光本身更糟。
+        """
+        left = self._quota_left
+        if left is None:
+            return False
+        return left <= int(getattr(self, "quota_floor", 0) or 0)
 
     @staticmethod
     def _json(resp: httpx.Response) -> dict[str, Any]:
