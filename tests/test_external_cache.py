@@ -67,8 +67,13 @@ class CountingClient:
         return self._live
 
 
-def _live_fx(fid=1, status="2H"):
-    """构造一场 API-Football 形状的进行中比赛。"""
+def _live_fx(fid=12345, status="2H"):
+    """构造一场 API-Football 形状的进行中比赛。
+
+    默认 ID 与 _seed() 插入的 12345 一致：**/live 现在只展示本模型
+    推送过的比赛**，ID 对不上会被判为无关场次而过滤掉，
+    空结论按设计不进缓存，缓存相关的断言就全部失效了。
+    """
     return {
         "fixture": {"id": fid, "date": "2026-10-25T19:00:00+00:00",
                     "status": {"short": status, "elapsed": 67}},
