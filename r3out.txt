@@ -1,0 +1,11 @@
+BRANCH=main
+../../../../../opt/hostedtoolcache/Python/3.10.22/x64/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:92
+  /opt/hostedtoolcache/Python/3.10.22/x64/lib/python3.10/site-packages/matplotlib/_fontconfig_pattern.py:92: PyparsingDeprecationWarning: 'resetCache' deprecated - use 'reset_cache'
+    parser.resetCache()
+
+../../../../../opt/hostedtoolcache/Python/3.10.22/x64/lib/python3.10/site-packages/matplotlib/_mathtext.py:45
+  /opt/hostedtoolcache/Python/3.10.22/x64/lib/python3.10/site-packages/matplotlib/_mathtext.py:45: PyparsingDeprecationWarning: 'enablePackrat' deprecated - use 'enable_packrat'
+    ParserElement.enablePackrat()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+30 passed, 13 warnings in 2.22s
