@@ -887,7 +887,6 @@ async def prediction_detail(fixture_id: str) -> JSONResponse:
     })
 
 
-@app.get("/live")
 @app.get("/teammiss")
 async def teammiss(limit: int = 300) -> JSONResponse:
     """导出「未命中中文名、只能显示英文原名」的真实队名。
@@ -915,6 +914,7 @@ async def teammiss(limit: int = 300) -> JSONResponse:
     })
 
 
+@app.get("/live")
 async def live(detail: int = 1) -> JSONResponse:
     """正在进行的比赛：实时比分 + 阵容 + 伤停 + 赔率。
 
