@@ -952,8 +952,16 @@ async def live(detail: int = 1) -> JSONResponse:
             else:
                 msg = "此刻没有正在进行的比赛。比赛开始后本板块会自动出现。"
                 status = "empty"
+            # raw_count 是唯一能区分「真没比赛」与「静默失败」的证据：
+            # live=all 在套餐不含该能力时可能返回 HTTP 200 + 空列表，
+            # 不抛错 → last_live_error 为 None → 看起来和「此刻没比赛」一模一样。
+            # 前者要换套餐，后者只需等待，处置完全不同。
             return {"status": status, "count": 0, "items": [],
-                    "updated_at": _now_iso(), "message": msg}
+                    "updated_at": _now_iso(), "message": msg,
+                    "raw_count": len(raw or []),
+                    "diag": ("live=all 返回 %d 条原始记录（未筛出进行中）。"
+                             "若长期为 0 且从无比赛出现，多为订阅不含 live 能力"
+                             "（该情况返回空列表而非报错）。" % len(raw or []))}
 
         # ── 只保留「本模型推送过」的比赛 ────────────────────────────
         # `live=all` 返回的是全网进行中的比赛，绝大多数与本项目无关
