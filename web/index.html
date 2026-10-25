@@ -198,6 +198,13 @@
   @media(max-width:680px){
     .tbl-jobs th:nth-child(2),.tbl-jobs td:nth-child(2){display:none}
   }
+  /* 额度表：份额列可以让位，次数列不行 */
+  .tbl-quota td:nth-child(3){width:38%}
+  .qbar{display:block;height:7px;background:#1b2029;border-radius:4px;overflow:hidden}
+  .qbar>span{display:block;height:100%;background:linear-gradient(90deg,#3b82f6,#60a5fa);border-radius:4px}
+  @media(max-width:680px){
+    .tbl-quota th:nth-child(4),.tbl-quota td:nth-child(4){display:none}
+  }
 
 
   /* ===== 今日赛程：折叠 + 精简行 ===== */
@@ -643,6 +650,46 @@ function jobsCard(jb, noHead){
     <thead><tr><th>任务</th><th class="num">时间</th><th>说明</th></tr></thead>
     <tbody>${rows}</tbody></table></div>
     <div class="why">✗ = 最近一次失败（需排查） · – = 主动跳过（非故障） · ? = 从未记录</div>
+    </div>`;
+}
+
+function quotaCard(qt, noHead){
+  const head = `<div class="card">`
+    + (noHead ? '' : '<h2>额度消耗 <span>按任务拆分 · 当日累计</span></h2>');
+  const total = (qt && qt.total) || 0;
+  const byTask = (qt && qt.by_task) || {};
+  const keys = Object.keys(byTask);
+  if(!keys.length){
+    return head + `<div class="empty">尚无额度记录。</div>`
+      + `<div class="why">请求发出后才会计数，刚重启时为空属正常。</div></div>`;
+  }
+  // 任务中文名：与 jobsCard 保持同一份口径，避免同一任务两种叫法
+  const JNAME = {sync_matches:'赛程同步', sync_history:'历史回填', backtest_run:'回测',
+                 auto_predict:'自动预测', settle_results:'赛果结算',
+                 prematch_refresh:'赛前刷新', daily_review:'每日复盘',
+                 daily_push:'每日推送', cache_purge:'缓存清理', other:'其他'};
+  const max = Math.max(...keys.map(k=>byTask[k]), 1);
+  let rows = '';
+  for(const k of keys){
+    const n = byTask[k];
+    // 占比条：一眼看出谁是大头，比读数字快
+    const pct = Math.round(n / max * 100);
+    const share = total ? ((n/total)*100).toFixed(1) : '0.0';
+    rows += `<tr><td>${esc(JNAME[k] || k)}</td>`
+      + `<td class="num">${n}</td>`
+      + `<td class="qbar"><span style="width:${pct}%"></span></td>`
+      + `<td class="num">${share}%</td></tr>`;
+  }
+  // 剩余次数：null 表示本进程还没观测到，必须说清，不能显示成 0
+  const leftLine = (qt && qt.quota_left != null)
+    ? `主源剩余 <b>${esc(String(qt.quota_left))}</b> 次`
+    : '主源剩余：尚未观测到（本进程还没发过请求，不代表已耗尽）';
+  // 用 tbl-quota 而非 tbl-jobs：后者在窄屏会隐藏第 2 列，
+  // 而「次数」正是这个板块唯一必须看得见的数字。
+  return head + `<div class="tblwrap"><table class="tbl-quota">
+    <thead><tr><th>任务</th><th class="num">次数</th><th>占比</th><th class="num">份额</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="why">当日合计 <b>${total}</b> 次 · ${leftLine}</div>
     </div>`;
 }
 
@@ -1105,7 +1152,7 @@ async function load(){
   $('root').innerHTML = '<div class="empty">正在加载数据…</div>';
   addDebugLog('=== 开始加载页面数据 ===');
   try{
-    const [h, health, audit, strength, fx, bt, jb, lv] = await Promise.all([
+    const [h, health, audit, strength, fx, bt, jb, lv, qt] = await Promise.all([
       get('/health').catch(() => ({status:'error', version:'?', persistent:false})),
       get('/health/model').catch(() => ({status:'empty'})),
       get('/audit?limit=50').catch(() => ({status:'empty', items:[]})),
@@ -1114,7 +1161,9 @@ async function load(){
       get('/backtest').catch(() => ({status:'empty', count:0, items:[]})),
       get('/jobs').catch(() => ({status:'empty', last:{}, recent:[]})),
       // 实时赛况失败不能拖累整页：它是唯一依赖外网付费能力的端点
-      get('/live').catch(() => ({status:'error', count:0, items:[], message:''}))
+      get('/live').catch(() => ({status:'error', count:0, items:[], message:''})),
+      // 额度是旁路信息，读不到也不该拖累整页
+      get('/quota').catch(() => ({status:'empty', total:0, by_task:{}}))
     ]);
     $('ver').textContent = 'v' + (h.version || '?');
     // 页脚版本取自 /health 的真实部署版本（RAILWAY_GIT_COMMIT_SHA），
@@ -1145,7 +1194,8 @@ async function load(){
       + section('sec-team', '🏆', '球队强度榜', '模型在用的攻防强度',
           strengthCard(strength, true))
       + section('sec-jobs', '⚙️', '定时任务状态', '跑没跑 · 成功没成功',
-          jobsCard(jb, true));
+          jobsCard(jb, true)
+          + quotaCard(qt, true));
     // innerHTML 重建后折叠状态会丢失，渲染完必须重新应用一次
     Object.keys(OPEN_LG).forEach(renderLg);
     addDebugLog('✅ 页面加载成功');
