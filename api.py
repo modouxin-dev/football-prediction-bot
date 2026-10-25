@@ -955,8 +955,47 @@ async def live(detail: int = 1) -> JSONResponse:
             return {"status": status, "count": 0, "items": [],
                     "updated_at": _now_iso(), "message": msg}
 
-        picked = live_rows[:LIVE_MAX_MATCHES]
-        truncated = max(0, len(live_rows) - len(picked))
+        # ── 只保留「本模型推送过」的比赛 ────────────────────────────
+        # `live=all` 返回的是全网进行中的比赛，绝大多数与本项目无关
+        # （未配置的联赛、或已配置但没生成预测的场次）。
+        # 看板的价值是跟踪**自己推送的**命中情况，不是转播全部比赛；
+        # 展示无关比赛还会让人误以为模型预测了它们。
+        wanted: list[str] = []
+        by_fid: dict[str, dict] = {}
+        for fx in live_rows:
+            fid = (fx.get("fixture") or {}).get("id")
+            if fid is None:
+                continue
+            key = str(fid)
+            wanted.append(key)
+            by_fid.setdefault(key, fx)
+
+        try:
+            owned = _repo().predicted_fixture_ids(wanted)
+        except Exception as exc:
+            # 库不可用时宁可**不展示**也不误展示：把没预测过的比赛
+            # 显示成「已推送」比少显示几场严重得多。
+            log.warning("判断实时比赛归属失败：%s", exc)
+            owned = set()
+
+        matched = [by_fid[k] for k in wanted if k in owned]
+        filtered_out = len(live_rows) - len(matched)
+
+        if not matched:
+            # 有进行中的比赛、但一场都不是我们推送过的——
+            # 必须说清是「没推送过」而不是「没有比赛」，
+            # 否则用户会一直等一个永远不会出现的板块。
+            return {
+                "status": "not_predicted", "count": 0, "items": [],
+                "updated_at": _now_iso(),
+                "live_total": len(live_rows),
+                "message": (f"当前有 {len(live_rows)} 场比赛正在进行，"
+                            "但都不是本模型推送过的预测场次。"
+                            "本板块只跟踪已推送/已生成预测的比赛。"),
+            }
+
+        picked = matched[:LIVE_MAX_MATCHES]
+        truncated = max(0, len(matched) - len(picked))
 
         items: list[dict] = []
         if detail:
@@ -985,12 +1024,17 @@ async def live(detail: int = 1) -> JSONResponse:
         else:
             items = [_live_shape(fx, {}) for fx in picked]
 
+        msg = (f"另有 {truncated} 场已推送的比赛未展示（单轮上限 "
+               f"{LIVE_MAX_MATCHES} 场，避免额度过快耗尽）。"
+               if truncated else "")
+        if filtered_out and not msg:
+            msg = (f"全网另有 {filtered_out} 场进行中，"
+                   "未生成预测故不展示。")
         return {
             "status": "ok", "count": len(items), "items": items,
             "updated_at": _now_iso(), "truncated": truncated,
-            "message": (f"另有 {truncated} 场进行中未展示（单轮上限 "
-                        f"{LIVE_MAX_MATCHES} 场，避免额度过快耗尽）。"
-                        if truncated else ""),
+            "live_total": len(live_rows), "filtered_out": filtered_out,
+            "message": msg,
         }
 
     body, fetched_at, stale, err = await _cached_fetch(
