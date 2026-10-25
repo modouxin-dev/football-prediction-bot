@@ -42,6 +42,7 @@ except ImportError as exc:  # pragma: no cover - 未装可选依赖时给出明�
     ) from exc
 
 import analytics  # noqa: E402
+from templates import resolve_league  # noqa: E402
 import joblog  # noqa: E402
 import paths  # noqa: E402
 from repository import PredictionRepository  # noqa: E402
@@ -60,6 +61,23 @@ def _today() -> str:
         return datetime.now(ZoneInfo(_TZ_NAME)).strftime("%Y-%m-%d")
     except Exception:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _league_flag(code: str | None) -> str:
+    """联赛旗帜字符，供看板徽标用。未登记返回 ⚽（不返回空、不猜）。"""
+    try:
+        return resolve_league(code)[0]
+    except Exception:
+        return "⚽"
+
+
+def _league_short(code: str | None) -> str:
+    """联赛短名（如「西甲」）。未登记时退回全称。"""
+    try:
+        name = resolve_league(code)[1]
+    except Exception:
+        return _league_name(code)
+    return name or _league_name(code)
 
 
 def _now_iso() -> str:
@@ -424,6 +442,10 @@ async def fixtures(date: str | None = None, days: int = 1, limit: int = 100) -> 
         {
             "competition": code,
             "competition_cn": _league_name(code),
+            # 徽标用「旗帜 + 短名」而非外链图片：库里没有存 logo URL，
+            # 外链要额外请求且可能失效；旗帜是纯字符，零成本、零失效。
+            "competition_flag": _league_flag(code),
+            "competition_short": _league_short(code),
             "count": len(items),
             "matches": items,
         }
@@ -678,6 +700,7 @@ def _live_shape(fx: dict, detail: dict) -> dict:
         # 用数字 id 查中文名：_league_name 对数字串查 LEAGUE_NAMES，
         # 而 league.code 是 API-Football 自己的码，与本地映射表未必同源。
         "league_cn": _league_name(str(league.get("id") or "")),
+        "league_flag": _league_flag(str(league.get("id") or "")),
         "elapsed": status.get("elapsed"),
         "status_short": status.get("short"),
         "status_cn": LIVE_CN.get(status.get("short"), status.get("short") or ""),
