@@ -104,6 +104,34 @@ class FakeClient:
         return self._odds
 
 
+def seed_predicted(fids, home="A", away="B"):
+    """把比赛标记成「本模型推送过」。
+
+    /live 现在只展示已生成预测的比赛（自动推送或手动点过），
+    所以每个用例必须先声明哪些场次属于本项目，否则会被过滤掉。
+    直接插最小列：predictions 除 fixture_id 外无 NOT NULL 约束。
+    """
+    conn = PredictionRepository(apimod._DB_PATH)._connect()
+    for fid in fids:
+        conn.execute(
+            "INSERT OR REPLACE INTO predictions(fixture_id, home, away, "
+            "kickoff, home_prob, draw_prob, away_prob, result) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (str(fid), home, away, "2026-10-25T19:00:00+00:00", .5, .25, .25, "home"))
+    conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def _clean_predictions():
+    yield
+    try:
+        conn = PredictionRepository(apimod._DB_PATH)._connect()
+        conn.execute("DELETE FROM predictions")
+        conn.commit()
+    except Exception:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _reset_client():
     """每个用例前后都还原全局单例，避免互相污染。"""
@@ -118,6 +146,7 @@ async def _call(**kw):
 
 
 def test_live_returns_in_progress_matches_with_details():
+    seed_predicted([111], "Real Sociedad", "Getafe")
     apimod._LIVE_CLIENT = FakeClient([mk_fx(111, "Real Sociedad", "Getafe", 1, 0)])
     data = asyncio.run(_call(detail=1))
 
@@ -135,6 +164,7 @@ def test_live_returns_in_progress_matches_with_details():
 
 
 def test_lineups_flattened_from_startxi():
+    seed_predicted([1])
     apimod._LIVE_CLIENT = FakeClient([mk_fx(1, "A", "B", 0, 0)])
     item = asyncio.run(_call(detail=1))["items"][0]
 
@@ -147,6 +177,7 @@ def test_lineups_flattened_from_startxi():
 
 
 def test_injuries_grouped_by_team():
+    seed_predicted([1])
     apimod._LIVE_CLIENT = FakeClient([mk_fx(1, "A", "B", 0, 0)])
     item = asyncio.run(_call(detail=1))["items"][0]
 
@@ -159,6 +190,7 @@ def test_injuries_grouped_by_team():
 
 
 def test_odds_median_and_implied_sum_to_one():
+    seed_predicted([1])
     apimod._LIVE_CLIENT = FakeClient([mk_fx(1, "A", "B", 0, 0)])
     item = asyncio.run(_call(detail=1))["items"][0]
 
@@ -178,6 +210,7 @@ def test_only_in_progress_statuses_kept():
         mk_fx(2, "C", "D", 3, 1, "FT"),   # 已完场 → 过滤
         mk_fx(3, "E", "F", 1, 1, "HT"),   # 中场 → 保留
     ])
+    seed_predicted([3])   # 只把中场那场标记成本项目推送过
     data = asyncio.run(_call(detail=0))
     assert data["count"] == 1
     assert data["items"][0]["status_short"] == "HT"
@@ -207,6 +240,7 @@ def test_unavailable_client_does_not_raise():
 
 
 def test_detail_zero_skips_detail_calls():
+    seed_predicted([1])
     apimod._LIVE_CLIENT = FakeClient([mk_fx(1, "A", "B", 1, 0)])
     item = asyncio.run(_call(detail=0))["items"][0]
     # detail=0 仍要有比分（这是本板块的核心），但不请求阵容/伤停/赔率
@@ -218,6 +252,7 @@ def test_detail_zero_skips_detail_calls():
 
 def test_truncation_reported_not_silent():
     many = [mk_fx(i, f"H{i}", f"A{i}", 0, 0) for i in range(20)]
+    seed_predicted([i for i in range(20)])
     apimod._LIVE_CLIENT = FakeClient(many)
     data = asyncio.run(_call(detail=0))
     # 单轮上限存在，超出部分必须告知，不能悄悄砍掉
@@ -231,6 +266,7 @@ def test_single_detail_failure_does_not_break_match():
         async def get_odds(self, fid):
             raise RuntimeError("赔率端点限流")
 
+    seed_predicted([1])
     apimod._LIVE_CLIENT = Broken([mk_fx(1, "A", "B", 2, 1)])
     item = asyncio.run(_call(detail=1))["items"][0]
     # 赔率挂了不影响比分与阵容
