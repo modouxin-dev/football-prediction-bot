@@ -303,13 +303,28 @@ async def stats() -> JSONResponse:
 
 @app.get("/health/model")
 async def model_health() -> JSONResponse:
-    """模型健康度：Log Loss 趋势、校准曲线、各信心等级命中率。"""
+    """模型健康度：Log Loss 趋势、校准曲线、各信心等级命中率。
+
+    附带 stale_pending（超期未结算数）：这些行已开赛但超出回溯窗口，
+    永远结算不了。它们被 pending() 的下界挡在结算之外、不再堵塞队列，
+    但**数量本身就是故障信号**——要么是赛季切换后失效的旧 ID，
+    要么是某几天赛果没拉回来。此前这个数字算得出来却无人展示，
+    等于没有。
+    """
     try:
         data = analytics.model_health(_DB_PATH)
     except Exception as exc:
         log.exception("/health/model 计算失败")
         raise HTTPException(status_code=500, detail=f"计算失败：{exc}") from exc
-    return JSONResponse({"status": data["status"], "version": _VERSION, **data})
+    stale = None
+    try:
+        stale = _repo().count_stale_pending()
+    except Exception:  # noqa: BLE001 - 计数是旁路，读不到不能拖垮健康度
+        log.debug("读取超期未结算数失败")
+    return JSONResponse({
+        "status": data["status"], "version": _VERSION,
+        "stale_pending": stale, **data,
+    })
 
 
 @app.get("/audit")

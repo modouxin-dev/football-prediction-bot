@@ -67,6 +67,9 @@
   .card h2{font-size:16px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--line)}
   .grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
   .stat{background:linear-gradient(160deg,#1a2030,#12151b);text-align:center}
+  /* 超期未结算：与「正常指标」区分开，避免被当成又一个蓝数字 */
+  .stat.bad{background:linear-gradient(160deg,#3a1f26,#241318);border:1px solid #7a3b47}
+  .stat.bad b{color:#ff8a9b}
   .stat b{font-size:26px;color:var(--accent)}
   table{display:block;overflow-x:auto;white-space:nowrap}
   td,th{padding:9px 8px}
@@ -553,12 +556,27 @@ function statCard(health, noHead){
   const acc = health.accuracy == null ? '—' : (health.accuracy*100).toFixed(1)+'%';
   const ll  = health.mean_log_loss == null ? '—' : health.mean_log_loss.toFixed(4);
   const ece = health.ece == null ? '—' : health.ece.toFixed(4);
+  // 超期未结算：这些行已开赛但超出回溯窗口，永远结算不了。
+  // 它们不再堵塞结算队列（下界已挡住），但数量是故障信号——
+  // 赛季切换后的失效 ID，或某几天赛果没拉回来。
+  // null = 读不到，必须显示成未知而不是 0（0 会被读成"一切正常"）。
+  const sp = health.stale_pending;
+  const stale = (sp == null)
+    ? `<div class="stat"><b>—</b><i>超期未结算 · 未知</i></div>`
+    : (sp > 0
+        ? `<div class="stat bad"><b>${sp}</b><i>超期未结算</i></div>`
+        : `<div class="stat"><b>0</b><i>超期未结算</i></div>`);
   return `<div class="card">` + (noHead ? '' : '<h2>关键指标</h2>') + `<div class="grid">
     <div class="stat"><b>${health.settled ?? 0}</b><i>已结算场次</i></div>
     <div class="stat"><b>${acc}</b><i>命中率</i></div>
     <div class="stat"><b>${ll}</b><i>平均 Log Loss ↓</i></div>
     <div class="stat"><b>${ece}</b><i>校准误差 ECE ↓</i></div>
-  </div></div>`;
+    ${stale}
+  </div>` + (sp > 0
+      ? `<div class="why">⚠️ 有 ${sp} 场已开赛但超出结算回溯窗口，将不会被结算
+         （常见原因：赛季切换后 ID 失效、该时段赛果未拉回）。它们不堵塞结算队列，
+         但会拉低已结算样本的完整性。</div>`
+      : '') + `</div>`;
 }
 
 function trendCard(health){
