@@ -888,6 +888,33 @@ async def prediction_detail(fixture_id: str) -> JSONResponse:
 
 
 @app.get("/live")
+@app.get("/teammiss")
+async def teammiss(limit: int = 300) -> JSONResponse:
+    """导出「未命中中文名、只能显示英文原名」的真实队名。
+
+    ⚠️ 为什么要暴露成网页端点：
+    队名字典不可能一次收录所有联赛的所有球队（项目已启用几十个联赛）。
+    靠人肉猜会漏，靠重启等也不会自愈。这里把**埋点实测到的原名**
+    原样吐出来，管理员打开 URL 复制一份即可批量补录——
+    补的是真实出现过的字符串，不按规律推演。
+
+    与 Telegram 的 /teammiss 同源，都是 formatkit.unmatched_team_names()。
+    """
+    limit = max(1, min(int(limit), 1000))
+    try:
+        import formatkit
+        names = formatkit.unmatched_team_names(limit=limit)
+    except Exception as exc:
+        log.warning("读取未命中队名失败：%s", exc)
+        names = []
+    return JSONResponse({
+        "version": _VERSION,
+        "count": len(names),
+        "names": names,
+        "hint": "把这些原名连同中文译名一起补进 templates.TEAM_NAMES 即可。",
+    })
+
+
 async def live(detail: int = 1) -> JSONResponse:
     """正在进行的比赛：实时比分 + 阵容 + 伤停 + 赔率。
 
