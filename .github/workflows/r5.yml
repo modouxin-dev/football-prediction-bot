@@ -1,0 +1,33 @@
+name: r5
+on:
+  push:
+    branches: [tmp-r2]
+permissions:
+  contents: write
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.10"}
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk
+          fc-cache -f > /dev/null 2>&1 || true
+      - run: |
+          OUT=$RUNNER_TEMP/o.txt
+          : > $OUT
+          echo "A) 排除新测试文件" >> $OUT
+          python -m pytest -q --tb=line -rf --ignore=tests/test_quota_governance.py 2>&1 | tail -4 >> $OUT
+          echo "B) 只跑 test_chart" >> $OUT
+          python -m pytest tests/test_chart.py -q --tb=line 2>&1 | tail -3 >> $OUT
+          echo "C) 只跑 新测试+test_chart" >> $OUT
+          python -m pytest tests/test_quota_governance.py tests/test_chart.py -q --tb=line 2>&1 | tail -4 >> $OUT
+          B64=$(base64 -w0 $OUT)
+          curl -s -X PUT -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/r5out.txt" \
+            -d "{\"message\":\"r5\",\"content\":\"$B64\",\"branch\":\"tmp-r2-out\"}" > /dev/null
