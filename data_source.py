@@ -253,6 +253,14 @@ class DataSourceRouter:
                     f"比赛 ID 来自备用数据源（{args[0]}），但备用数据源未配置。"
                 )
             if tried_primary:
+                # 可选数据（阵容/赔率/伤停）：主源拿不到就该静默降级为空，
+                # 绝不能把「主源没数据」说成「备用源没配」。
+                # 实测症状：主源好端端的，看板却显示
+                # 「缺少 FOOTBALL_DATA_API_TOKEN」——用户据此以为数据源坏了，
+                # 其实只是这场比赛的首发还没公布（通常赛前 20–40 分钟才出）。
+                if optional:
+                    log.info("%s：主源无数据且备用源不可用，按可选数据返回空", method)
+                    return []
                 raise DataSourceError(
                     f"主数据源失败：{self.last_error('api-football') or '未知原因'}；"
                     "且未配置可用的备用数据源（需要 FOOTBALL_DATA_API_TOKEN）。"

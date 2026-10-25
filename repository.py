@@ -353,6 +353,36 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 """
 
+def normalize_kickoff(raw: Any) -> str | None:
+    """把 kickoff 归一化为统一的 ISO 字符串（aware UTC，+00:00）。
+
+    ⚠️ 为什么必须归一化：SQLite 里 kickoff 是 TEXT，按字符串比较。
+    同一时刻的两种合法写法会给出**相反**的比较结果：
+
+        2026-10-25T18:42:15+00:00   <= now(.274533+00:00)  → True  已开赛
+        2026-10-25T18:42:15Z        <= now(.274533+00:00)  → False 未开赛
+
+    原因是 ASCII 序：'+'(43) < '.'(46) < 'Z'(90)，比到小数位就分叉了。
+    混进一条 Z 结尾的数据，该场比赛就永远不进结算队列。
+
+    无法解析时返回 None，由调用方决定如何处理（不猜、不填默认时刻）。
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
 def _ddl_of(table: str) -> str:
     """从 SCHEMA 里切出某张表的建表语句。
 
@@ -889,6 +919,23 @@ class PredictionRepository:
             a = prediction.analysis
             best_score = a.get("best_score")
             level = getattr(prediction, "level", None) or {}
+            # 落库前把开赛时间归一化：库里 kickoff 是 TEXT，按字符串比较，
+            # Z 结尾与 +00:00 结尾表示同一时刻却会得出相反的比较结果
+            # （详见 normalize_kickoff 的说明）。在写入端统一，
+            # 等于给所有下游的字符串比较上了一道保险。
+            _kick = getattr(prediction, "kickoff", None)
+            # 只归一化**字符串**型的开赛时间。datetime 型一律原样保留：
+            # 下游（views/common.fmt_time 等）会对它调 .astimezone()，
+            # 若在这里换成字符串就会抛 AttributeError。
+            # 字符串型原本不经过任何校验，Z 结尾与 +00:00 结尾会被
+            # 字符串比较判成不同的先后（详见 normalize_kickoff）。
+            if isinstance(_kick, str):
+                _norm = normalize_kickoff(_kick)
+                if _norm is not None:
+                    try:
+                        prediction.kickoff = _norm
+                    except Exception:  # 只读对象无法回写，忽略即可
+                        pass
             conn = self._connect()
             conn.execute(
                 """INSERT INTO predictions
@@ -1175,18 +1222,57 @@ class PredictionRepository:
             log.warning("读取 Elo 变更记录失败（fixture=%s）：%s", fixture_id, exc)
             return []
 
+    # 待结算查询的时间下界（天）。必须与 SETTLE_BACKFILL_DAYS 一致：
+    # 结算只回溯这么远，留更老的行在查询里，它们既永远结算不了、
+    # 又永远排在升序最前面占名额。
+    SETTLE_PENDING_FLOOR_DAYS = 3
+
     def pending(self, limit: int = 200) -> list[sqlite3.Row]:
-        """尚未回写赛果的已开赛比赛，供定时任务同步结果。"""
+        """尚未回写赛果的已开赛比赛，供定时任务同步结果。
+
+        ⚠️ 为什么必须有时间下界（kickoff >= now - N 天）：
+        本查询按 kickoff **升序**取前 limit 条。而结算只回溯
+        SETTLE_PENDING_FLOOR_DAYS 天，更早的行匹配不上比分、永远结算不了，
+        却永远排在最前面。一旦这类行堆到 limit 条，新结束的比赛**一条也
+        进不来**，结算彻底停摆且不会自愈——看板会停在最后一次成功的日期，
+        表面看一切正常。
+
+        实测：200 条僵尸行 + 5 条刚结束的比赛，无下界时新比赛进入 0/5，
+        加下界后 5/5。
+        """
         try:
             conn = self._connect()
+            floor = (datetime.now(timezone.utc)
+                     - timedelta(days=self.SETTLE_PENDING_FLOOR_DAYS)).isoformat()
             return list(conn.execute(
                 "SELECT * FROM predictions WHERE actual_home IS NULL "
-                "AND kickoff IS NOT NULL AND kickoff <= ? ORDER BY kickoff LIMIT ?",
-                (_now_iso(), limit),
+                "AND kickoff IS NOT NULL AND kickoff <= ? AND kickoff >= ? "
+                "ORDER BY kickoff LIMIT ?",
+                (_now_iso(), floor, limit),
             ))
         except Exception as exc:
             log.warning("查询待结算预测失败：%s", exc)
             return []
+
+    def count_stale_pending(self, days: int | None = None) -> int:
+        """统计「已开赛但超出回溯窗口、永远结算不了」的行数。
+
+        这些行被 pending() 的下界挡在查询之外，不影响结算，
+        但它们的存在本身就是信号：要么是赛季切换后失效的旧 ID，
+        要么是某几天赛果没拉回来。不数出来就只能靠手工跑 SQL 才知道。
+        """
+        days = days if days is not None else self.SETTLE_PENDING_FLOOR_DAYS
+        try:
+            conn = self._connect()
+            floor = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM predictions WHERE actual_home IS NULL "
+                "AND kickoff IS NOT NULL AND kickoff < ?", (floor,)
+            ).fetchone()
+            return int(row["n"] or 0) if row else 0
+        except Exception as exc:
+            log.warning("统计超期未结算失败：%s", exc)
+            return 0
 
     # ---- 统计 ---------------------------------------------------------------
     def settled_samples(self, limit: int = 2000) -> list[tuple[Any, ...]]:

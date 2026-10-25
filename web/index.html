@@ -6,12 +6,18 @@
 <title>足球预测看板</title>
 <style>
   :root{
-    --bg:#0f1115; --card:#171a21; --line:#252a34; --text:#e6e8ee;
+    /* 字重整体上调：原 400/600 在深色底上发虚，尤其队名这类关键信息。
+       只改字重与颜色，不改字号——移动端横向空间本来就紧。 */
+    --fw-normal: 500;
+    --fw-strong: 700;
+    --bg:#0f1115; --card:#171a21; --line:#252a34; --text:#eef2f8;
     --dim:#9aa3b2; --accent:#4da3ff; --good:#3ddc97; --bad:#ff6b6b;
     --warn:#ffc857;
   }
   *{box-sizing:border-box}
   body{
+    font-weight: var(--fw-normal);
+    color: var(--text);
     margin:0; background:var(--bg); color:var(--text);
     font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
     -webkit-font-smoothing:antialiased; padding:16px; max-width:960px; margin:0 auto;
@@ -210,7 +216,7 @@
                font-variant-numeric:tabular-nums;min-width:42px}
   .mrow .mvs{flex:1;min-width:0;font-size:13.5px;display:flex;flex-wrap:wrap;
              align-items:baseline;gap:6px;word-break:break-word}
-  .mrow .mvs b{font-weight:600}
+  .mrow .mvs b{font-weight:var(--fw-strong);color:#fff;letter-spacing:.2px}
   .mrow .mvs i{font-style:normal;font-size:11px;color:var(--dim)}
   .pbtn{flex:0 0 auto;font-size:12px;padding:4px 12px;border-radius:999px}
   .pbtn.off{cursor:default;opacity:.55;font-size:11px;padding:4px 9px}
@@ -222,6 +228,20 @@
 
   /* 数据滞后提示：用了过期缓存时必须说，不能让旧快照冒充实时 */
   .warn{color:#e0a03a;font-weight:600}
+  /* 联赛徽标：用「旗帜 + 短名」字符徽标，不用外链图片。
+     库里没有存 logo URL，外链要额外请求且随时可能失效；
+     旗帜是纯字符，零成本、零失效，深色底上一眼可辨。 */
+  .lgh .lgemblem{display:inline-flex;align-items:center;justify-content:center;
+       width:26px;height:26px;border-radius:7px;background:#1d2431;
+       border:1px solid var(--line);font-size:15px;flex:0 0 auto;line-height:1}
+  .lgh .lgname{font-weight:var(--fw-strong);color:#fff;font-size:14px}
+  .lgh .lgshort{font-size:11px;color:var(--dim);font-weight:600}
+  /* 队名过长时自动竖排：横排挤在一起会截断成「Coritiba F…」，
+     比多占两行严重得多。由 JS 按实际长度决定是否加 .stack。 */
+  .mrow .mvs.stack{flex-direction:column;align-items:flex-start;gap:2px}
+  .mrow .mvs.stack i{margin:0}
+  .mrow .mvs.stack b{line-height:1.35}
+
   /* ===== 预测详情弹窗 ===== */
   .modal{position:fixed;inset:0;z-index:100;display:none;align-items:flex-end;
          justify-content:center;background:rgba(0,0,0,.6)}
@@ -234,6 +254,11 @@
   .mhd b{flex:1;font-size:15px}
   .mteams{font-size:16px;font-weight:600;text-align:center;margin:14px 0 4px;word-break:break-word}
   .mteams i{font-style:normal;color:var(--dim);font-size:12px;margin:0 8px}
+  .mteams.stack{display:flex;flex-direction:column;align-items:center;gap:3px}
+  .mteams.stack i{margin:0}
+  .mteams b{font-weight:var(--fw-strong);color:#fff}
+  .mgrid b{font-weight:var(--fw-strong)}
+  .msec h4{color:#b9c3d4}
   .mmeta{font-size:11.5px;color:var(--dim);text-align:center;margin-bottom:14px}
   .msec{margin-bottom:16px}
   .msec h4{font-size:12.5px;color:var(--dim);font-weight:600;margin:0 0 8px}
@@ -243,6 +268,9 @@
   .mgrid b{font-size:13.5px;font-variant-numeric:tabular-nums}
   .mtop{font-size:11.5px;color:var(--dim);margin-top:8px;line-height:1.6}
   .msec .lxi{background:#12151b;border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin-bottom:6px}
+  /* 实时板块队名竖排：与今日赛程同一规则，横排放不下就竖排 */
+  .lteams.stack{flex-direction:column;align-items:flex-start;gap:4px}
+  .lteams.stack .ltn.ra{text-align:left}
   .mfoot{font-size:11px;color:var(--dim);text-align:center;padding-top:6px;border-top:1px solid var(--line)}
   @media(min-width:700px){
     .modal{align-items:center}
@@ -795,11 +823,17 @@ function renderLg(code){
 function matchRow(m){
   const p = m.prediction;
   const btn = p
-    ? `<button class="pbtn" onclick="showPrediction('${esc(m.fixture_id)}')">预测</button>`
+    ? `<button class="pbtn" onclick="showPrediction('${esc(m.fixture_id)}')">📈 预测</button>`
     : `<span class="pbtn off" title="预测由 auto_predict 任务自动生成">未生成</span>`;
+  const hn = esc(m.home_cn || m.home || '?');
+  const an = esc(m.away_cn || m.away || '?');
+  // 竖排判定按**显示宽度**算：中文一个字顶两个英文字符。
+  // 横排可用宽度约 20 个字符宽，超了就竖排，宁可多两行也不截断队名。
+  const w = txt => [...txt].reduce((s,c)=> s + (c.charCodeAt(0) > 255 ? 2 : 1), 0);
+  const stack = (w(hn) + w(an)) > 20 ? ' stack' : '';
   return `<div class="mrow">
     <span class="mtime">${hhmm(m.kickoff)}</span>
-    <span class="mvs"><b>${esc(m.home_cn || m.home)}</b><i>vs</i><b>${esc(m.away_cn || m.away)}</b></span>
+    <span class="mvs${stack}"><b>${hn}</b><i>vs</i><b>${an}</b></span>
     ${btn}</div>`;
 }
 
@@ -828,13 +862,16 @@ function predictionBody(d){
   const f = v => (v == null ? '—' : Number(v).toFixed(2));
   const pc = v => (v == null ? '—' : (Number(v)*100).toFixed(1) + '%');
   const h = (p.home||0)*100, dr = (p.draw||0)*100, a = (p.away||0)*100;
-  let html = `<div class="mteams">${esc(d.home_cn||d.home)} <i>vs</i> ${esc(d.away_cn||d.away)}</div>`;
+  const _hn = esc(d.home_cn||d.home||'?'), _an = esc(d.away_cn||d.away||'?');
+  const _w = t => [...t].reduce((s,c)=> s + (c.charCodeAt(0) > 255 ? 2 : 1), 0);
+  const _st = (_w(_hn) + _w(_an)) > 20 ? ' stack' : '';
+  let html = `<div class="mteams${_st}"><b>${_hn}</b><i>vs</i><b>${_an}</b></div>`;
   html += `<div class="mmeta">${esc(d.league_cn||d.league||'')}`
     + (d.kickoff ? ` · ${esc(String(d.kickoff).slice(5,16).replace('T',' '))}` : '')
     + `</div>`;
 
   // 方向 + 概率条
-  html += `<div class="msec"><h4>预测方向</h4>
+  html += `<div class="msec"><h4>🎯 预测方向</h4>
     <div class="pbar"><i class="h" style="width:${h.toFixed(1)}%"></i>`
     + `<i class="d" style="width:${dr.toFixed(1)}%"></i>`
     + `<i class="a" style="width:${a.toFixed(1)}%"></i></div>
@@ -844,7 +881,7 @@ function predictionBody(d){
   // 比分 / 大小球 / 信心
   const ts = (d.top_scores||[]).slice(0,5).map(s=>
     `${esc(s[0])} <span class="dim">${(s[1]*100).toFixed(1)}%</span>`).join(' · ');
-  html += `<div class="msec"><h4>比分与进球</h4>
+  html += `<div class="msec"><h4>⚽ 比分与进球</h4>
     <div class="mgrid">
       <div><i>最可能比分</i><b>${esc(d.best_score||'—')}</b></div>
       <div><i>预期进球</i><b>${f(d.lambda_home)} : ${f(d.lambda_away)}</b></div>
@@ -855,7 +892,7 @@ function predictionBody(d){
     </div>${ts?`<div class="mtop">常见比分：${ts}</div>`:''}</div>`;
 
   // 赔率
-  html += `<div class="msec"><h4>赔率</h4>`;
+  html += `<div class="msec"><h4>💰 赔率</h4>`;
   if(d.odds){
     const im = d.odds.implied || {};
     html += `<div class="mgrid">
@@ -870,7 +907,7 @@ function predictionBody(d){
   html += `</div>`;
 
   // 阵容
-  html += `<div class="msec"><h4>首发阵容</h4>`;
+  html += `<div class="msec"><h4>👥 首发阵容</h4>`;
   if((d.lineups||[]).length){
     d.lineups.forEach(t=>{
       const xi = (t.start_xi||[]).map(x=>esc(x.name)).filter(Boolean);
@@ -913,8 +950,9 @@ function fixturesCard(fx, noHead){
   let html = '';
   leagues.forEach((g, idx)=>{
     const code = esc(g.competition || ('lg' + idx));
-    // 首次渲染只展开第一个联赛；后续刷新沿用用户的折叠选择
-    if(!LG_INITED) OPEN_LG[g.competition || ('lg'+idx)] = (idx === 0);
+    // 默认全部展开：用户要的是「一眼看到今天有哪些联赛、各自有什么比赛」，
+    // 只展开第一个等于让人逐个点开。折叠能力保留，由用户自己收。
+    if(!LG_INITED) OPEN_LG[g.competition || ('lg'+idx)] = true;
     const byDate = {};
     (g.matches||[]).forEach(m=>{
       const d = m.date || '';
@@ -926,7 +964,9 @@ function fixturesCard(fx, noHead){
     });
     html += `<div class="lg"><div class="lgh" id="lgh-${code}">`
       + `<button class="lgtoggle" id="lgb-${code}" onclick="toggleLg('${code}')">展开</button>`
-      + `<b>${esc(g.competition_cn || g.competition || '未知联赛')}</b>`
+      + `<span class="lgemblem">${esc(g.competition_flag || '⚽')}</span>`
+      + `<span class="lgname">${esc(g.competition_cn || g.competition || '未知联赛')}</span>`
+      + `<span class="lgshort">${esc(g.competition_short || '')}</span>`
       + `<span>${g.count} 场</span></div>`
       + `<div class="lgbody" id="lg-${code}">${inner}</div></div>`;
   });
@@ -941,12 +981,16 @@ function liveOddsRow(odds){
   const h = odds.home, d = odds.draw, a = odds.away;
   if(h == null && d == null && a == null) return '';
   const f = v => v == null ? '—' : Number(v).toFixed(2);
-  return `<div class="lrow"><i>赔率</i><span>主 ${f(h)} · 平 ${f(d)} · 客 ${f(a)}</span></div>`;
+  return `<div class="lrow"><i>💰 赔率</i><span>主胜 ${f(h)} · 平局 ${f(d)} · 客胜 ${f(a)}</span></div>`;
 }
 
 function liveLineups(m){
   const rows = m.lineups || [];
-  if(!rows.length) return `<div class="lrow"><i>阵容</i><span class="dim">未公布</span></div>`;
+  // 阵容未公布是**常态**（赛前 20–40 分钟才出），措辞要说清是时间问题、
+  // 不是数据源故障——此前显示成「缺少 FOOTBALL_DATA_API_TOKEN」，
+  // 用户据此以为数据源坏了。
+  if(!rows.length) return `<div class="lrow"><i>👥 阵容</i>`
+    + `<span class="dim">未公布（通常赛前 20–40 分钟才出）</span></div>`;
   let html = '';
   rows.slice(0,2).forEach(t=>{
     const nm = t.team_cn || t.team || '';
@@ -956,7 +1000,7 @@ function liveLineups(m){
                    : `<span class="dim">首发未公布</span>`)
       + `</div>`;
   });
-  return `<div class="lrow"><i>阵容</i><div class="lcol">${html}</div></div>`;
+  return `<div class="lrow"><i>👥 阵容</i><div class="lcol">${html}</div></div>`;
 }
 
 function liveInjuries(m){
@@ -970,13 +1014,13 @@ function liveInjuries(m){
     html += `<div class="lxi"><b>${esc(t.team_cn || t.team || '')}</b>`
       + `<span class="bad">${list.join('、')}</span></div>`;
   });
-  return html ? `<div class="lrow"><i>伤停</i><div class="lcol">${html}</div></div>` : '';
+  return html ? `<div class="lrow"><i>🏥 伤停</i><div class="lcol">${html}</div></div>` : '';
 }
 
 function liveErrorRow(errors){
   const keys = Object.keys(errors || {});
   if(!keys.length) return '';
-  return `<div class="lrow"><i>缺失</i><span class="dim">`
+  return `<div class="lrow"><i>⚠️ 缺失</i><span class="dim">`
     + esc(keys.join('、')) + ` 未取到（不影响比分）</span></div>`;
 }
 
@@ -986,16 +1030,22 @@ function liveMatchCard(m){
     ? `<b class="livescore">${m.home_score}-${m.away_score}</b>`
     : `<span class="pill2">${esc(m.status_cn || '')}</span>`;
   const el = m.elapsed != null ? `${m.elapsed}'` : '';
+  const hn = esc(m.home_cn || m.home || '?');
+  const an = esc(m.away_cn || m.away || '?');
+  // 队名竖排判定（与今日赛程同一规则）：横排放不下就竖排，绝不截断
+  const w = txt => [...txt].reduce((s,c)=> s + (c.charCodeAt(0) > 255 ? 2 : 1), 0);
+  const stack = (w(hn) + w(an)) > 20 ? ' stack' : '';
   return `<div class="livem">
     <div class="lhead">
       <span class="dot"></span>
+      <span class="lgemblem">${esc(m.league_flag || '⚽')}</span>
       <span class="lgname">${esc(m.league_cn || m.league || '')}</span>
-      <span class="lst">${esc(m.status_cn || '')}${el ? ' · ' + esc(el) : ''}</span>
+      <span class="lst">🔴 ${esc(m.status_cn || '')}${el ? ' · ⏱ ' + esc(el) : ''}</span>
     </div>
-    <div class="lteams">
-      <span class="ltn">${esc(m.home_cn || m.home || '?')}</span>
+    <div class="lteams${stack}">
+      <span class="ltn">${hn}</span>
       ${score}
-      <span class="ltn ra">${esc(m.away_cn || m.away || '?')}</span>
+      <span class="ltn ra">${an}</span>
     </div>
     ${liveOddsRow(m.odds)}
     ${liveLineups(m)}
@@ -1006,7 +1056,7 @@ function liveMatchCard(m){
 
 function liveCard(lv, noHead){
   const head = `<div class="card">`
-    + (noHead ? '' : '<h2>正在进行 <span>实时比分 · 阵容 · 伤停 · 赔率</span></h2>');
+    + (noHead ? '' : '<h2>🔴 正在进行 <span>实时比分 · 阵容 · 伤停 · 赔率</span></h2>');
   const items = (lv && lv.items) || [];
   if(!items.length){
     let m = esc(lv && lv.message ? lv.message : '此刻没有正在进行的比赛。');

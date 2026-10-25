@@ -515,6 +515,15 @@ TEAM_NAMES: dict[str, str] = {
     "Tenerife": "特内里费", "Cordoba": "科尔多瓦",
     "RCD Espanyol de Barcelona": "西班牙人", "Málaga CF": "马拉加",
     "Coventry": "考文垂", "Ipswich": "伊普斯维奇", "Hull City": "赫尔城",
+    # —— 看板实测补录（2026-10-26）：实时板块与今日赛程出现的未命中队名 ——
+    # 均为确认无歧义的通用中文译名；拿不准的一律不录（宁可显示英文原名）。
+    "NK Osijek": "奥西耶克", "NK Rudes": "鲁德斯", "Rudes": "鲁德斯",
+    "Aarhus GF": "奥胡斯", "Aarhus": "奥胡斯", "AGF": "奥胡斯",
+    "Viborg FF": "维堡", "Viborg": "维堡",
+    "Coritiba FBC": "科里蒂巴", "Botafogo FR": "博塔弗戈",
+    "EC Bahia": "巴伊亚", "SC Internacional": "巴西国际",
+    "Atletico GO": "戈亚尼亚竞技", "Cruzeiro EC": "克鲁塞罗",
+    "Fortaleza EC": "福塔雷萨", "EC Juventude": "尤文图德",
 }
 
 
