@@ -524,6 +524,48 @@ TEAM_NAMES: dict[str, str] = {
     "EC Bahia": "巴伊亚", "SC Internacional": "巴西国际",
     "Atletico GO": "戈亚尼亚竞技", "Cruzeiro EC": "克鲁塞罗",
     "Fortaleza EC": "福塔雷萨", "EC Juventude": "尤文图德",
+    # —— 克罗地亚甲 HNL（210）：此前整联赛无中文名，实时板块全英文 ——
+    # 名单取自 hnl.hr 2025-26 赛季积分榜与纳米数据赛事基础信息，逐队核对。
+    # 同一支队在 API-Football 下发的写法（NK / HNK 前缀）一并收录。
+    "NK Osijek": "奥西耶克", "Osijek": "奥西耶克",
+    "HNK Rijeka": "里耶卡", "Rijeka": "里耶卡", "NK Rijeka": "里耶卡",
+    "HNK Hajduk Split": "哈伊杜克", "Hajduk Split": "哈伊杜克",
+    "NK Hajduk Split": "哈伊杜克", "Hajduk": "哈伊杜克",
+    "NK Dinamo Zagreb": "萨格勒布迪纳摩", "Dinamo Zagreb": "萨格勒布迪纳摩",
+    "Dinamo": "萨格勒布迪纳摩",
+    "NK Lokomotiva Zagreb": "萨格勒布火车头", "Lokomotiva Zagreb": "萨格勒布火车头",
+    "Lokomotiva": "萨格勒布火车头", "NK Lokomotiva": "萨格勒布火车头",
+    "NK Slaven Belupo": "斯拉文贝鲁波", "Slaven Belupo": "斯拉文贝鲁波",
+    "Slaven": "斯拉文贝鲁波",
+    "NK Istra 1961": "伊斯特拉1961", "Istra 1961": "伊斯特拉1961", "Istra": "伊斯特拉1961",
+    "NK Varazdin": "瓦拉日丁", "Varazdin": "瓦拉日丁", "NK Varaždin": "瓦拉日丁",
+    "Varaždin": "瓦拉日丁", "Varteks": "瓦拉日丁",
+    "HNK Gorica": "戈里察", "Gorica": "戈里察", "NK Gorica": "戈里察",
+    "HNK Sibenik": "希贝尼克", "Sibenik": "希贝尼克", "NK Sibenik": "希贝尼克",
+    "NK Rudes": "鲁德斯", "Rudes": "鲁德斯", "NK Rudeš": "鲁德斯", "Rudeš": "鲁德斯",
+    "NK Vukovar 1991": "武科瓦尔1991", "Vukovar 1991": "武科瓦尔1991",
+    "HNK Vukovar 1991": "武科瓦尔1991",
+    # —— 丹麦超 Superliga（119）：同上，整联赛缺中文名 ——
+    # 名单取自 Wikipedia 2025-26 赛季 Current teams 与纳米数据 2026-27 赛季。
+    "Aarhus GF": "奥胡斯", "AGF": "奥胡斯", "Aarhus": "奥胡斯", "Aarhus Fremad": "奥胡斯",
+    "Brondby IF": "布隆德比", "Brøndby IF": "布隆德比", "Brondby": "布隆德比",
+    "Brøndby": "布隆德比",
+    "FC Copenhagen": "哥本哈根", "Copenhagen": "哥本哈根", "FC Kobenhavn": "哥本哈根",
+    "FCK": "哥本哈根",
+    "FC Fredericia": "弗雷德里西亚", "Fredericia": "弗雷德里西亚",
+    "FC Midtjylland": "中日德兰", "Midtjylland": "中日德兰",
+    "FC Nordsjaelland": "北西兰", "Nordsjaelland": "北西兰",
+    "FC Nordsjælland": "北西兰", "Nordsjælland": "北西兰", "FCN": "北西兰",
+    "Odense Boldklub": "欧登塞", "OB": "欧登塞", "Odense": "欧登塞",
+    "Randers FC": "兰讷斯", "Randers": "兰讷斯",
+    "Silkeborg IF": "锡尔克堡", "Silkeborg": "锡尔克堡",
+    "SonderjyskE": "桑德捷斯基", "SønderjyskE": "桑德捷斯基",
+    "Sonderjyske": "桑德捷斯基", "Sønderjyske": "桑德捷斯基",
+    "Viborg FF": "维堡", "Viborg": "维堡",
+    "Vejle Boldklub": "瓦埃勒", "Vejle": "瓦埃勒",
+    "Lyngby Boldklub": "灵比", "Lyngby": "灵比", "Lyngby BK": "灵比",
+    "AC Horsens": "霍森斯", "Horsens": "霍森斯",
+    "AaB": "奥尔堡", "Aalborg BK": "奥尔堡", "Aalborg": "奥尔堡",
 }
 
 
