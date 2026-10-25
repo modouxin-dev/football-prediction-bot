@@ -1117,6 +1117,16 @@ class PredictionService:
                 # 两者混用会让 T 被市场成分稀释到 ≈1.0，泊松的偏差得不到修正。
                 "model_probs": _model_probs_of(analysis),
                 "market_blended": bool(analysis.get("market_blended")),
+                # 展示详情所需的中间量：预期进球、大小球、双方进球、最可能比分。
+                # 不落库的话，事后想在看板上展开单场详情就得整场重算——
+                # 那会重新拉积分榜并再烧一次额度，而这些都是纯数学派生量，
+                # 由同一份 λ 直接算出来即可，无需联网。
+                "lambda_home": analysis.get("lambda_home"),
+                "lambda_away": analysis.get("lambda_away"),
+                "over_2_5": analysis.get("over_2_5"),
+                "btts": analysis.get("btts"),
+                "top_scores": analysis.get("top_scores") or [],
+                "rho": analysis.get("rho"),
                 # 赔率取不到时保留真实原因（套餐不含 / 未开盘 / 限流），
                 # 展示层据此如实说明，而不是笼统显示「暂无赔率数据」。
                 "odds_error": odds_error,

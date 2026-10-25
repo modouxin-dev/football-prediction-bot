@@ -62,6 +62,15 @@ def _today() -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _now_iso() -> str:
+    """当前时刻 ISO8601（UTC，带 Z 语义的 +00:00）。
+
+    实时数据必须带时间戳：没有时间戳的「实时比分」无法判断是否过期，
+    网络中断时页面会一直显示旧数字却看起来像在跳动。
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
 # templates 是零依赖模块（只放静态文案与联赛名表），可以安全地在顶层引入。
 # 刻意**不在顶层** import formatkit：它依赖 service，实测导入耗时 1192ms，
 # 会直接压垮首请求。改为在 lifespan 预热时绑定一次（见 _team_cn）。
@@ -517,6 +526,359 @@ async def backtest(limit: int = 20, competition: str | None = None) -> JSONRespo
 async def commands() -> JSONResponse:
     """暴露指令清单，供 Web 看板自动生成导航（启动时已预热，响应为毫秒级）。"""
     return JSONResponse({"status": "ok", "commands": _commands_payload()})
+
+
+# ── 实时赛况 ---------------------------------------------------------------
+# 进行中比赛的数据不在本地库里（本地库由 sync_job 每 6 小时刷新，
+# 拿它当实时源等于把最迟 6 小时前的比分说成「现在」），必须直连主源。
+
+# 单场实时最多并发查询多少场。20 场同时进行时若全部展开详情，
+# 单轮就是 20×3=60 次请求，几分钟就能烧掉一天额度。
+LIVE_MAX_MATCHES = 8
+_LIVE_CLIENT: Any = None
+
+
+def _live_client() -> Any:
+    """懒加载主源客户端（单例）。
+
+    为什么不在 lifespan 里建：看板可能单独以 --mode web 启动，
+    那时机器人侧的连接根本没建立；而 httpx.AsyncClient 每次请求
+    新建会在 TIME_WAIT 上堆积。单例 + 懒加载两头都兼顾。
+    """
+    global _LIVE_CLIENT
+    if _LIVE_CLIENT is not None:
+        return _LIVE_CLIENT
+    try:
+        from config import load_settings
+        from data_source import DataSourceRouter
+
+        settings = load_settings()
+        if not getattr(settings, "api_key", None):
+            _LIVE_CLIENT = False  # 未配置：标记为不可用，避免每次重试
+            return _LIVE_CLIENT
+        from api_client import FootballAPI
+
+        _LIVE_CLIENT = DataSourceRouter(
+            FootballAPI(settings.api_key, provider=settings.api_provider))
+    except Exception as exc:  # 客户端不可用绝不能让看板整页 500
+        log.warning("实时客户端不可用：%s", exc)
+        _LIVE_CLIENT = False
+    return _LIVE_CLIENT
+
+
+# 进行中状态的 short 枚举（API-Football）
+# 1H/2H = 上下半场，HT = 中场，ET/BT/P = 加时/加时中场/点球，LIVE = 通用进行中
+LIVE_STATUS = {"1H", "2H", "HT", "ET", "BT", "P", "LIVE"}
+LIVE_CN = {"1H": "上半场", "2H": "下半场", "HT": "中场休息",
+           "ET": "加时", "BT": "加时中场", "P": "点球大战", "LIVE": "进行中"}
+
+
+def _pick_live(raw: list[dict]) -> list[dict]:
+    """筛出真正进行中的比赛，按开赛时间正序。"""
+    out = []
+    for fx in raw or []:
+        short = ((fx.get("fixture") or {}).get("status") or {}).get("short")
+        if short in LIVE_STATUS:
+            out.append((str((fx.get("fixture") or {}).get("date") or ""), fx))
+    out.sort(key=lambda item: item[0])
+    return [fx for _, fx in out]
+
+
+def _norm_lineups(raw: list[dict]) -> list[dict]:
+    """阵容规范化成前端直接可渲染的结构。
+
+    原始响应的键是驼峰 `startXI`，球员信息又埋在 `player` 子对象里；
+    直接把原始结构丢给前端，渲染层就要懂 API-Football 的字段命名，
+    等于把外部 API 的形状泄漏进了展示层。这里一次性摊平。
+
+    只取首发（startXI）：替补名单对「现在场上是谁」没有意义，
+    且一场 20+ 人全塞进响应，多场叠加后体积会明显变大。
+    """
+    out: list[dict] = []
+    for item in raw or []:
+        team = item.get("team") or {}
+        xi = []
+        for entry in item.get("startXI") or item.get("start_xi") or []:
+            player = entry.get("player") or entry
+            name = player.get("name")
+            if name:
+                xi.append({"name": name, "pos": player.get("pos")})
+        out.append({
+            "team": team.get("name"),
+            "team_cn": _cn(team.get("name")),
+            "formation": item.get("formation"),
+            "start_xi": xi,
+        })
+    return out
+
+
+def _norm_injuries(raw: list[dict]) -> list[dict]:
+    """伤停按队分组。
+
+    原始响应是「一名球员一条」，同一个队会在列表里重复出现多次；
+    直接渲染会变成一长串看不出归属的名单。这里聚合成
+    「一队一条、队下挂球员」。
+    """
+    grouped: dict[str, dict] = {}
+    for item in raw or []:
+        team = item.get("team") or {}
+        name = team.get("name") or "?"
+        slot = grouped.setdefault(
+            name, {"team": name, "team_cn": _cn(name), "players": []})
+        player = item.get("player") or {}
+        pname = player.get("name")
+        if pname:
+            slot["players"].append({
+                "name": pname,
+                "reason": player.get("reason") or player.get("type"),
+            })
+    return list(grouped.values())
+
+
+def _norm_odds(raw: Any) -> dict | None:
+    """赔率取各公司中位数，并给出市场隐含概率。
+
+    只报单一公司的报价会被异常值带偏；中位数抗离群。
+    隐含概率必须去水（overround），否则三个概率相加恒 > 1，
+    用户会算出「主+平+客 = 105%」这种看不懂的数。
+    """
+    if not raw:
+        return None
+    try:
+        from analyzer import collect_1x2_odds, consensus_odds, implied_probabilities
+
+        rows = collect_1x2_odds(raw)
+        cons = consensus_odds(rows)
+    except Exception:  # 赔率只是附加信息，解析失败不应影响整场展示
+        return None
+    if not cons:
+        return None
+    probs = implied_probabilities(cons) or {}
+    return {
+        "home": cons.get("home"), "draw": cons.get("draw"), "away": cons.get("away"),
+        "n_bookmakers": cons.get("n"),
+        "implied": {k: round(v, 4) for k, v in probs.items()},
+    }
+
+
+def _live_shape(fx: dict, detail: dict) -> dict:
+    """把单场比赛整理成前端直接可渲染的结构。
+
+    缺字段一律给 None 而不是 0：把「没拿到」显示成 0 会被读成
+    「拿到了，值是 0」（比分 0-0 与未知是两回事）。
+    """
+    info = fx.get("fixture") or {}
+    goals = fx.get("goals") or {}
+    teams = fx.get("teams") or {}
+    league = fx.get("league") or {}
+    status = info.get("status") or {}
+    return {
+        "fixture_id": info.get("id"),
+        "league": league.get("name"),
+        # 用数字 id 查中文名：_league_name 对数字串查 LEAGUE_NAMES，
+        # 而 league.code 是 API-Football 自己的码，与本地映射表未必同源。
+        "league_cn": _league_name(str(league.get("id") or "")),
+        "elapsed": status.get("elapsed"),
+        "status_short": status.get("short"),
+        "status_cn": LIVE_CN.get(status.get("short"), status.get("short") or ""),
+        "home": (teams.get("home") or {}).get("name"),
+        "away": (teams.get("away") or {}).get("name"),
+        "home_cn": _cn((teams.get("home") or {}).get("name")),
+        "away_cn": _cn((teams.get("away") or {}).get("name")),
+        "home_score": goals.get("home"),
+        "away_score": goals.get("away"),
+        "lineups": _norm_lineups(detail.get("lineups") or []),
+        "injuries": _norm_injuries(detail.get("injuries") or []),
+        "odds": _norm_odds(detail.get("odds")),
+        "errors": detail.get("errors") or {},
+    }
+
+
+@app.get("/prediction/{fixture_id}")
+async def prediction_detail(fixture_id: str) -> JSONResponse:
+    """单场预测的完整详情：方向 / 比分 / 大小球 / 信心等级 / 阵容 / 赔率。
+
+    看板主列表只放「时间 + 队伍 + 预测按钮」，详情按需加载：
+    一场比赛的阵容与赔率各要一次外部请求，若在主列表里就把全部比赛
+    的详情拉齐，一次刷新就能烧掉几十次额度。
+
+    ⚠️ 阵容与赔率是**实时**从主源取的，其余字段来自落盘快照。
+    这两类数据的时效性不同，响应里用 `sources` 分别标注，
+    避免把「开赛前算出的概率」和「刚刚取到的赔率」混为一谈。
+
+    未生成预测的比赛返回 404：这与「已生成但数据不全」是两回事，
+    前端据此区分「还没算」和「算出来了但缺项」。
+    """
+    repo = _repo()
+    try:
+        row = repo.get_prediction_detail(fixture_id)
+    except Exception as exc:
+        log.exception("/prediction 读取失败")
+        raise HTTPException(status_code=500, detail=f"读取失败：{exc}") from exc
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="该场比赛尚无预测。预测由 auto_predict 任务自动生成。")
+
+    inputs = row.get("inputs") or {}
+    probs = {
+        "home": row.get("home_prob"),
+        "draw": row.get("draw_prob"),
+        "away": row.get("away_prob"),
+    }
+    # 方向：与落盘的 result 保持一致，不在这里重算——重算可能因
+    # 温度校准开关变化而与当初推送给用户的结论不一致。
+    top_scores = inputs.get("top_scores") or []
+
+    # 阵容/赔率实时取，失败降级为空但保留原因
+    lineups: list[dict] = []
+    odds: dict | None = None
+    detail_errors: dict[str, str] = {}
+    client = _live_client()
+    if client:
+        try:
+            fid = int(str(fixture_id))
+        except (TypeError, ValueError):
+            detail_errors["id"] = "比赛 ID 非整数，无法向主源查询阵容与赔率"
+            fid = None  # type: ignore[assignment]
+        if fid is not None:
+            import asyncio
+
+            async def _one(coro, key: str):
+                try:
+                    return await coro
+                except Exception as exc:  # noqa: BLE001
+                    detail_errors[key] = str(exc)
+                    return None
+
+            raw_lineups, raw_odds = await asyncio.gather(
+                _one(client.get_lineups(fid), "lineups"),
+                _one(client.get_odds(fid), "odds"),
+            )
+            lineups = _norm_lineups(raw_lineups or [])
+            odds = _norm_odds(raw_odds)
+    else:
+        detail_errors["client"] = "实时客户端不可用，阵容与赔率未取"
+
+    return JSONResponse({
+        "version": _VERSION,
+        "fixture_id": fixture_id,
+        "league": row.get("league"),
+        "league_cn": _league_name(str(row.get("league") or "")),
+        "home": row.get("home"),
+        "away": row.get("away"),
+        "home_cn": _cn(row.get("home")),
+        "away_cn": _cn(row.get("away")),
+        "kickoff": row.get("kickoff"),
+        "result": row.get("result"),
+        # 顶层同时给一份平铺概率：前端既可以用 probs 整体传，
+        # 也可以直接读 home_prob 逐个渲染，不必再解一层。
+        "home_prob": row.get("home_prob"),
+        "draw_prob": row.get("draw_prob"),
+        "away_prob": row.get("away_prob"),
+        "probs": probs,
+        "best_score": row.get("best_score"),
+        "level_key": row.get("level_key"),
+        "predicted_at": row.get("created_at"),
+        # 以下为落盘派生量（预测时算好，非实时）
+        "lambda_home": inputs.get("lambda_home"),
+        "lambda_away": inputs.get("lambda_away"),
+        "over_2_5": inputs.get("over_2_5"),
+        "btts": inputs.get("btts"),
+        "top_scores": top_scores,
+        "data_completeness": inputs.get("data_completeness"),
+        "odds_error": inputs.get("odds_error"),
+        # 以下为实时取回
+        "lineups": lineups,
+        "odds": odds,
+        "errors": detail_errors,
+    })
+
+
+@app.get("/live")
+async def live(detail: int = 1) -> JSONResponse:
+    """正在进行的比赛：实时比分 + 阵容 + 伤停 + 赔率。
+
+    `detail=0` 只取赛况列表（1 次请求），`detail=1`（默认）再逐场并发取
+    阵容/伤停/赔率。前端轮询时可用 detail=0 省额度，用户点开某场再取详情。
+
+    ⚠️ 依赖付费能力 `fixtures?live=all`。取不到时**明确告知原因**，
+    绝不能显示成「当前没有进行中的比赛」——那会让人一直等下去。
+    """
+    client = _live_client()
+    if not client:
+        return JSONResponse({
+            "version": _VERSION, "status": "unavailable", "count": 0,
+            "items": [], "updated_at": _now_iso(),
+            "message": "实时赛况不可用：未配置 API Key 或客户端初始化失败。",
+        })
+    try:
+        raw = await client.get_live_fixtures()
+    except Exception as exc:
+        log.warning("/live 拉取失败：%s", exc)
+        return JSONResponse({
+            "version": _VERSION, "status": "error", "count": 0,
+            "items": [], "updated_at": _now_iso(),
+            "message": f"实时赛况拉取失败：{exc}",
+        })
+
+    live_rows = _pick_live(raw)
+    err = getattr(getattr(client, "primary", None), "last_live_error", None)
+
+    if not live_rows:
+        # 空列表必须解释清楚，否则用户无从判断是该等还是该换套餐
+        if err:
+            msg = (f"实时端点不可用：{err}。"
+                   "若提示套餐或权限，说明当前订阅不含 live 能力，"
+                   "需在 API-Football 控制台确认套餐。")
+            status = "unsupported"
+        else:
+            msg = "此刻没有正在进行的比赛。比赛开始后本板块会自动出现。"
+            status = "empty"
+        return JSONResponse({
+            "version": _VERSION, "status": status, "count": 0,
+            "items": [], "updated_at": _now_iso(), "message": msg,
+        })
+
+    picked = live_rows[:LIVE_MAX_MATCHES]
+    truncated = max(0, len(live_rows) - len(picked))
+
+    items: list[dict] = []
+    if detail:
+        import asyncio
+
+        async def _one(fx: dict) -> dict:
+            fid = (fx.get("fixture") or {}).get("id")
+            det: dict[str, Any] = {"errors": {}}
+            calls = {
+                "lineups": lambda: client.get_lineups(fid),
+                "injuries": lambda: client.get_injuries(fid),
+                "odds": lambda: client.get_odds(fid),
+            }
+            results = await asyncio.gather(
+                *[c() for c in calls.values()], return_exceptions=True)
+            for key, value in zip(calls, results):
+                if isinstance(value, BaseException):
+                    # 单个可选字段失败不影响整场展示，但原因要留痕
+                    det["errors"][key] = str(value)
+                    det[key] = [] if key != "odds" else None
+                else:
+                    det[key] = value
+            return _live_shape(fx, det)
+
+        items = list(await asyncio.gather(*[_one(fx) for fx in picked]))
+    else:
+        items = [_live_shape(fx, {}) for fx in picked]
+
+    return JSONResponse({
+        "version": _VERSION, "status": "ok",
+        "count": len(items), "items": items,
+        "updated_at": _now_iso(),
+        "truncated": truncated,
+        "message": (f"另有 {truncated} 场进行中未展示（单轮上限 "
+                    f"{LIVE_MAX_MATCHES} 场，避免额度过快耗尽）。"
+                    if truncated else ""),
+    })
 
 
 def main() -> None:  # pragma: no cover

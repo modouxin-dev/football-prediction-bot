@@ -583,6 +583,45 @@ class PredictionRepository:
             return None
         return d
 
+    def get_prediction_detail(self, fixture_id) -> dict[str, Any] | None:
+        """单场预测的完整详情，含 inputs 里落盘的派生量。
+
+        与 get_stored_prediction 的区别：那个只取展示卡片所需的
+        结论字段（不含 inputs / level_key / created_at），用于 Telegram
+        回调的轻量回读；本方法要喂给看板的「展开详情」面板，需要
+        预期进球、大小球、双方进球、最可能比分这些派生量。
+
+        inputs 是 JSON 字符串，解析失败时降级为 None 而不是整条丢弃——
+        缺了派生量仍应能展示方向与概率，只是详情少几行。
+        """
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT fixture_id, league, home, away, kickoff, home_prob, "
+                "draw_prob, away_prob, best_score, result, level_key, inputs, "
+                "created_at, actual_home, actual_away "
+                "FROM predictions WHERE fixture_id = ?",
+                (str(fixture_id),),
+            ).fetchone()
+        except Exception as exc:
+            log.warning("读取预测详情失败：%s", exc)
+            return None
+        if row is None:
+            return None
+        d = dict(row)
+        if d.get("home_prob") is None or d.get("draw_prob") is None or d.get("away_prob") is None:
+            return None
+        raw = d.get("inputs")
+        inputs: dict[str, Any] | None = None
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                inputs = parsed if isinstance(parsed, dict) else None
+            except (ValueError, TypeError) as exc:
+                log.warning("解析 inputs 失败（fixture=%s）：%s", fixture_id, exc)
+        d["inputs"] = inputs
+        return d
+
     # 旧库补列：精确的比分口径与语料窗口。与 signal_ab 同一套幂等机制。
     BACKTEST_RUN_COLUMNS = {
         "exact_n": "INTEGER",
