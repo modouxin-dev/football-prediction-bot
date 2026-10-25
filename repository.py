@@ -21,6 +21,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -175,6 +176,15 @@ CREATE TABLE IF NOT EXISTS api_quota (
     source   TEXT NOT NULL,
     n        INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, source)
+);
+-- 按「任务」维度的额度消耗。api_quota 只回答「两个源各用了多少」，
+-- 答不了「是谁在用」。额度打光时要能一眼看出该停哪个任务，
+-- 否则只能靠猜——而猜错的代价是停掉关键链路。
+CREATE TABLE IF NOT EXISTS api_quota_task (
+    day      TEXT NOT NULL,
+    task     TEXT NOT NULL,
+    n        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, task)
 );
 
 -- 回测结果留档：每次回测都落盘，重启可查、跨部署保留。
@@ -399,8 +409,34 @@ def _ddl_of(table: str) -> str:
 
 # 配额模块专用：内容与 SCHEMA 中的 api_quota 定义逐字同源。
 QUOTA_SCHEMA = _ddl_of("api_quota")
+QUOTA_TASK_SCHEMA = _ddl_of("api_quota_task")
 
 _local = threading.local()
+
+
+# 当前任务的额度归属标签。用 ContextVar 而非显式传参：
+# 请求发生在很深的调用栈里（任务 → service → router → client），
+# 逐层透传会把每个函数签名都污染一遍。ContextVar 让调用方只需
+# 在任务入口标一次，链路上的所有请求自动归入该任务。
+_QUOTA_TASK: ContextVar[str] = ContextVar("quota_task", default="other")
+
+
+@contextmanager
+def quota_scope(task: str):
+    """把一段执行期间的 API 消耗记到指定任务名下。
+
+    用法：在定时任务 / 命令的入口处包一层。不可重入嵌套时以最内层为准。
+    """
+    token = _QUOTA_TASK.set(str(task or "other"))
+    try:
+        yield
+    finally:
+        _QUOTA_TASK.reset(token)
+
+
+def current_quota_task() -> str:
+    """当前归属的任务名；未标注时返回 "other"。"""
+    return _QUOTA_TASK.get() or "other"
 
 
 def _quota_day() -> str:
@@ -424,6 +460,11 @@ def bump_quota(source: str, n: int = 1) -> None:
 
     只在真实网络请求发生时调用（主源失败、切备用源都各算一次），
     因此数字就是免费层额度的真实消耗量。计数失败绝不影响主流程。
+
+    同时按「当前任务」记账（见 quota_scope）：光知道两个源各用了多少，
+    额度打光时仍无从判断该停哪个任务。任务名由调用方用
+    ``quota_scope()`` 上下文标出，取不到时归入 "other"——
+    宁可粒度粗，也不能因为拿不到上下文就不记。
     """
     try:
         import paths
@@ -432,6 +473,7 @@ def bump_quota(source: str, n: int = 1) -> None:
         return
     try:
         day = _quota_day()
+        task = current_quota_task()
         conn = sqlite3.connect(db_path, timeout=5)
         try:
             conn.execute("PRAGMA busy_timeout=3000")
@@ -441,11 +483,41 @@ def bump_quota(source: str, n: int = 1) -> None:
                 "ON CONFLICT(day, source) DO UPDATE SET n = n + excluded.n",
                 (day, source, int(n)),
             )
+            conn.executescript(QUOTA_TASK_SCHEMA)
+            conn.execute(
+                "INSERT INTO api_quota_task(day, task, n) VALUES(?,?,?) "
+                "ON CONFLICT(day, task) DO UPDATE SET n = n + excluded.n",
+                (day, task, int(n)),
+            )
             conn.commit()
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - 计数是旁路功能，失败只记日志
         log.debug("配额计数失败（不影响主流程）：%s", exc)
+
+
+def quota_tasks_today() -> dict[str, int]:
+    """今日各任务的实际请求次数；读不到返回空字典。"""
+    try:
+        import paths
+        db_path = str(paths.DB_PATH)
+    except Exception:
+        return {}
+    try:
+        day = _quota_day()
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout=3000")
+            conn.executescript(QUOTA_TASK_SCHEMA)
+            rows = conn.execute(
+                "SELECT task, n FROM api_quota_task WHERE day = ?", (day,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return {str(t): int(n) for t, n in rows}
+    except Exception as exc:  # noqa: BLE001
+        log.debug("读取任务配额失败：%s", exc)
+        return {}
 
 
 def quota_today() -> dict[str, int]:
