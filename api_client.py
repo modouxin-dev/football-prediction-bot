@@ -70,6 +70,8 @@ TTL_ODDS = 15 * 60
 TTL_H2H = 12 * 3600
 TTL_FORM = 12 * 3600
 TTL_STATUS = 5 * 60
+# 进行中比赛的比分分钟级变化，缓存必须短；否则「实时」只是看起来实时
+TTL_LIVE = 60
 TTL_SEASONS = 24 * 3600
 TTL_SEASON_FIXTURES = 6 * 3600
 TTL_INJURIES = 3 * 3600
@@ -198,6 +200,9 @@ class FootballAPI:
         # 实现，容量上限与过期淘汰都保留。
         self._cache = _new_response_cache()
         self.quota_remaining: str | None = None
+        # 实时端点最后一次失败原因（None = 最近一次成功或从未调用）。
+        # 用于区分「没有进行中的比赛」与「套餐不支持 live」。
+        self.last_live_error: str | None = None
 
     async def aclose(self) -> None:
         if self._client is not None and self._owns_client:
@@ -315,6 +320,33 @@ class FootballAPI:
         """整季赛程（只按赛季拉取，不带日期范围）。"""
         params = {"league": league_id, "season": season}
         return await self._get("fixtures", params, ttl=TTL_SEASON_FIXTURES)
+
+    async def get_live_fixtures(self) -> list[dict[str, Any]]:
+        """正在进行的比赛（/fixtures?live=all）。
+
+        ⚠️ 套餐门槛：`live=all` 属于付费能力，免费层会直接拒绝。
+        因此这里与 get_injuries / get_lineups 一样按**可选数据**处理——
+        取不到一律返回空列表，绝不能让看板整页报错。
+
+        TTL 刻意设短（TTL_LIVE）：进行中比赛的比分分钟级变化，
+        沿用 TTL_FIXTURES（30 分钟）等于把实时数据伪装成实时。
+
+        空列表有三种含义，上层必须能区分，否则用户会把「套餐不支持」
+        误读成「现在没有比赛」——两者处置方式完全不同（前者要换套餐，
+        后者只需等待）。因此把失败原因留在 ``last_live_error`` 上：
+          1. 空列表 + last_live_error=None → 此刻确实没有进行中的比赛
+          2. 空列表 + 含 "套餐/订阅/permission" → 套餐不支持
+          3. 空列表 + 其他原因 → 限流或临时故障
+        """
+        try:
+            data = await self._get("fixtures", {"live": "all"}, ttl=TTL_LIVE)
+        except APIError as exc:
+            self.last_live_error = str(exc)
+            log.info("实时赛况不可用（live=all）：%s", exc)
+            return []
+        else:
+            self.last_live_error = None
+            return data
 
     async def get_injuries(self, fixture_id: int) -> list[dict[str, Any]]:
         """指定比赛的伤停名单。"""
