@@ -63,6 +63,116 @@ BACKTEST_INTERVAL_HOURS = 24
 # 这里补的是可能不在 LEAGUE_IDS 里、但仍需无人值守兜底的额外联赛。
 AUTO_PREDICT_EXTRA_LEAGUES: tuple[int, ...] = (2,)  # 2 = 欧洲冠军联赛
 
+# 哪些任务吃外网额度。额度吃紧时要按这张表**从后往前**停：
+# 停掉回测/历史回填，系统照样能推送与结算；反过来则整个数据闭环断掉。
+# 顺序即优先级，不要随意调换。
+QUOTA_CONSUMERS: tuple[str, ...] = (
+    SETTLE_JOB,        # 结算：命中率样本的地基，最后才停
+    AUTO_PREDICT_JOB,  # 无人值守预测：看板与推送的来源
+    SYNC_JOB,          # 赛程同步：没有赛程就没有一切
+    PREMATCH_JOB,      # 赛前刷新：锦上添花
+    HISTORY_JOB,       # 历史回填：数百场，额度大户
+    BACKTEST_JOB,      # 回测：可用本地库跑，最先停
+)
+
+
+# 分级熔断阈值：剩余次数低于该值时，**从该档起往后**的任务整批跳过。
+#
+# 为什么用绝对剩余次数而不是百分比：主源的每日上限未必报得出来，
+# 没有分母时百分比无从计算。而「还剩多少次」是每次响应都会带的硬数字，
+# 拿它分档在任何套餐下都成立。
+#
+# 为什么按档位而不是一刀切：额度吃紧时仍有必须保住的链路——
+# 结算（命中率样本）、预测（推送来源）、同步（赛程）。
+# 一刀切熔断会把这些一起停掉，系统看起来在省额度，实际是数据闭环断了。
+QUOTA_GATE: tuple[tuple[str, int], ...] = (
+    (BACKTEST_JOB, 800),    # 回测可用本地库跑，先停它
+    (HISTORY_JOB, 400),     # 整季回填数百场，额度大户
+    (PREMATCH_JOB, 150),    # 赛前刷新是锦上添花
+)
+
+# 额度**未知**时一律放行。理由同 api_client.quota_exhausted：
+# 拿不到读数就停所有任务，比额度打光本身更糟——那等于因为量具坏了
+# 就把生产线关掉。
+QUOTA_GATE_ENABLED = True
+
+
+def quota_allows(task: str, quota_left) -> tuple[bool, str | None]:
+    """判断任务在当前额度下是否该继续跑。
+
+    返回 (是否放行, 跳过原因)。原因要能直接给用户看——
+    「额度不足跳过」这种说法等于没说，必须带上剩余次数与阈值。
+    """
+    if not QUOTA_GATE_ENABLED:
+        return True, None
+    # 未知额度不放行判断：不猜，也不因此停摆
+    if quota_left is None:
+        return True, None
+    try:
+        left = int(quota_left)
+    except (TypeError, ValueError):
+        return True, None
+    for name, floor in QUOTA_GATE:
+        if task == name and left < floor:
+            return False, (
+                f"剩余额度 {left} 次，低于该任务的保留线 {floor} 次，本次跳过。"
+                f"额度每日重置后自动恢复。")
+    return True, None
+
+
+def _db_path_of(app):
+    """取当前数据库路径（供 joblog 落库）；拿不到返回 None。"""
+    service = (app.bot_data or {}).get("service")
+    if service is None:
+        return None
+    return getattr(getattr(service, "settings", None), "db_path", None)
+
+
+def _current_quota_left(app) -> int | None:
+    """从已装配的 API 客户端上读剩余额度；拿不到返回 None。
+
+    只读**已观测到的**数字，绝不为此额外发一次请求——
+    查额度的请求本身也要消耗额度。
+    """
+    api = (app.bot_data or {}).get("api")
+    if api is None:
+        return None
+    # DataSourceRouter 代理到主源
+    primary = getattr(api, "primary", None) or api
+    getter = getattr(primary, "quota_left", None)
+    try:
+        return getter() if callable(getter) else getattr(primary, "quota_left", None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def with_quota_scope(name: str, fn):
+    """把任务执行期间的 API 消耗记到该任务名下。
+
+    不做这层标注，额度表只知道「两个源各用了多少」，
+    答不了「是谁在用」——额度打光时只能靠猜该停哪个任务。
+
+    包装在注册处统一做，而不是改每个 job 函数体：
+    任务有 9 个，逐个改必然漏，漏掉的那个恰好成为盲区。
+    """
+    async def wrapped(context):
+        from repository import quota_scope
+        app = context.application
+        left = _current_quota_left(app)
+        allowed, reason = quota_allows(name, left)
+        if not allowed:
+            log.warning("任务 %s 跳过：%s", name, reason)
+            # 跳过必须落库，否则看板「任务状态」里它凭空消失——
+            # 用户会以为任务没跑，而不是「有意省额度」。
+            joblog.skip(_db_path_of(app), name, reason)
+            return None
+        with quota_scope(name):
+            return await fn(context)
+    # 保留被包装函数的名字，PTB 与日志里才看得出是哪个 job
+    wrapped.__name__ = getattr(fn, "__name__", name)
+    wrapped.__wrapped__ = fn
+    return wrapped
+
 # 自动预测的向前窗口（天）。
 # 必须与看板可切换的范围对齐：看板 days 支持 1/3/7，窗口只有 2 天时
 # 切到「3 天」第三天必然整片未预测。取 3 天覆盖看板默认档位，
@@ -549,24 +659,24 @@ def setup_scheduler(app, settings: Settings) -> int:
     # 赛程同步：定时把未来赛程与最近赛果拉到本地库，
     # 让 Telegram 命令只读 SQLite，不依赖外部接口
     app.job_queue.run_repeating(
-        sync_job, interval=SYNC_INTERVAL_HOURS * 3600, first=10, name=SYNC_JOB,
+        with_quota_scope(SYNC_JOB, sync_job), interval=SYNC_INTERVAL_HOURS * 3600, first=10, name=SYNC_JOB,
     )
     # 历史回填与回测**不依赖 CHAT_ID**：它们是数据积累与模型体检，
     # 属于"程序自己该做的事"，不该因为没配推送群就整个停掉。
     # （此前的 settle_job 就被误放进 chat_id 分支，导致没配群号时
     #  赛果一条都不结算——那个问题单独修，这里先保证不再重演。）
     app.job_queue.run_repeating(
-        history_job, interval=HISTORY_INTERVAL_HOURS * 3600, first=600,
+        with_quota_scope(HISTORY_JOB, history_job), interval=HISTORY_INTERVAL_HOURS * 3600, first=600,
         name=HISTORY_JOB,
     )
     app.job_queue.run_repeating(
-        backtest_job, interval=BACKTEST_INTERVAL_HOURS * 3600, first=1800,
+        with_quota_scope(BACKTEST_JOB, backtest_job), interval=BACKTEST_INTERVAL_HOURS * 3600, first=1800,
         name=BACKTEST_JOB,
     )
     # 无人值守预测：让「有赛程」和「有预测」是同一批比赛，
     # 并为复盘/回测积累真实的赛前预测流水（不依赖用户手动点按钮）。
     app.job_queue.run_repeating(
-        auto_predict_job, interval=AUTO_PREDICT_INTERVAL_HOURS * 3600, first=120,
+        with_quota_scope(AUTO_PREDICT_JOB, auto_predict_job), interval=AUTO_PREDICT_INTERVAL_HOURS * 3600, first=120,
         name=AUTO_PREDICT_JOB,
     )
     # 赛前刷新：只跑「即将开赛」的少数比赛，拿到首发阵容后重算概率。
@@ -577,7 +687,7 @@ def setup_scheduler(app, settings: Settings) -> int:
     if getattr(settings, "prematch_enabled", False) and \
             getattr(settings, "prematch_refresh_minutes", 0) > 0:
         app.job_queue.run_repeating(
-            prematch_job,
+            with_quota_scope(PREMATCH_JOB, prematch_job),
             interval=int(settings.prematch_refresh_minutes) * 60,
             first=max(int(settings.prematch_refresh_minutes) * 60, 60),
             name=PREMATCH_JOB,
@@ -589,20 +699,20 @@ def setup_scheduler(app, settings: Settings) -> int:
     # 赛果结算移出 chat_id 分支（此前误放进来，导致没配群号时一条都不结算）。
     # 结算是数据闭环的地基：不结算就永远没有命中率样本，复盘与校准都是空的。
     app.job_queue.run_repeating(
-        settle_job, interval=6 * 3600, first=300, name=SETTLE_JOB,
+        with_quota_scope(SETTLE_JOB, settle_job), interval=6 * 3600, first=300, name=SETTLE_JOB,
     )
     # 缓存清理：每天扫一次足够，过期缓存本来还要留 24 小时当兜底。
     app.job_queue.run_repeating(
-        cache_purge_job, interval=24 * 3600, first=3600, name=CACHE_JOB,
+        with_quota_scope(CACHE_JOB, cache_purge_job), interval=24 * 3600, first=3600, name=CACHE_JOB,
     )
     # 6 = 同步 / 历史回填 / 回测 / 自动预测 / 结算 / 缓存清理；
     # 赛前刷新按开关另计。
     registered = 7 if prematch_registered else 6
     if settings.chat_id:
-        app.job_queue.run_daily(daily_push, time=settings.push_time, name=DAILY_JOB)
+        app.job_queue.run_daily(with_quota_scope(DAILY_JOB, daily_push), time=settings.push_time, name=DAILY_JOB)
         # 每日复盘：把「准在哪、不准在哪」讲清楚，是进步型机器人的反馈回路
         app.job_queue.run_daily(
-            review_job, time=settings.review_time, name=REVIEW_JOB,
+            with_quota_scope(REVIEW_JOB, review_job), time=settings.review_time, name=REVIEW_JOB,
         )
         registered += 2
     else:
