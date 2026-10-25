@@ -243,6 +243,19 @@ async def diag_cmd(update, context) -> None:
     if widened:
         rows.append(("📆", "窗口", f"当前窗口全空，已自动扩到 {DIAG_WIDEN_DAYS} 天后重探"))
 
+    # 超期未结算：已开赛但超出回溯窗口、永远结算不了的行。
+    # 它们不再堵塞结算队列（pending() 有下界），但数量是故障信号。
+    # 这个数字原本算得出来却无人展示——诊断恰恰是最该看见它的地方：
+    # 主源探活一切正常、结算却不动时，原因往往就藏在这里。
+    try:
+        stale = app.bot_data["service"].repo.count_stale_pending()
+    except Exception:  # noqa: BLE001 - 计数失败不能拖垮整个诊断
+        stale = None
+    rows.append(("🧟", "超期未结算", (
+        "—（读取失败）" if stale is None
+        else (f"⚠️ {stale} 场（已开赛但超出回溯窗口，不会被结算）" if stale
+              else "✅ 0 场"))))
+
     # 真实请求 3/4：直连主源探测赔率与伤停。
     # 订阅了会员却显示「暂无赔率 / 未计入伤停」时，无法区分三种情况：
     # 套餐不含该端点、该场尚未开盘、或压根没走主源。这里实测一次即可区分。
