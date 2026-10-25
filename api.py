@@ -956,7 +956,8 @@ async def live(detail: int = 1) -> JSONResponse:
                            "这不是套餐不支持——额度次日重置，"
                            "届时无需任何改动即会自动恢复。")
                     status = "quota_exhausted"
-                elif "not subscribed" in low or "permission" in low or "do not have access" in low:
+                elif ("not subscribed" in low or "permission" in low
+                      or "do not have access" in low):
                     msg = ("实时端点不可用：当前订阅不含 live 能力，"
                            "需在 API-Football 控制台确认套餐。")
                     status = "unsupported"
