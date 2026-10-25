@@ -4,7 +4,9 @@ pytest>=9.1.1
 # NameError）依赖此插件。缺了会报 "async def functions are not natively
 # supported" 并让 CI 直接变红——本机装过所以看不出来，全新 CI 环境必现。
 pytest-asyncio>=1.4.0
-# Web 看板为可选功能，但 api.py 的测试需要在 CI 里跑，故开发环境装上
-fastapi>=0.143.3
-uvicorn>=0.27
+# Web 看板为可选功能，但 api.py 的测试需要在 CI 里跑，故开发环境装上。
+# 用 -r 继承而非复制版本号：此前 dev 写 uvicorn>=0.27、web 写 >=0.54.0，
+# 两份声明各自漂移，测试环境可能落在 0.27.x 而生产在 0.54+。
+# 继承后 web 是唯一事实源，漂移在结构上不可能发生。
+-r requirements-web.txt
 pyflakes>=4.0.3  # 静态检查：undefined name 门禁（tests/test_static_gate.py）
