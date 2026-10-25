@@ -1,4 +1,5 @@
 # Web 看板依赖 (FastAPI + Uvicorn 只需这3个)
 fastapi>=0.143.3
 uvicorn>=0.54.0
-aiofiles>=25.1.0
+# aiofiles 已移除：全仓 grep 'aiofiles' --include='*.py' 零命中，无代码引用。
+# 保留在 dev 继承链里只会白白装上，后续引入时再加回。
