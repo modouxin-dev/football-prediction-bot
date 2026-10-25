@@ -1870,6 +1870,7 @@ class PredictionRepository:
                           p.actual_home, p.actual_away
                    FROM matches m
                    LEFT JOIN predictions p ON p.fixture_id = CAST(m.id AS TEXT)
+                        OR p.fixture_id = 'fd-' || CAST(m.id AS TEXT)
                    WHERE """ + where + """
                    ORDER BY m.competition_code, m.utc_date
                    LIMIT ?""",
