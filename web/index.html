@@ -220,6 +220,8 @@
     .pbtn{padding:4px 10px}
   }
 
+  /* 数据滞后提示：用了过期缓存时必须说，不能让旧快照冒充实时 */
+  .warn{color:#e0a03a;font-weight:600}
   /* ===== 预测详情弹窗 ===== */
   .modal{position:fixed;inset:0;z-index:100;display:none;align-items:flex-end;
          justify-content:center;background:rgba(0,0,0,.6)}
@@ -880,7 +882,18 @@ function predictionBody(d){
   }
   html += `</div>`;
 
-  html += `<div class="mfoot">阵容与赔率为实时取回，其余为预测时落盘的快照 · 仅供参考，不构成投注建议</div>`;
+  const fa = d.fetched_at || {};
+  const stamp = (k, label) => {
+    const t = fa[k];
+    if(!t) return '';
+    const s = String(t).slice(11,19);
+    return fa[k + '_stale']
+      ? `<div class="dim">${label}为 ${esc(s)} UTC 的快照（本次实时拉取失败）</div>`
+      : `<div class="dim">${label}取于 ${esc(s)} UTC（缓存有效期内，重复打开不再重复请求）</div>`;
+  };
+  html += stamp('odds', '赔率') + stamp('lineups', '阵容');
+  html += `<div class="mfoot">阵容与赔率走缓存（多人打开同一场仅取一次），`
+    + `方向/比分/大小球为预测时落盘的快照 · 仅供参考，不构成投注建议</div>`;
   return html;
 }
 
@@ -996,13 +1009,21 @@ function liveCard(lv, noHead){
     + (noHead ? '' : '<h2>正在进行 <span>实时比分 · 阵容 · 伤停 · 赔率</span></h2>');
   const items = (lv && lv.items) || [];
   if(!items.length){
-    return head + `<div class="empty">${esc(lv && lv.message ? lv.message : '此刻没有正在进行的比赛。')}</div></div>`;
+    let m = esc(lv && lv.message ? lv.message : '此刻没有正在进行的比赛。');
+    if(lv && lv.stale && lv.updated_at)
+      m += `（最后一次成功拉取：${esc(String(lv.updated_at).slice(11,19))} UTC）`;
+    return head + `<div class="empty">${m}</div></div>`;
   }
   const n = items.length;
+  // 显示的是「实际拉取时刻」而非当前时刻：数据来自 60 秒 TTL 的缓存，
+  // 标成当前时间等于把旧数据伪装成刚取到的。
   const upd = lv.updated_at ? String(lv.updated_at).slice(11,19) : '';
+  const stale = lv.stale
+    ? ` <span class="warn">· 实时拉取失败，此为最后一次成功的快照</span>` : '';
   return head
     + `<div class="livemeta">${n} 场进行中`
     + (upd ? ` · 数据时间 ${esc(upd)} UTC` : '')
+    + stale
     + `</div>`
     + items.map(liveMatchCard).join('')
     + (lv.message ? `<div class="why">${esc(lv.message)}</div>` : '')
