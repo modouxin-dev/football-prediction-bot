@@ -160,17 +160,32 @@ def _build_prefix_index(
         for i in range(1, len(toks)):
             buckets.setdefault(" ".join(toks[:i]), set()).add(k)
 
-    # 三道闸门，缺一不可：
+    # 非首位的 token 片段集合：见下方第 4 道闸门。
+    trailing: set[str] = set()
+    for k in idx:
+        toks = k.split()
+        for start in range(1, len(toks)):
+            for end in range(start + 1, len(toks) + 1):
+                trailing.add(" ".join(toks[start:end]))
+
+    # 四道闸门，缺一不可：
     # 1) 值必须存**原名**而非归一键——调用方拿它去查 TEAM_NAMES（键是数据源
     #    原名），存成归一键会静默查不到，前缀索引形同虚设。
     # 2) 前缀若**本身已经是某支队的完整键**，视为歧义。"Suwon" 既是水原FC 的
     #    完整键，又是水原三星的前缀；只按「贡献者唯一」判断会误判成无歧义。
     # 3) 前缀若**已是已知冲突键**（"vitoria" = 巴西维多利亚 vs 葡萄牙吉马良斯），
     #    同样不进——它虽没进 idx，但语义上就是歧义的。
+    # 4) 前缀若在**别的队名里作非首位成分**出现，同样不进。这是补国家队时
+    #    踩到的真事故：收了 "United States" 后，"united" 的唯一贡献者是它，
+    #    前三道闸门全过，于是 team_short_name("United") 返回「美国」。而
+    #    "united" 同时是 Manchester United / Leeds United / West Ham United
+    #    的尾部成分——这类通名天生不是标识符。前缀只取自首位，光看「贡献者
+    #    唯一」看不出它其实是个烂大街的词，必须显式排掉。
     return {
         p: idx[next(iter(v))]
         for p, v in buckets.items()
         if len(v) == 1 and p not in idx and p not in collisions
+        and p not in trailing
     }
 
 
