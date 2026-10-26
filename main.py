@@ -988,8 +988,30 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await edit_view(query, text, ui.get_main_keyboard(fixture_id, view))
 
 
+#: Conflict 计数：同一 token 有多个进程在轮询 getUpdates 时，
+#: Telegram 会持续拒绝后来的那个。今天实测：Railway 的 PR 环境会复制生产
+#: 环境变量（含 TELEGRAM_BOT_TOKEN），于是每开一个 PR 就多一个机器人。
+#: 症状是「命令发了没回复」「重复推送」「/status 版本跳变」，
+#: 且**从业务日志完全看不出原因**——只会看到一堆 409 Conflict。
+_CONFLICT_COUNT = 0
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log.error("处理更新时出错", exc_info=context.error)
+    global _CONFLICT_COUNT
+    err = context.error
+    # Conflict 必须单独识别：它是**部署环境问题**，不是业务 bug。
+    # 混在通用 error 里就永远要靠人工翻日志才能发现。
+    if type(err).__name__ == "Conflict" or "getUpdates" in str(err):
+        _CONFLICT_COUNT += 1
+        # 只在头几次和每 50 次时告警：Conflict 每 30 秒一条，全打会淹没日志。
+        if _CONFLICT_COUNT <= 3 or _CONFLICT_COUNT % 50 == 0:
+            log.error(
+                "⚠️ 检测到 getUpdates 冲突（第 %d 次）：**同一 token 有多个实例在轮询**。"
+                "常见原因是 Railway PR 环境复制了生产环境变量——请检查项目里是否存在 "
+                "残留的 pr-* 环境并删除（关闭开关不会清理已存在的环境）。"
+                "当前进程发出的命令不会得到响应。", _CONFLICT_COUNT)
+        return
+    log.error("处理更新时出错", exc_info=err)
 
 
 # --- Heartbeat Start ---
@@ -1003,9 +1025,15 @@ async def send_heartbeat(application):
             # 看起来像"时间不对"。按 TIMEZONE 配置取本地时间展示。
             tz = pytz.timezone(os.getenv("TIMEZONE", "Asia/Shanghai"))
             now_text = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+            # 带构建版本与实例序号：有多个实例（Railway PR 环境复制了生产变量时
+            # 就会）时，心跳会重复发好几条——**没有版本就分不清哪条是哪个实例**。
+            # 版本号相同说明是同一份代码的多个副本，不同说明有旧构建还活着。
+            ver = (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]
             await application.bot.send_message(
                 chat_id=admin_id,
-                text=f"🚀 [Bot Online]\n时间: {now_text}\n状态: 工业级部署已生效，心跳正常。"
+                text=(f"🚀 [Bot Online]\n时间: {now_text}\n构建: {ver}"
+                      f"\n状态: 心跳正常。若收到多条本消息，说明有多个实例在跑"
+                      f"（同一 token 只能有一个），请检查残留的 PR 环境。")
             )
             logging.info("Heartbeat message sent to admin.")
         except Exception as e:
