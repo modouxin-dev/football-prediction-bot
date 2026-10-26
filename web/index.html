@@ -67,6 +67,17 @@
   .card h2{font-size:16px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--line)}
   .grid{grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
   .stat{background:linear-gradient(160deg,#1a2030,#12151b);text-align:center}
+  /* 决策链：四阶段纵向排列，阶段间用细线分隔 */
+  .trace{margin-top:2px}
+  .trow{display:flex;justify-content:space-between;gap:10px;padding:7px 0;
+        border-bottom:1px solid var(--line);font-size:13px}
+  .trow:last-child{border-bottom:0}
+  .tkey{color:#9fb4d0;font-weight:600;white-space:nowrap}
+  .tval{color:#cfe0f5;text-align:right;font-variant-numeric:tabular-nums}
+  .tnote{font-size:12px;color:#7f93ad;padding:2px 0 4px}
+  .tdelta{font-size:11px;color:#5f7a96}
+  .tfeat{font-size:12px;color:#8fa3bd;padding:4px 0;line-height:1.5}
+  .badText{color:#ff8a9b}
   /* 超期未结算：与「正常指标」区分开，避免被当成又一个蓝数字 */
   .stat.bad{background:linear-gradient(160deg,#3a1f26,#241318);border:1px solid #7a3b47}
   .stat.bad b{color:#ff8a9b}
@@ -922,6 +933,63 @@ async function showPrediction(fid){
 }
 function closeModal(){ $('modal').style.display = 'none'; }
 
+function traceSection(d){
+  const t = d && d.trace;
+  // 老预测没有 trace（本次上线前生成的）。
+  // 必须显式说明"这条是旧数据"，而不是渲染成空表——
+  // 空表会被读成"每个环节影响都是零"。
+  if(!t || !t.stages || !t.stages.length){
+    return `<div class="msec"><h4>🧭 决策链</h4>
+      <div class="dim">这条预测生成于可追溯功能上线之前，未留存决策链。
+      下一次自动预测（每 6 小时）生成的预测会带上。</div></div>`;
+  }
+  const P = p => (Array.isArray(p)&&p.length===3)
+    ? `主 ${(p[0]*100).toFixed(0)}% · 平 ${(p[1]*100).toFixed(0)}% · 客 ${(p[2]*100).toFixed(0)}%`
+    : null;
+  let out = `<div class="msec"><h4>🧭 决策链</h4><div class="trace">`;
+  t.stages.forEach((s,i)=>{
+    const pv = P(s.probs);
+    out += `<div class="trow"><span class="tkey">${esc(s.label||s.key||'')}</span>`
+      + `<span class="tval">${pv?esc(pv):'<i>未记录</i>'}</span></div>`;
+    if(s.key==='temperature' && s.temperature!=null && Math.abs(s.temperature-1)>1e-6){
+      out += `<div class="tnote">温度 T=${s.temperature}（拉平概率以修正过度自信）</div>`;
+    }
+    if(s.key==='ensemble' && s.weights){
+      const w = Object.entries(s.weights)
+        .map(([k,v])=>`${esc(k)} ${(v*100).toFixed(0)}%`).join(' · ');
+      out += `<div class="tnote">权重：${w}${s.fallback?' <b class="badText">（已回落经验值）</b>':''}</div>`;
+    }
+    if(s.key==='model'){
+      out += `<div class="tnote">赛前信号（伤停/首发）：`
+        + `${s.prematch_applied?'已应用':'未应用'}</div>`;
+    }
+    if(i < t.stages.length-1){
+      const nx = t.stages[i+1];
+      if(P(s.probs) && P(nx.probs)){
+        const dh = (nx.probs[0]-s.probs[0])*100;
+        out += `<div class="tdelta">→ 进入下一阶段后，主胜 `
+          + `${dh>=0?'+':''}${dh.toFixed(1)} 个百分点</div>`;
+      }
+    }
+  });
+  out += `</div>`;
+  const ft = t.features;
+  if(ft){
+    out += `<div class="tfeat">输入特征：主攻 ${ft.home_attack} / 主防 ${ft.home_defense}`
+      + ` · 客攻 ${ft.away_attack} / 客防 ${ft.away_defense}`
+      + ` · 联赛均值 ${ft.league_avg_home}:${ft.league_avg_away}`
+      + ` · ρ ${ft.rho}</div>`;
+    out += `<div class="tfeat">Elo 融合系数：<b class="${ft.elo_factor==null?'badText':''}">`
+      + `${ft.elo_factor==null?'未启用（生产路径当前不传该参数）':ft.elo_factor}</b></div>`;
+  }
+  if(t.market){
+    out += `<div class="tfeat">市场口径：主 ${(t.market.home*100).toFixed(0)}%`
+      + ` · 平 ${(t.market.draw*100).toFixed(0)}% · 客 ${(t.market.away*100).toFixed(0)}%</div>`;
+  }
+  out += `<div class="dim">最终展示概率 = 最后一阶段的输出，与上方概率条一致。</div></div>`;
+  return out;
+}
+
 function predictionBody(d){
   const p = d.probs || {};
   const f = v => (v == null ? '—' : Number(v).toFixed(2));
@@ -955,6 +1023,9 @@ function predictionBody(d){
       <div><i>信心等级</i><b>${esc(LV[d.level_key]||d.level_key||'—')}</b></div>
       <div><i>预测时间</i><b>${d.predicted_at?esc(String(d.predicted_at).slice(5,16).replace('T',' ')):'—'}</b></div>
     </div>${ts?`<div class="mtop">常见比分：${ts}</div>`:''}</div>`;
+
+  // 决策链：这个概率是怎么一步步变成的
+  html += traceSection(d);
 
   // 赔率
   html += `<div class="msec"><h4>💰 赔率</h4>`;

@@ -998,6 +998,78 @@ class PredictionService:
                     sample = None
         return loads, start_xi, ratings, sample
 
+    @staticmethod
+    def _build_trace(*, analysis: dict, prematch: dict | None,
+                     model_probs: tuple[float, float, float],
+                     final_probs: tuple[float, float, float],
+                     market_probs: tuple[float, float, float] | None,
+                     weights: dict, used: list, fallback: bool,
+                     temperature: float) -> dict:
+        """组装单场预测的「决策链证据」。
+
+        为什么是阶段式而非只记特征：
+        特征只回答「用了什么」，阶段才回答「每一步把概率推了多少」。
+        复盘真正要定位的是后者——比如市场权重 0.75 把模型给的主胜 45%
+        拉到 52%，最终判客胜，这个锅在集成环节而不在泊松。
+
+        三个阶段严格按实际执行顺序排列，probs 为该阶段**结束后**的概率，
+        故最后一项必然等于落库的展示概率（自洽性由测试保证）。
+
+        Args:
+            analysis: predict_match 的输出（已被市场改写，但 features /
+                pre_temperature_probs 是改写前留的快照）
+            prematch: 赛前信号（伤停/首发），None 表示未启用
+            model_probs: 模型路概率（温度校准后、集成前）
+            final_probs: 集成后概率，即展示概率
+            market_probs: 市场去水后的隐含概率，无赔率时为 None
+            weights: 集成器实际使用的各路权重
+            used: 实际参与集成的路（缺的路不会出现在这里）
+            fallback: 是否回落到经验值
+            temperature: 本次使用的温度值
+
+        Returns:
+            可直接 JSON 序列化的 dict。任何字段取不到时记为 None，
+            **不填默认值**——None 表示"未知"，填 0 会被读成"影响为零"。
+        """
+        pre_t = analysis.get("pre_temperature_probs")
+        # ⚠️ 阶段命名必须与实际执行顺序严格对应：
+        # 第一阶段的 probs 是「温度前」的概率，它**已经包含** Elo 与赛前信号
+        # 的影响（两者在 λ 层面生效，早于温度）。把它叫「泊松基线」是错的，
+        # 会把 Elo / 伤停的功劳算到泊松头上。记为「模型基线」，
+        # Elo 与赛前信号单独在 features 里如实标注是否启用。
+        stages: list[dict] = [
+            {
+                "key": "model", "label": "模型基线",
+                "note": "泊松 + Dixon-Coles（含 Elo 与赛前信号对 λ 的修正）",
+                "probs": [round(float(x), 4) for x in pre_t] if pre_t else None,
+                "prematch_applied": bool(prematch),
+            },
+            {
+                "key": "temperature", "label": "温度校准",
+                "note": "拉平概率以修正过度自信",
+                "temperature": round(float(temperature), 4),
+                "probs": [round(float(x), 4) for x in model_probs],
+            },
+            {
+                "key": "ensemble", "label": "多模型集成",
+                "note": "模型 / 市场 / 联赛基线三路加权",
+                "weights": {k: round(float(v), 4) for k, v in weights.items()},
+                "used": list(used),
+                "fallback": fallback,
+                "probs": [round(float(x), 4) for x in final_probs],
+            },
+        ]
+        return {
+            "stages": stages,
+            "features": analysis.get("features"),
+            "market": (
+                {"home": round(market_probs[0], 4),
+                 "draw": round(market_probs[1], 4),
+                 "away": round(market_probs[2], 4)}
+                if market_probs else None),
+            "final": [round(float(x), 4) for x in final_probs],
+        }
+
     async def _predict_one(
         self, model: LeagueModel, kickoff: datetime, fx: dict[str, Any], fresh: bool = False
     ) -> Prediction:
@@ -1083,6 +1155,15 @@ class PredictionService:
             "weights": {k: round(v, 4) for k, v in ens_out["weights"].items()},
             "fallback": ens_out["fallback"],
         }
+        # 可追溯性：把「这个概率是怎么一步步变成的」落成证据链。
+        # 没有它，复盘只能看到最终数字，无法回答
+        # 「是模型算错了还是市场带偏了」「温度校准动了多少」。
+        analysis["trace"] = self._build_trace(
+            analysis=analysis, prematch=prematch,
+            model_probs=model_p, final_probs=final_p,
+            market_probs=market_p, weights=ens_out.get("weights") or {},
+            used=ens_out.get("used") or [], fallback=bool(ens_out.get("fallback")),
+            temperature=self.temperature)
         best = max(outcomes.items(), key=lambda kv: kv[1]["edge"]) if outcomes else None
         league = fx.get("league") or {}
 
@@ -1117,6 +1198,10 @@ class PredictionService:
                 # 两者混用会让 T 被市场成分稀释到 ≈1.0，泊松的偏差得不到修正。
                 "model_probs": _model_probs_of(analysis),
                 "market_blended": bool(analysis.get("market_blended")),
+                # 决策链证据：阶段式概率 + 输入特征 + 市场口径。
+                # 落库而非现算——事后重算会重新拉积分榜并再烧一次额度，
+                # 且可能算出一个与当初推送不一致的结论。
+                "trace": analysis.get("trace"),
                 # 展示详情所需的中间量：预期进球、大小球、双方进球、最可能比分。
                 # 不落库的话，事后想在看板上展开单场详情就得整场重算——
                 # 那会重新拉积分榜并再烧一次额度，而这些都是纯数学派生量，

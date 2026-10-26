@@ -521,6 +521,30 @@ class MatchAnalyzer:
             rho=rho,
             prematch=prematch,
         )
+        # 可追溯性：把「算这个数用了什么输入」原样留档。
+        # 不留的话，事后只能看到结论概率，无法回答
+        # 「是不是因为某队防守强度给低了」「Elo 到底有没有介入」。
+        # 纯加法，不改动任何已有字段的语义。
+        res["features"] = {
+            "home_attack": round(h.attack_home, 4),
+            "home_defense": round(h.defense_home, 4),
+            "away_attack": round(a.attack_away, 4),
+            "away_defense": round(a.defense_away, 4),
+            "league_avg_home": round(model.avg_home_goals, 4),
+            "league_avg_away": round(model.avg_away_goals, 4),
+            # None = 本次未启用 Elo（生产路径当前不传该参数）。
+            # 如实记录而不是填 1.0：填 1.0 会让人以为「启用了但影响为零」。
+            "elo_factor": round(float(elo_factor), 4) if elo_factor else None,
+            "rho": round(float(rho), 4),
+            "prematch_applied": bool(prematch),
+        }
+        # 温度前的概率：只有留住它，才能把「泊松算出来的」和
+        # 「温度校准改过的」分开看，否则复盘时两者混成一个数。
+        res["pre_temperature_probs"] = [
+            round(res["win_prob"], 6),
+            round(res["draw_prob"], 6),
+            round(res["loss_prob"], 6),
+        ]
         # 温度校准：概率「拉平」以修正过度自信（见 fit_temperature 说明）。
         # 三项概率的排序不变，因此最可能比分、信心等级的判定逻辑不受影响；
         # 变的是置信度——它直接决定价值偏差是否被误判成 Value Bet。
