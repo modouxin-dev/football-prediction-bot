@@ -1,0 +1,12 @@
+name: probe
+on: workflow_dispatch:
+jobs:
+  p:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for ep in /health /commands; do
+            echo "=== $ep ==="
+            curl -s -m 25 "https://football-prediction-bot-production-fb03.up.railway.app$ep" | head -c 900
+            echo
+          done
