@@ -1419,6 +1419,33 @@ class PredictionRepository:
             log.warning("列出超期未结算日期失败：%s", exc)
             return []
 
+    def stale_pending_sample_ids(self, limit: int = 6) -> list[str]:
+        """取几条僵尸行的 fixture_id 原样，用于诊断「为什么补不回来」。
+
+        结算回填一场都没补上时，第一疑问是 ID 对不上还是根本没取到数据。
+        看到样例就能立刻分辨：若样例是 ``fd-555051`` 而数据源返回 ``555051``，
+        那就是前缀不匹配（已知问题）；若样例是别的形式，那是新情况。
+
+        Args:
+            limit: 最多取几条
+
+        Returns:
+            fixture_id 字符串列表，可能为空。
+        """
+        try:
+            conn = self._connect()
+            floor = (datetime.now(timezone.utc)
+                     - timedelta(days=self.SETTLE_PENDING_FLOOR_DAYS)).isoformat()
+            rows = conn.execute(
+                "SELECT fixture_id FROM predictions WHERE actual_home IS NULL "
+                "AND kickoff IS NOT NULL AND kickoff < ? LIMIT ?",
+                (floor, limit),
+            ).fetchall()
+            return [str(r["fixture_id"]) for r in rows if r["fixture_id"] is not None]
+        except Exception as exc:
+            log.warning("取样僵尸行 ID 失败：%s", exc)
+            return []
+
     def stale_pending_count_for_day(self, day: str) -> int:
         """某天有多少条超期未结算（用于回填前后对账）。"""
         try:
