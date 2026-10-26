@@ -308,6 +308,15 @@ async def settlebackfill_cmd(update, context) -> None:
         if res.get("matched_by_name"):
             lines.append(f"队名兜底　　补回 {res['matched_by_name']} 场"
                          f"（这些 ID 跨源对不上，靠队名+日期定位）")
+        # 逐条明细：只说「ID 对不上」等于没说。看到具体是哪场、为什么没配上，
+        # 才能判断是队名写法差异（可修）还是比赛已被数据源移除（不可修）。
+        detail = res.get("unmatched_detail") or []
+        if detail:
+            lines.append("")
+            lines.append("未补回明细（最多 8 条）：")
+            for day, fid, h, a, why in detail[:8]:
+                lines.append(f"· {esc(day)} {esc(h)} vs {esc(a)}")
+                lines.append(f"　{esc(why)} · <code>{esc(fid)}</code>")
         if res["fetched_fixtures"] == 0:
             lines.append("")
             lines.append("<i>⚠️ 数据源在这些日期没有返回任何比赛。"
