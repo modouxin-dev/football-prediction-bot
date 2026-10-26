@@ -1,5 +1,6 @@
 """业务层：把赛程 / 积分榜 / 赔率拼成预测，并保存最近的预测供按钮回调使用。"""
 from __future__ import annotations
+from errfmt import fmt_exc
 
 from typing import TYPE_CHECKING, Any
 
@@ -1253,7 +1254,7 @@ class PredictionService:
         try:
             available = sorted({int(x) for x in (await self.api.get_available_seasons() or [])})
         except Exception as exc:  # 列表接口失败不阻断，退回逐年降级
-            log.warning("获取可用赛季列表失败（%s），改用逐年降级", type(exc).__name__)
+            log.warning("获取可用赛季列表失败（%s），改用逐年降级", fmt_exc(exc))
 
         if available:
             ordered: list[int] = []
@@ -1348,7 +1349,7 @@ class PredictionService:
         try:
             fixtures = await self.api.get_fixtures_by_date(day)
         except Exception as exc:  # 按日拉取失败不致命，上层会走原有路径
-            log.warning("按日拉取赛程失败（%s）：%s", day, type(exc).__name__)
+            log.warning("按日拉取赛程失败（%s）：%s", day, fmt_exc(exc))
             return []
         if not fixtures:
             return []
