@@ -948,6 +948,9 @@ async def prediction_detail(fixture_id: str) -> JSONResponse:
         "top_scores": top_scores,
         "data_completeness": inputs.get("data_completeness"),
         "odds_error": inputs.get("odds_error"),
+        # 决策链证据：预测时的阶段式概率与输入特征（落盘快照，非实时）。
+        # 老预测没有这个键（本次上线前的），前端按缺失处理，不要渲染成空表。
+        "trace": inputs.get("trace"),
         # 以下为实时取回（可能来自缓存，fetched_at 为实际拉取时刻）
         "lineups": lineups,
         "odds": odds,
