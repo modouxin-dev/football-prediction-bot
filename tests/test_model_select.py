@@ -169,10 +169,13 @@ def test_experiment_reports_all_metrics_per_candidate():
     for row in res.table:
         for metric in ("brier", "rps", "log_loss"):
             assert metric in row
-    # 两条规则字段必须落出来，供人工审阅
+    # 四条规则字段必须落出来，供人工审阅。
+    # 主指标是 Log Loss（小差异场景判别力优于 Brier/RPS），
+    # 次指标是 Brier 与 RPS 两项——只盯一项会让误差被挪到另一维度。
     if res.table[1].get("rules"):
         assert set(res.table[1]["rules"]) == {
-            "brier_improves", "rps_not_worse", "ci_significant"}
+            "log_loss_improves", "brier_not_worse", "rps_not_worse",
+            "ci_significant"}
 
 
 def test_backtest_records_carry_three_way_probs():
@@ -198,3 +201,77 @@ def test_elo_blend_is_passed_through():
     assert t.elo_blend == 0.1
     d = WalkForwardBacktester(min_history=5, use_elo=True)
     assert d.elo_blend is None  # None = 沿用 elo.ELO_BLEND
+
+
+# ---- 主指标必须是 Log Loss ---------------------------------------------------
+# 文献：区分完美预测者时，ignorance（负对数损失）通常优于 Brier，
+# Brier 又往往优于 RPS，尤其在模型差异较小时。
+# 本框架判的正是「小幅调参有无增益」这种小差异场景，故主指标定为 Log Loss。
+
+
+def test_primary_metric_is_log_loss():
+    """主指标必须是 log_loss——bootstrap 也必须以它为单位。"""
+    import inspect
+
+    from model_select import run_experiment
+
+    src = inspect.getsource(run_experiment)
+    assert 'metric="log_loss"' in src, "主指标被改成了别的，文献依据不再成立"
+    assert "log_loss_improves" in src
+
+
+def test_rejects_when_log_loss_better_but_brier_worse():
+    """主指标改善但次指标退化 → 不采纳。
+
+    只盯主指标的话，改善可能只是把误差挪到了另一个维度。
+    """
+    from model_select import judge
+
+    def _scores(ll, brier, rps, n=40):
+        return [{"match_id": str(i), "actual": 0,
+                 "brier": brier, "rps": rps, "log_loss": ll}
+                for i in range(n)]
+
+    # baseline: Log Loss 差、Brier 好；challenger: Log Loss 好、Brier 差
+    base = _scores(ll=1.10, brier=0.60, rps=0.40)
+    chal = _scores(ll=1.00, brier=0.62, rps=0.40)
+    boot = {"significant": True, "mean_diff": -0.10}
+
+    v = judge(base, chal, boot)
+    assert v["log_loss_improves"] is True
+    assert v["brier_not_worse"] is False      # 次指标退化
+    assert v["rps_not_worse"] is True
+    assert not all(v.values()), "四项未同时满足，不该采纳"
+
+
+def test_judge_requires_all_four():
+    """四项全满足才采纳——少一项都不行。"""
+    from model_select import judge
+
+    def _scores(ll, brier, rps, n=40):
+        return [{"match_id": str(i), "actual": 0,
+                 "brier": brier, "rps": rps, "log_loss": ll}
+                for i in range(n)]
+
+    good = _scores(ll=1.00, brier=0.60, rps=0.40)
+    assert all(judge(_scores(1.10, 0.60, 0.40), good,
+                     {"significant": True, "mean_diff": -0.1}).values())
+    # 显著但方向是变差 → 不算
+    v = judge(_scores(1.10, 0.60, 0.40), good,
+              {"significant": True, "mean_diff": 0.1})
+    assert v["ci_significant"] is False
+    # 不显著 → 不算
+    v = judge(_scores(1.10, 0.60, 0.40), good,
+              {"significant": False, "mean_diff": -0.1})
+    assert v["ci_significant"] is False
+
+
+def test_judge_returns_none_when_metric_missing():
+    """指标缺失返回 None，不能当成 0——那会伪造改善。"""
+    from model_select import judge
+
+    base = [{"match_id": "1", "actual": 0, "brier": 0.6,
+             "rps": 0.4, "log_loss": 1.1}]
+    chal = [{"match_id": "1", "actual": 0, "brier": None,
+             "rps": 0.4, "log_loss": 1.0}]
+    assert judge(base, chal, {"significant": True, "mean_diff": -0.1}) is None

@@ -1300,6 +1300,108 @@ async def backtest_cmd(update, context) -> None:
         disable_web_page_preview=True)
 
 
+async def oddsprobe_cmd(update, context) -> None:
+    """/oddsprobe — 导出单场赔率的**真实盘口结构**（盘口 id / 名称 / 选项）。
+
+    为什么需要 / Why: 亚洲盘在数据源码表里的 id 与选项写法**必须实测确认**。
+    凭记忆猜 id 会导致解析永远取不到值——而取不到值是「静默」的：
+    不报错、不告警，只是推荐里没有亚盘，看不出是没做还是没取到。
+
+    这里把一场真实比赛的**全部盘口**原样列出来，据此确定：
+    - 亚盘（让球）对应哪个 bet id / name
+    - 其选项（values）的写法，如 "Home -0.5" / "Away +1.25"
+    - 该套餐是否真的返回亚盘（有些套餐只给 1X2）
+
+    不加推断、不做猜测：只把数据源说了什么原样打印。
+    """
+    await _typing(update)
+    args = (context.args or []) if getattr(context, "args", None) else []
+    fid = str(args[0]).strip() if args and str(args[0]).strip() else None
+
+    # ⚠️ 此前这里调的是 _settings() / _api()，而 admin 模块里**根本没有
+    # 这两个函数**——命令一跑就 NameError。它注册了却从没被真正执行过，
+    # 所以一直没暴露。统一走 bot_data，与其他命令一致。
+    app = context.application
+    settings = app.bot_data.get("settings")
+    router = app.bot_data.get("api")
+    # 路由器负责主备切换；盘口探测要的是「数据源到底给了什么盘口」，
+    # 走主源即可（备用源 football-data.org 不提供盘口）。
+    api = getattr(router, "primary", router)
+    if api is None or settings is None:
+        await update.message.reply_text(normalize(
+            section("💱 盘口探测", ["赔率客户端不可用"])),
+            parse_mode="HTML")
+        return
+
+    try:
+        probe = await api.get_odds(int(fid)) if fid else None
+    except Exception as exc:  # noqa: BLE001 - 诊断要把原因显示出来
+        await update.message.reply_text(normalize(section("💱 盘口探测", [
+            f"❌ 指定 fixture {esc(fid or '')} 取赔率失败：{esc(describe_error(exc))}",
+        ])), parse_mode="HTML")
+        return
+
+    if not probe:
+        # 未指定则自动挑一场：从当前探测池里取第一场有赔率的
+        from datetime import datetime, timedelta, timezone as _tz
+        try:
+            today = datetime.now(_tz.utc).date()
+            for off in (0, 1, 2, 3):
+                day = (today + timedelta(days=off)).isoformat()
+                fx = await api.get_fixtures_by_date(day)
+                for f in fx or []:
+                    pid = (f.get("fixture") or {}).get("id")
+                    if not pid:
+                        continue
+                    rows_odds = await api.get_odds(int(pid))
+                    if rows_odds:
+                        probe, fid = rows_odds, str(pid)
+                        break
+                if probe:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            await update.message.reply_text(normalize(section("💱 盘口探测", [
+                f"❌ 自动选场失败：{esc(describe_error(exc))}",
+            ])), parse_mode="HTML")
+            return
+
+    if not probe:
+        await update.message.reply_text(normalize(section("💱 盘口探测", [
+            "⚠️ 未取到任何赔率。可能该套餐不含 /odds，或近期均无开盘比赛。",
+            "用法：/oddsprobe <fixture_id>（先跑 /diag 看探测对象）",
+        ])), parse_mode="HTML")
+        return
+
+    # 汇总：同一 bet id 在不同博彩公司下重复出现，按 (id, name) 去重
+    seen: dict[tuple, dict] = {}
+    books: set[str] = set()
+    for item in probe:
+        for book in item.get("bookmakers") or []:
+            books.add(str(book.get("name") or "?"))
+            for bet in book.get("bets") or []:
+                key = (str(bet.get("id")), str(bet.get("name") or "").strip())
+                if key in seen:
+                    continue
+                vals = []
+                for v in (bet.get("values") or [])[:6]:
+                    vals.append(f"{v.get('value')}={v.get('odd')}")
+                seen[key] = {"vals": vals, "n": len(bet.get("values") or [])}
+
+    lines = [f"探测对象　fixture <code>{esc(str(fid))}</code>",
+             f"博彩公司　{len(books)} 家", ""]
+    for (bid, bname), info in sorted(seen.items(), key=lambda kv: kv[0][0]):
+        head = f"id={bid} · {bname}" if bname else f"id={bid}"
+        lines.append(f"<b>{esc(head)}</b>　（{info['n']} 项）")
+        lines.append("　" + esc(" / ".join(info["vals"]) or "无选项"))
+
+    lines.append("")
+    lines.append("<i>把上面这段原样发给我即可据此实现亚盘解析——"
+                 "不需要你判断哪个是亚盘。</i>")
+
+    await update.message.reply_text(normalize(section("💱 盘口探测", lines)),
+                                    parse_mode="HTML")
+
+
 async def _typing(update) -> None:
     """统一先发「正在输入」。发送失败不影响主流程——这只是体验优化。"""
     try:
@@ -1365,6 +1467,8 @@ def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("test", test_cmd, admin_only=True, description="立即推送一次预测")
     dispatcher.register("status", status_cmd, admin_only=True, description="运行状态诊断")
     dispatcher.register("diag", diag_cmd, admin_only=True, description="直连主源探活，显示真实失败原因")
+    dispatcher.register("oddsprobe", oddsprobe_cmd, admin_only=True,
+                        description="导出真实盘口结构（含亚盘 id/选项），供解析实现核对")
     dispatcher.register("modelselect", modelselect_cmd, admin_only=True,
                         description="候选模型对比（配对 bootstrap + 95% CI）")
     dispatcher.register("settlebackfill", settlebackfill_cmd, admin_only=True,

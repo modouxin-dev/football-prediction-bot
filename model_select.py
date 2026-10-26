@@ -19,17 +19,27 @@
    泄漏给过去的模型，而足球数据存在跨队、同赛季相关。
 2. **配对 bootstrap** 给 95% 区间，不只看单点差值。以**整场比赛**为单位
    重采样，保持同场配对。
-3. **主指标 Brier，次指标 RPS，诊断 Log Loss / ECE**。
+3. **主指标 Log Loss，次指标 Brier 与 RPS，诊断 ECE**。
    Constantinou & Fenton (2012)：单一得分规则不足以评估足球概率预测。
+   为什么主指标定为 Log Loss：后续研究发现 RPS 的「距离奖励」理由并不
+   充分，且**在区分完美预测者时，ignorance（负对数损失）通常优于 Brier，
+   Brier 又往往优于 RPS**，尤其当模型差异较小、样本较大时。
+   本框架要判的正是「小幅调参（Elo 系数、市场权重）有没有增益」，
+   属小差异场景，故以 Log Loss 为选择依据，Brier / RPS 作稳健性交叉验证。
+   **三者结论冲突时不得临时更换主指标。**
 4. 判定阈值**预先注册**，不允许看到结果后放宽。
 
-判定规则（三条同时满足才算胜出）
+判定规则（四条同时满足才算胜出）
 --------------------------------
-① 主指标 Brier 改善（更低）
-② 次指标 RPS 不退化
-③ 配对 bootstrap 95% CI 不跨 0
+① 主指标 Log Loss 改善（更低）
+② 次指标 Brier 不退化
+③ 次指标 RPS 不退化
+④ 配对 bootstrap 95% CI 不跨 0（且方向为改善）
 
-否则一律返回 ``inconclusive``——宁可维持现状，也不把噪声写进生产参数。
+次指标从一项扩到两项：只盯一个次指标时，主指标的改善可能只是把误差
+挪到了另一个维度上。
+
+否则一律返回 ``keep_baseline``——宁可维持现状，也不把噪声写进生产参数。
 
 样本量声明
 ----------
@@ -217,7 +227,22 @@ def paired_bootstrap(base: Sequence[dict[str, float]],
 
 
 def _mean(scores: Sequence[dict[str, float]], metric: str) -> float | None:
-    vals = [s[metric] for s in scores]
+    """均值；出现 None 或缺失时返回 None。
+
+    ⚠️ 不能让 None 混进求和：`sum` 会抛 TypeError，而调用方 judge() 的
+    「任一指标缺失就跳过」防御写在 `_mean` **之后**——防御永远不会生效，
+    异常在到达它之前就炸了。逐场得分里出现 None 的成因很多
+    （概率缺失、结果缺失），必须在这里就拦住。
+    """
+    vals: list[float] = []
+    for s in scores:
+        v = s.get(metric)
+        if v is None:
+            return None
+        try:
+            vals.append(float(v))
+        except (TypeError, ValueError):
+            return None
     return sum(vals) / len(vals) if vals else None
 
 
@@ -241,6 +266,43 @@ class ExperimentResult:
             "reason": self.reason,
             "table": self.table,
         }
+
+
+def judge(base_scores: Sequence[dict[str, float]],
+          chal_scores: Sequence[dict[str, float]],
+          boot: dict[str, Any]) -> dict[str, bool] | None:
+    """按预先注册的四条规则判定候选是否胜出。
+
+    抽成纯函数是为了**可测**：判定规则是整套方法学的闸门，
+    若只能靠跑完整回测才能验证，就等于没有验证——回测语料本地拿不到。
+
+    主指标 **Log Loss** 的文献依据：区分完美预测者时，
+    ignorance（负对数损失）通常优于 Brier，Brier 又往往优于 RPS，
+    尤其在模型差异较小时。本框架判的正是小幅调参有无增益，属小差异场景。
+
+    次指标取 **Brier 与 RPS 两项**而非一项：只盯一个次指标时，
+    主指标的改善可能只是把误差挪到了另一个维度上。
+
+    Returns:
+        四项规则的真假；任一指标缺失（None）时返回 None，
+        由调用方跳过该候选——缺失不能当成 0，那会伪造改善。
+    """
+    b_ll = _mean(base_scores, "log_loss")
+    b_brier = _mean(base_scores, "brier")
+    b_rps = _mean(base_scores, "rps")
+    c_ll = _mean(chal_scores, "log_loss")
+    c_brier = _mean(chal_scores, "brier")
+    c_rps = _mean(chal_scores, "rps")
+    if None in (b_ll, b_brier, b_rps, c_ll, c_brier, c_rps):
+        return None
+    return {
+        "log_loss_improves": bool(c_ll < b_ll),
+        "brier_not_worse": bool(c_brier <= b_brier + 1e-9),
+        "rps_not_worse": bool(c_rps <= b_rps + 1e-9),
+        # 方向必须是「改善」：显著但变差同样是显著，不能算胜出
+        "ci_significant": bool(boot.get("significant"))
+                          and boot.get("mean_diff", 0) < 0,
+    }
 
 
 def run_experiment(matches: list[dict[str, Any]],
@@ -312,36 +374,31 @@ def run_experiment(matches: list[dict[str, Any]],
         chal = scores_by_key[cand.key]
         if len(chal) != len(base_scores):
             continue
-        boot = paired_bootstrap(base_scores, chal, metric="brier", n=n_boot)
+        boot = paired_bootstrap(base_scores, chal, metric="log_loss", n=n_boot)
         row = next((t for t in table if t["key"] == cand.key), None)
         if row is None:
             continue
         row["vs_baseline"] = boot
-        b_brier = _mean(base_scores, "brier")
-        b_rps = _mean(base_scores, "rps")
-        c_brier, c_rps = row["brier"], row["rps"]
-        if None in (b_brier, b_rps, c_brier, c_rps):
+        verdict = judge(base_scores, chal, boot)
+        if verdict is None:
             continue
-        # 三条判定规则
-        improves = c_brier < b_brier
-        rps_ok = c_rps <= b_rps + 1e-9
-        significant = bool(boot.get("significant")) and boot.get("mean_diff", 0) < 0
-        row["rules"] = {
-            "brier_improves": improves,
-            "rps_not_worse": rps_ok,
-            "ci_significant": significant,
-        }
-        if improves and rps_ok and significant:
-            if best_row is None or c_brier < best_row["brier"]:
+        row["rules"] = verdict
+        improves = verdict["log_loss_improves"]
+        brier_ok = verdict["brier_not_worse"]
+        rps_ok = verdict["rps_not_worse"]
+        significant = verdict["ci_significant"]
+        c_ll = row["log_loss"]
+        if improves and brier_ok and rps_ok and significant:
+            if best_row is None or c_ll < best_row["log_loss"]:
                 best_key, best_row = cand.key, row
 
     if best_row is not None:
         return ExperimentResult(
             verdict="adopt", baseline_key=baseline_key, winner_key=best_key,
             n_matches=len(base_scores), table=table,
-            reason=("Brier 改善、RPS 未退化且配对 bootstrap 95% CI 不跨 0，"
-                    "三条判定规则同时满足。"))
+            reason=("Log Loss 改善、Brier 与 RPS 均未退化且配对 bootstrap "
+                    "95% CI 不跨 0，四条判定规则同时满足。"))
     return ExperimentResult(
         verdict="keep_baseline", baseline_key=baseline_key,
         winner_key=baseline_key, n_matches=len(base_scores), table=table,
-        reason="无候选同时满足三条判定规则，维持当前线上配置。")
+        reason="无候选同时满足四条判定规则，维持当前线上配置。")
