@@ -44,6 +44,16 @@ TTL_FIXTURES = 30 * 60
 
 MAX_RETRIES = 2  # 429 最多重试 2 次，指数退避
 
+# 全局 429 冷却（秒）。
+# 只有"每个请求各自退避重试"是不够的：免费层限制是 10 次/分钟，而一次
+# 赛程同步要对 10 个联赛各发一次请求。第 1 个联赛碰壁退避重试时，后面 9 个
+# 会排着队重复同样的退避 —— 实测日志里连续刷出几十条
+# 「备用源 429 限流（第 N 次）」，整轮同步在纯等待中空转上百秒。
+# 更糟的是它发生在**机器人启动之后**，占用的是本该用来响应命令的时间窗。
+# 所以退避不能只记在单次请求里，要记在源上：一旦确认限流，整源冷却，
+# 后续请求直接快速失败，不再各睡各的。
+RATE_LIMIT_COOLDOWN = 60.0
+
 # API-Football 联赛 ID → football-data.org 的 competition code
 # 免费层仅覆盖其中 12 个竞赛（英超/西甲/德甲/意甲/法甲/欧冠/荷甲/葡超/英冠/巴甲/世界杯/欧洲杯）
 LEAGUE_ID_TO_CODE: dict[int, str] = {
@@ -155,6 +165,12 @@ class FootballDataAPI:
     async def _request(self, path: str, params: dict[str, Any]) -> Any:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout)
+        # 整源冷却期内直接快速失败：此时再发请求必然还是 429，
+        # 而每个请求各自退避会让一轮同步空转上百秒。
+        remaining = getattr(self, "_rate_limited_until", 0.0) - time.monotonic()
+        if remaining > 0:
+            raise FootballDataError(
+                f"HTTP 429 请求过于频繁（免费层 10 次/分钟，冷却中 {remaining:.0f}s）")
         url = f"{self._base_url}/{path.lstrip('/')}"
         last_error = "未知错误"
 
@@ -168,7 +184,9 @@ class FootballDataAPI:
                 if resp.status_code == 429:
                     # 免费层 10 次/分钟：429 不无限重试，退避后最多再试 2 次
                     last_error = "HTTP 429 请求过于频繁（免费层 10 次/分钟）"
-                    log.warning("备用源 429 限流（第 %d 次）", attempt + 1)
+                    self._rate_limited_until = time.monotonic() + RATE_LIMIT_COOLDOWN
+                    log.warning("备用源 429 限流（第 %d 次），整源冷却 %.0fs",
+                                attempt + 1, RATE_LIMIT_COOLDOWN)
                     if attempt < MAX_RETRIES:
                         await asyncio.sleep(2**attempt)
                         continue
