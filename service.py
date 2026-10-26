@@ -1984,6 +1984,75 @@ class PredictionService:
             self.refresh_calibration()
         return done
 
+    async def backfill_stale_settlements(self, *, max_days: int = 40) -> dict[str, Any]:
+        """把「超期未结算」的历史遗留补上赛果，让它们重新进入统计。
+
+        为什么需要：pending() 加了时间下界后，超期行不再堵死结算队列
+        （这是好事），但它们**永远不会被结算**（这是代价）——
+        看板上「超期未结算 463 场」就是这批。它们既不进命中率，
+        也永远不会消失。
+
+        按天补而不是按场补：数据源一次请求返回当天全部比赛，
+        故成本是「天数」而非「场次数」。463 场若分布在 40 天里 = 40 次请求。
+
+        Args:
+            max_days: 本次最多补多少天（额度保护）。剩余的天下次再补。
+
+        Returns:
+            {scanned_days, settled, remaining_before, remaining_after,
+             days_done, failed_days}。
+            额度耗尽或取数失败都会如实反映在 failed_days 里，不上报为成功。
+        """
+        days = self.repo.stale_pending_days(limit=int(max_days))
+        if not days:
+            return {"scanned_days": 0, "settled": 0,
+                    "remaining_before": self.repo.count_stale_pending(),
+                    "remaining_after": self.repo.count_stale_pending(),
+                    "days_done": 0, "failed_days": []}
+
+        before = self.repo.count_stale_pending()
+        settled = 0
+        failed: list[str] = []
+        for d in days:
+            try:
+                fixtures = await self._fetch_all_by_date(d)
+            except Exception as exc:
+                log.warning("结算回填：%s 取数失败：%s", d, exc)
+                failed.append(d)
+                continue
+            by_id = {str((fx.get("fixture") or {}).get("id")): fx
+                     for fx in fixtures or []}
+            if not by_id:
+                # 该日无数据（可能是无效日期或数据源无该日记录）。
+                # 不标记为失败——它不是错误，只是没取到东西。
+                continue
+            for fx in by_id.values():
+                short = ((fx.get("fixture") or {}).get("status") or {}).get("short")
+                if short not in _FINISHED:
+                    continue
+                goals = fx.get("goals") or {}
+                home, away = goals.get("home"), goals.get("away")
+                if home is None or away is None:
+                    continue
+                fid = str((fx.get("fixture") or {}).get("id"))
+                if self.repo.settle(fid, int(home), int(away)):
+                    settled += 1
+                    self._sync_elo(fx, int(home), int(away))
+
+        after = self.repo.count_stale_pending()
+        result = {
+            "scanned_days": len(days),
+            "settled": settled,
+            "remaining_before": before,
+            "remaining_after": after,
+            "days_done": len(days) - len(failed),
+            "failed_days": failed,
+        }
+        if settled:
+            log.info("结算回填：补回 %d 场（%d→%d）", settled, before, after)
+            self.refresh_calibration()
+        return result
+
     def _sync_elo(self, fixture: dict[str, Any], home_score: int, away_score: int) -> None:
         """把一场已结束比赛计入 Elo。任何异常都不影响结算主流程。"""
         if not getattr(self, "elo_enabled", False):
