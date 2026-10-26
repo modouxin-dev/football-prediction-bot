@@ -177,6 +177,12 @@ class _FakeRepo:
     def stale_pending_sample_ids(self, limit: int = 6) -> list[str]:
         return sorted(self._known)[:limit]
 
+    def stale_pending_leagues(self, limit: int = 8):
+        return [("L", self._stale)]
+
+    def stale_pending_date_range(self):
+        return (self._days[0], self._days[-1]) if self._days else ("", "")
+
     def settle(self, fixture_id, home, away) -> bool:
         if str(fixture_id) not in self._known:
             return False
@@ -212,7 +218,7 @@ async def test_backfill_settles_finished_matches_only():
     async def _fetch(d):
         return finished
 
-    svc._fetch_all_by_date = _fetch
+    svc._fetch_all_by_date_raw = _fetch
     svc.elo_enabled = False
     svc.refresh_calibration = lambda: None
     res = await svc.backfill_stale_settlements()
@@ -233,7 +239,7 @@ async def test_backfill_reports_failed_days_not_as_success():
             raise RuntimeError("额度耗尽")
         return []
 
-    svc._fetch_all_by_date = _fetch
+    svc._fetch_all_by_date_raw = _fetch
     svc.elo_enabled = False
     svc.refresh_calibration = lambda: None
     res = await svc.backfill_stale_settlements()
@@ -253,7 +259,7 @@ async def test_backfill_decreases_remaining(tmp_path):
         return [{"fixture": {"id": "1", "status": {"short": "FT"}},
                  "goals": {"home": 1, "away": 0}}]
 
-    svc._fetch_all_by_date = _fetch
+    svc._fetch_all_by_date_raw = _fetch
     svc.elo_enabled = False
     svc.refresh_calibration = lambda: None
     res = await svc.backfill_stale_settlements()
@@ -276,7 +282,7 @@ async def test_backfill_reports_diagnostics_when_zero_settled():
         return [{"fixture": {"id": "999999", "status": {"short": "FT"}},
                  "goals": {"home": 1, "away": 0}}]
 
-    svc._fetch_all_by_date = _fetch
+    svc._fetch_all_by_date_raw = _fetch
     res = await svc.backfill_stale_settlements()
     assert res["settled"] == 0
     # 三个诊断字段必须都在，用于区分「没取到」与「ID 对不上」
@@ -300,9 +306,123 @@ async def test_backfill_via_prefixed_id():
         return [{"fixture": {"id": "555051", "status": {"short": "FT"}},
                  "goals": {"home": 2, "away": 1}}]
 
-    svc._fetch_all_by_date = _fetch
+    svc._fetch_all_by_date_raw = _fetch
     res = await svc.backfill_stale_settlements()
     # 数据源给裸 ID，库里存 fd- 前缀 —— 靠候选回退命中
     assert res["settled"] == 1
     assert res["finished_fixtures"] == 1
     assert svc.repo.settled == [("fd-555051", 2, 1)]
+
+
+# ---- 本次修复的回归守卫 -----------------------------------------------------
+# 线上表现：扫描 17 天 / 成功取数 17 天 / 取到比赛 0 场 / 补回 0 场，全程无报错。
+
+
+def test_str_date_has_no_isoformat():
+    """根因留档：ISO 字符串没有 isoformat()——整条故障链的起点。
+
+    stale_pending_days() 返回 str，取数接口内部调 day.isoformat()，
+    str 没有该方法 → AttributeError → 被内层 except 吞掉返回 [] →
+    外层误判「取数成功」。四层传导后才变成「补回 0 场且不报错」。
+    """
+    assert not hasattr("2026-08-01", "isoformat")
+    import datetime as _dt
+
+    assert _dt.date(2026, 8, 1).isoformat() == "2026-08-01"
+
+
+@pytest.mark.asyncio
+async def test_backfill_passes_date_object_not_string():
+    """回填必须把日期转成 date 对象再传给取数接口。
+
+    _FakeRepo 给出的就是 **字符串** 日期（与真实 repository 一致）。
+    若直接透传，取数接口会抛 AttributeError 并被静默吞掉——
+    那条路径在别的测试里看不出问题，因为异常不冒头。
+    """
+    import datetime as _dt
+    from service import PredictionService
+
+    seen: list = []
+
+    class Api:
+        async def get_fixtures_by_date(self, day):
+            seen.append(day)
+            return [{"fixture": {"id": "1", "status": {"short": "FT"}},
+                     "goals": {"home": 2, "away": 1}}]
+
+    svc = object.__new__(PredictionService)
+    svc.repo = _FakeRepo(["2026-08-01"])      # 字符串日期，与线上一致
+    svc.api = Api()
+    svc.elo_enabled = False
+    svc.refresh_calibration = lambda: None
+    res = await svc.backfill_stale_settlements()
+
+    assert res["settled"] == 1, "字符串日期应被正确转换，不能补回 0 场"
+    assert seen and isinstance(seen[0], _dt.date), (
+        f"传给取数接口的是 {type(seen[0]).__name__}，必须是 date")
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_filter_by_configured_leagues():
+    """回填不得按当前配置的联赛过滤——僵尸行可能属于历史配置过的联赛。
+
+    走 _fetch_all_by_date 会只保留 LEAGUE_IDS 里的联赛，历史遗留
+    （配置变更前的联赛）就永远取不到。回填的过滤条件应该是 fixture_id。
+    """
+    import datetime as _dt
+    from service import PredictionService
+
+    class Api:
+        async def get_fixtures_by_date(self, day):
+            # 属于「当前未配置」的联赛（比如历史配置过后来去掉的）
+            return [{"fixture": {"id": "9", "status": {"short": "FT"}},
+                     "goals": {"home": 0, "away": 0},
+                     "league": {"id": 99999}}]
+
+    svc = object.__new__(PredictionService)
+    svc.repo = _FakeRepo(["2026-08-01"], known={"9"})   # 库里确实有这一场
+    svc.api = Api()
+    svc.elo_enabled = False
+    svc.refresh_calibration = lambda: None
+    res = await svc.backfill_stale_settlements()
+
+    assert res["settled"] == 1, "未配置联赛的僵尸行也必须能补回来"
+    assert res["fetched_fixtures"] == 1
+
+
+# ---- 诊断方法 ---------------------------------------------------------------
+
+
+def test_stale_leagues_groups_by_league(tmp_path):
+    """补回 0 场时，联赛分布能立刻说明「这批行属于哪些联赛」。"""
+    repo = _mk(tmp_path, [("f1", _days_ago(30)), ("f2", _days_ago(30)),
+                          ("f3", _days_ago(20))])
+    got = dict(repo.stale_pending_leagues())
+    assert got == {"L": 3}
+
+
+def test_stale_leagues_marks_missing_league(tmp_path):
+    """联赛字段为空时显示为 (未记录)，不能显示成空白让人误解。"""
+    repo = PredictionRepository(str(tmp_path / "t.db"))
+    conn = repo._connect()
+    conn.execute(
+        "INSERT INTO predictions (fixture_id, home, away, kickoff, "
+        "home_prob, draw_prob, away_prob, best_score, result, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("f1", "A", "B", _days_ago(30), 0.5, 0.3, 0.2, "1-0", "home",
+         _days_ago(30)))
+    conn.commit()
+    got = dict(repo.stale_pending_leagues())
+    assert got == {"(未记录)": 1}
+
+
+def test_stale_date_range_reports_oldest_and_newest(tmp_path):
+    repo = _mk(tmp_path, [("f1", _days_ago(30)), ("f2", _days_ago(10))])
+    lo, hi = repo.stale_pending_date_range()
+    assert lo == _days_ago(30)[:10]
+    assert hi == _days_ago(10)[:10]
+
+
+def test_stale_date_range_empty_when_nothing(tmp_path):
+    repo = _mk(tmp_path, [])
+    assert repo.stale_pending_date_range() == ("", "")
