@@ -175,3 +175,97 @@ def test_longest_chinese_name_within_mobile_width():
 
     for raw, cn in TEAMMISS_BATCH:
         assert width(cn) <= MOBILE_MAX_COLS, f"{cn} 过长（{width(cn)}）"
+
+
+# /teammiss 第二批实测（2026-10-26 二次抓取）：英冠/英甲短名 + 国家队
+TEAMMISS_BATCH_2 = [
+    ("Blackpool", "布莱克浦"),
+    ("Blackburn", "布莱克本"),
+    ("Birmingham", "伯明翰"),
+    ("Wolves", "狼队"),
+    ("Bolton", "博尔顿"),
+    ("West Brom", "西布罗姆维奇"),
+    ("Stoke City", "斯托克城"),
+    ("Ipswich Town FC", "伊普斯维奇"),
+    ("Swansea", "斯旺西"),
+    ("Argentina", "阿根廷"),
+    ("Spain", "西班牙"),
+]
+
+
+@pytest.mark.parametrize("raw,expected", TEAMMISS_BATCH_2)
+def test_teammiss_batch_2_all_translated(raw, expected):
+    """/teammiss 第二批实测队名，逐条断言。"""
+    assert team_short_name(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    "Blackpool FC", "Blackburn Rovers", "Birmingham City",
+    "Bolton Wanderers", "West Bromwich Albion", "Stoke City FC",
+    "Ipswich Town", "Swansea City", "Wolverhampton",
+])
+def test_english_championship_full_names(raw):
+    """英冠完整名也要能翻——数据源短名与全名都会下发。"""
+    assert team_short_name(raw) != raw
+
+
+# ── 国家队 ─────────────────────────────────────────────
+# 为什么必须收：配置联赛在国际比赛日休战时，service 会回退到国家队赛事兜底，
+# 否则用户点开是空白页。不收国家队 = 国际比赛日整页英文。
+NATIONS = [
+    ("Argentina", "阿根廷"), ("Brazil", "巴西"), ("England", "英格兰"),
+    ("France", "法国"), ("Germany", "德国"), ("Spain", "西班牙"),
+    ("Italy", "意大利"), ("Netherlands", "荷兰"), ("Portugal", "葡萄牙"),
+    ("Japan", "日本"), ("USA", "美国"), ("United States", "美国"),
+    ("Korea Republic", "韩国"), ("South Korea", "韩国"),
+    ("Turkey", "土耳其"), ("Türkiye", "土耳其"),
+    ("Mexico", "墨西哥"), ("Colombia", "哥伦比亚"), ("Uruguay", "乌拉圭"),
+]
+
+
+@pytest.mark.parametrize("raw,expected", NATIONS)
+def test_national_teams_translated(raw, expected):
+    assert team_short_name(raw) == expected
+
+
+def test_national_teams_are_needed_because_of_international_fallback():
+    """国家队不是可选项——系统在国际比赛日会回退国家队赛事。
+
+    service.py 里明确写了：配置联赛当天一场都没有时，回退到国家队/洲际赛事，
+    避免空白页。所以国家队名字一定会进看板，字典不收就是整页英文。
+    """
+    import inspect
+
+    import service
+
+    src = inspect.getsource(service)
+    assert "国家队" in src, "国际比赛日兜底逻辑消失后，本条前提不再成立"
+
+
+# ── 前缀第 4 道闸门（本批真实事故）────────────────────────
+def test_united_never_guessed_as_usa():
+    """补了 "United States" 之后，"United" 一度被猜成「美国」。
+
+    "united" 的唯一前缀贡献者是 "United States"，前三道闸门全过，于是
+    team_short_name("United") 返回 美国——而 united 同时是 Manchester
+    United / Leeds United / West Ham United 的尾部成分，天生不是标识符。
+    故加第 4 道闸门：前缀若在别的队名里作非首位出现，一律不进索引。
+    """
+    from formatkit import _TEAM_PREFIX
+
+    assert "united" not in _TEAM_PREFIX
+    assert team_short_name("United") == "United"
+    # 但完整写法仍须命中
+    assert team_short_name("United States") == "美国"
+    assert team_short_name("USA") == "美国"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("Tottenham", "托特纳姆热刺"),
+    ("Newcastle", "纽卡斯尔联"),
+    ("Leeds", "利兹联"),
+    ("Brighton", "布莱顿"),
+])
+def test_useful_prefixes_survive_gate_4(raw, expected):
+    """第 4 道闸门不能误伤正常前缀——这是「修一个坏一个」的防线。"""
+    assert team_short_name(raw) == expected

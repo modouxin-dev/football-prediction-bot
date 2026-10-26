@@ -665,6 +665,56 @@ TEAM_NAMES: dict[str, str] = {
     "Deportivo Pasto": "帕斯托", "Deportivo Pasto SA": "帕斯托",
     "Deportes Tolima": "托利马体育",
 
+    # ── 英冠 / 英甲（数据源常下发去词缀短名，短名与全名归一键不同，必须都收）──
+    # 中文名取自百度百科英冠条目与纳米数据赛果，非音译臆造。
+    "Blackpool FC": "布莱克浦", "Blackpool": "布莱克浦",
+    "Blackburn Rovers": "布莱克本", "Blackburn": "布莱克本",
+    "Birmingham City": "伯明翰", "Birmingham": "伯明翰",
+    "Wolves": "狼队", "Wolverhampton": "狼队",
+    "Bolton Wanderers": "博尔顿", "Bolton": "博尔顿",
+    "West Bromwich Albion": "西布罗姆维奇", "West Brom": "西布罗姆维奇",
+    "Stoke City FC": "斯托克城", "Stoke City": "斯托克城",
+    "Ipswich Town FC": "伊普斯维奇", "Ipswich Town": "伊普斯维奇",
+    "Swansea City": "斯旺西", "Swansea": "斯旺西",
+    # ── 国家队 ──────────────────────────────────────────
+    # 为什么必须收：配置联赛在国际比赛日整体休战时，service 会**回退到国家队
+    # 赛事**兜底（否则用户点开是空白页）。所以国家队名字一定会进看板，
+    # 不收就是整页英文。中文名取自纳米数据「世界杯 2026 赛季参赛队列表」。
+    #
+    # 数据源对国家队的写法不统一（"USA"/"United States"、"Korea Republic"/
+    # "South Korea"、"Turkey"/"Türkiye"），故同义写法都要收。
+    "Argentina": "阿根廷", "Portugal": "葡萄牙", "Croatia": "克罗地亚",
+    "Algeria": "阿尔及利亚", "Korea Republic": "韩国", "South Korea": "韩国",
+    "Uruguay": "乌拉圭", "Qatar": "卡塔尔", "Morocco": "摩洛哥",
+    "Curacao": "库拉索", "Curaçao": "库拉索", "Tunisia": "突尼斯",
+    "Belgium": "比利时", "Scotland": "苏格兰", "Mexico": "墨西哥",
+    "USA": "美国", "United States": "美国",
+    "Netherlands": "荷兰", "Holland": "荷兰",
+    "Japan": "日本", "New Zealand": "新西兰", "Spain": "西班牙",
+    "Cape Verde": "佛得角", "Ghana": "加纳", "Ecuador": "厄瓜多尔",
+    "Iran": "伊朗", "Brazil": "巴西", "Haiti": "海地",
+    "Ivory Coast": "科特迪瓦", "Cote d'Ivoire": "科特迪瓦",
+    "Austria": "奥地利", "Jordan": "约旦", "Senegal": "塞内加尔",
+    "Canada": "加拿大", "Germany": "德国", "Norway": "挪威",
+    "Congo DR": "刚果民主共和国", "DR Congo": "刚果民主共和国",
+    "Czechia": "捷克", "Czech Republic": "捷克",
+    "Australia": "澳大利亚", "Saudi Arabia": "沙特阿拉伯",
+    "Colombia": "哥伦比亚", "England": "英格兰",
+    "Bosnia-Herzegovina": "波黑", "Bosnia": "波黑",
+    "Switzerland": "瑞士", "Egypt": "埃及", "France": "法国",
+    "Iraq": "伊拉克", "Uzbekistan": "乌兹别克斯坦", "Panama": "巴拿马",
+    "Sweden": "瑞典", "Paraguay": "巴拉圭", "South Africa": "南非",
+    "Turkey": "土耳其", "Türkiye": "土耳其",
+    # 常见非世界杯参赛队（欧洲杯/欧国联/世预赛同样会出现）
+    "Italy": "意大利", "Poland": "波兰", "Ukraine": "乌克兰",
+    "Denmark": "丹麦", "Serbia": "塞尔维亚", "Greece": "希腊",
+    "Romania": "罗马尼亚", "Hungary": "匈牙利", "Slovakia": "斯洛伐克",
+    "Slovenia": "斯洛文尼亚", "Bulgaria": "保加利亚", "Finland": "芬兰",
+    "Iceland": "冰岛", "Wales": "威尔士", "Russia": "俄罗斯",
+    "Northern Ireland": "北爱尔兰", "Republic of Ireland": "爱尔兰",
+    "China": "中国", "China PR": "中国", "Nigeria": "尼日利亚",
+    "Cameroon": "喀麦隆", "Peru": "秘鲁", "Chile": "智利",
+
 }
 
 

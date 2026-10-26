@@ -57,13 +57,18 @@ def test_score_has_space_on_both_sides():
 
 
 def test_unknown_team_keeps_original_name():
-    """未收录的队显示英文原名，绝不编造中文名。"""
-    items = [_fx(1, "Ipswich Town FC", "Arsenal FC", "2026-10-03T18:30:00+00:00")]
+    """未收录的队显示英文原名，绝不编造中文名。
+
+    注意：这里不能用真实存在的队名当「未收录」样本。Ipswich 以前确实是
+    未收录队，被补进 TEAM_NAMES 后这条断言就失效了——不是行为变了，是样本
+    不再满足前提。故改用虚构队名，前提永久成立。
+    """
+    items = [_fx(1, "Nowhere Rovers", "Arsenal FC", "2026-10-03T18:30:00+00:00")]
     text, _, _, _ = BotUI.format_fixtures_page(items, SETTINGS.timezone, 0, 5, "d")
     plain = _plain(text)
     # 未收录：保留英文原名（超长的会被截到队名列宽，但绝不编造中文名）
-    assert "Ipswich" in plain
-    assert "伊普斯" not in plain
+    assert "Nowhere" in plain
+    assert "诺威尔" not in plain        # 不许凭空音译出中文
     assert "阿森纳" in plain            # 已收录：中文名
 
 
