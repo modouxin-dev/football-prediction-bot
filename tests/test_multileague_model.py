@@ -86,7 +86,10 @@ class RecordingAPI:
         return list(self._st.get(lid, standings_of(lid, 1, 2, 3, 4)))
 
     async def get_odds(self, fixture_id, fresh=False):
-        return []
+        # 带全场亚盘：否则所有场次会被「无盘不推荐」过滤掉，
+        # 而本文件测的是「每个联赛用各自积分榜建模」，与亚盘策略无关。
+        from tests.sample_data import odds_response
+        return odds_response([("Book A", 2.1, 3.4, 3.6)])
 
     async def get_team_form(self, team_id, season, limit):
         return []
