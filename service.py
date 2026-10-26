@@ -2053,7 +2053,8 @@ class PredictionService:
                     "days_done": 0, "failed_days": [],
                     "fetched_fixtures": 0, "finished_fixtures": 0,
                     "unmatched_sample": [], "matched_by_name": 0,
-                    "id_kinds": self.repo.stale_pending_id_kinds()}
+                    "id_kinds": self.repo.stale_pending_id_kinds(),
+                    "unmatched_detail": []}
 
         before = self.repo.count_stale_pending()
         settled = 0
@@ -2062,6 +2063,7 @@ class PredictionService:
         fetched = 0
         finished = 0
         unmatched: list[str] = []
+        undetails: list[tuple[str, str, str, str, str]] = []
         for d in days:
             try:
                 # ⚠️ 必须转成 date 再传：stale_pending_days() 返回的是
@@ -2116,6 +2118,7 @@ class PredictionService:
                 by_name = self._settle_by_team_names(d, finished_today)
                 settled += by_name
                 matched_by_name += by_name
+                undetails.extend(getattr(self, "_last_unmatched_detail", []) or [])
 
         after = self.repo.count_stale_pending()
         result = {
@@ -2133,6 +2136,9 @@ class PredictionService:
             "date_range": self.repo.stale_pending_date_range(),
             "matched_by_name": matched_by_name,
             "id_kinds": self.repo.stale_pending_id_kinds(),
+            # 剩余场次的**逐条明细**：看不到这些就只能笼统说「ID 对不上」，
+            # 而实际原因可能是队名写法差异（可修）或比赛已被移除（不可修）。
+            "unmatched_detail": undetails[:8],
         }
         if settled:
             log.info("结算回填：补回 %d 场（%d→%d）", settled, before, after)
@@ -2181,6 +2187,7 @@ class PredictionService:
             index.setdefault((hk, ak), []).append(fx)
 
         done = 0
+        undetail: list[tuple[str, str, str, str, str]] = []
         for fid, home_name, away_name in rows:
             hk = _team_key(home_name or "")
             ak = _team_key(away_name or "")
@@ -2188,6 +2195,10 @@ class PredictionService:
                 continue
             cands = index.get((hk, ak)) or []
             if len(cands) != 1:      # 0 个=没匹配；≥2 个=有歧义，一律放弃
+                if len(undetail) < 8:
+                    undetail.append((
+                        day, str(fid), home_name, away_name,
+                        "无同名比赛" if not cands else f"有 {len(cands)} 场同名"))
                 continue
             fx = cands[0]
             goals = fx.get("goals") or {}
@@ -2197,6 +2208,7 @@ class PredictionService:
             if self.repo.settle(str(fid), int(home), int(away)):
                 self._sync_elo(fx, int(home), int(away))
                 done += 1
+        self._last_unmatched_detail = undetail
         return done
 
     def _settle_any_id(self, fid: str, home: int, away: int,

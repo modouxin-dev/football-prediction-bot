@@ -590,3 +590,68 @@ def test_rows_for_day_returns_team_names(tmp_path):
     repo = _mk(tmp_path, [("fd-560593", _days_ago(30))])
     rows = repo.stale_pending_rows_for_day(_days_ago(30)[:10])
     assert rows == [("fd-560593", "A", "B")]
+
+
+# ---- 未补回明细 -------------------------------------------------------------
+# 「ID 对不上」是结论不是原因。必须看到具体哪场、为什么没配上，
+# 才能区分「队名写法差异（可修）」与「比赛已被移除（不可修）」。
+
+
+def test_unmatched_detail_records_reason():
+    from service import PredictionService
+
+    svc = object.__new__(PredictionService)
+    repo = _FakeRepo(["2026-08-01"], known={"fd-1"})
+    repo.rows_for_day = {"2026-08-01": [("fd-1", "Bayern München", "Benfica")]}
+    svc.repo = repo
+    svc.elo_enabled = False
+    svc._sync_elo = lambda *a, **k: None
+
+    finished = [_mk_fx("1570410", "Arsenal", "Chelsea", 2, 1)]
+    assert svc._settle_by_team_names("2026-08-01", finished) == 0
+
+    detail = svc._last_unmatched_detail
+    assert len(detail) == 1
+    day, fid, h, a, why = detail[0]
+    assert fid == "fd-1"
+    assert h == "Bayern München"
+    assert why == "无同名比赛"          # 不是笼统的「ID 对不上」
+
+
+def test_unmatched_detail_marks_ambiguous():
+    from service import PredictionService
+
+    svc = object.__new__(PredictionService)
+    repo = _FakeRepo(["2026-08-01"], known={"fd-1"})
+    repo.rows_for_day = {"2026-08-01": [("fd-1", "Arsenal FC", "Chelsea FC")]}
+    svc.repo = repo
+    svc.elo_enabled = False
+    svc._sync_elo = lambda *a, **k: None
+
+    finished = [_mk_fx("1570410", "Arsenal", "Chelsea", 2, 1),
+                _mk_fx("1570411", "Arsenal", "Chelsea", 0, 0)]
+    svc._settle_by_team_names("2026-08-01", finished)
+    why = svc._last_unmatched_detail[0][4]
+    assert why == "有 2 场同名"
+
+
+@pytest.mark.asyncio
+async def test_backfill_returns_unmatched_detail():
+    from service import PredictionService
+
+    class Api:
+        async def get_fixtures_by_date(self, day):
+            return [_mk_fx("1570410", "Arsenal", "Chelsea", 2, 1)]
+
+    svc = object.__new__(PredictionService)
+    repo = _FakeRepo(["2026-08-01"], known={"fd-1"})
+    repo.rows_for_day = {"2026-08-01": [("fd-1", "Bayern München", "Benfica")]}
+    svc.repo = repo
+    svc.api = Api()
+    svc.elo_enabled = False
+    svc.refresh_calibration = lambda: None
+    res = await svc.backfill_stale_settlements()
+
+    assert res["settled"] == 0
+    assert len(res["unmatched_detail"]) == 1
+    assert res["unmatched_detail"][0][2] == "Bayern München"
