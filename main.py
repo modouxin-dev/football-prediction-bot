@@ -5,6 +5,7 @@
 - 推送消息下方的按钮（预测 / 深度分析 / 历史交锋 / 赔率对比 / 刷新）在原消息上就地切换
 """
 from __future__ import annotations
+from errfmt import fmt_exc
 
 import asyncio
 import logging
@@ -664,7 +665,7 @@ async def on_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     except Exception as exc:  # 图表失败不能连累机器人
         log.exception("生成图表失败")
-        await query.answer(f"生成图表失败：{type(exc).__name__}", show_alert=True)
+        await query.answer(f"生成图表失败：{fmt_exc(exc)}", show_alert=True)
         return
     finally:
         end_task(app.bot_data, user_id, f"chart:{kind}:{fixture_id}")
