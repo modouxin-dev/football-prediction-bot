@@ -1446,6 +1446,54 @@ class PredictionRepository:
             log.warning("取样僵尸行 ID 失败：%s", exc)
             return []
 
+    def stale_pending_leagues(self, limit: int = 8) -> list[tuple[str, int]]:
+        """僵尸行按联赛分组计数（含空值），用于定位「补不回来」的原因。
+
+        回填扫了若干天却补回 0 场时，第一疑问是：这批行属于哪些联赛？
+        若显示的是**当前配置之外的联赛**，那就说明它们是历史配置留下来的，
+        按当前联赛过滤永远取不到——处置方式是放宽过滤，而不是继续重试。
+
+        Returns:
+            [(联赛, 场次数), ...]，按场次降序。联赛为空时显示 ``(未记录)``。
+        """
+        try:
+            conn = self._connect()
+            floor = (datetime.now(timezone.utc)
+                     - timedelta(days=self.SETTLE_PENDING_FLOOR_DAYS)).isoformat()
+            rows = conn.execute(
+                "SELECT COALESCE(NULLIF(TRIM(COALESCE(league, '')), ''), '(未记录)') "
+                "AS lg, COUNT(*) AS n FROM predictions "
+                "WHERE actual_home IS NULL AND kickoff IS NOT NULL AND kickoff < ? "
+                "GROUP BY lg ORDER BY n DESC LIMIT ?", (floor, int(limit)),
+            ).fetchall()
+            return [(str(r["lg"]), int(r["n"] or 0)) for r in rows]
+        except Exception as exc:
+            log.warning("统计僵尸行联赛分布失败：%s", exc)
+            return []
+
+    def stale_pending_date_range(self) -> tuple[str, str]:
+        """僵尸行的 kickoff 最早/最晚日期，用于确认回填扫描了正确的区间。
+
+        Returns:
+            (最早日期, 最晚日期)，均为 YYYY-MM-DD；无数据时 ('', '')。
+        """
+        try:
+            conn = self._connect()
+            floor = (datetime.now(timezone.utc)
+                     - timedelta(days=self.SETTLE_PENDING_FLOOR_DAYS)).isoformat()
+            row = conn.execute(
+                "SELECT MIN(substr(kickoff, 1, 10)) AS lo, "
+                "MAX(substr(kickoff, 1, 10)) AS hi FROM predictions "
+                "WHERE actual_home IS NULL AND kickoff IS NOT NULL AND kickoff < ?",
+                (floor,),
+            ).fetchone()
+            if not row:
+                return ("", "")
+            return (str(row["lo"] or ""), str(row["hi"] or ""))
+        except Exception as exc:
+            log.warning("统计僵尸行日期区间失败：%s", exc)
+            return ("", "")
+
     def stale_pending_count_for_day(self, day: str) -> int:
         """某天有多少条超期未结算（用于回填前后对账）。"""
         try:
