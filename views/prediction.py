@@ -189,8 +189,8 @@ class PredictionView:
             if abs(line) < 1e-9 or abs(line % 1.0) < 1e-9:
                 lines.append("<i>　打平走水</i>")
         else:
-            lines.append(kv_line("🏷", "盘口", "未开盘", CORE_LABEL_WIDTH))
-            lines.append("<i>　不编造推荐</i>")
+            lines.append(kv_line("🏷", "盘口", "未开盘亚盘", CORE_LABEL_WIDTH))
+            lines.append("<i>　不予推荐</i>")
 
         # 比分推荐：直接取泊松矩阵 top1，与「最可能比分」同源，不自相矛盾
         top_scores = (p.analysis.get("top_scores") or [])[:3]

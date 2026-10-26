@@ -1487,6 +1487,12 @@ class PredictionRepository:
         odds_sum = 0.0
         odds_n = 0
         returned = 0.0      # 命中场次返还总额（含本金）
+        # 「有盘 vs 无盘」分组：用于验证「无盘不推荐」这个策略到底对不对。
+        # 没这个分组，策略就只是拍脑袋——说不清砍掉的那批是不是真更差。
+        split: dict[str, dict[str, float]] = {
+            "with_odds": {"total": 0, "hit": 0},
+            "without_odds": {"total": 0, "hit": 0},
+        }
         for r in rows:
             actual = _outcome(r["actual_home"], r["actual_away"])
             if actual is None:
@@ -1497,6 +1503,10 @@ class PredictionRepository:
                 hit += 1
             # 赔率：inputs 是 JSON，没有该字段的老记录如实跳过
             picked = _odds_of(r["inputs"], r["result"])
+            key = "with_odds" if picked is not None else "without_odds"
+            split[key]["total"] += 1
+            if ok:
+                split[key]["hit"] += 1
             if picked is None:
                 no_odds += 1
                 continue
@@ -1517,6 +1527,15 @@ class PredictionRepository:
             "roi": ((returned - stake) / stake) if stake else None,
             "no_odds": no_odds,
             "stake": int(stake),
+            # 分组命中率：样本不足时为 None，绝不用 0 冒充「0% 命中」
+            "split": {
+                k: {
+                    "total": int(v["total"]),
+                    "hit": int(v["hit"]),
+                    "rate": (v["hit"] / v["total"]) if v["total"] else None,
+                }
+                for k, v in split.items()
+            },
         }
 
     def stale_pending_rows_for_day(self, day: str) -> list[tuple[str, str, str]]:

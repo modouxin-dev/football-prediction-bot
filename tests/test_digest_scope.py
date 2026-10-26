@@ -76,7 +76,11 @@ class RecordingAPI:
         return list(self._st.get(lid, standings_of(lid, 1, 2, 3, 4)))
 
     async def get_odds(self, fixture_id, fresh=False):
-        return []
+        # 必须带全场亚盘：真实数据源实测返回 id=4（/oddsprobe，76 个盘口）。
+        # 返回空会让所有场次因「无盘不推荐」被过滤掉，
+        # 本文件测的是「窗口与截断口径」，不是亚盘策略。
+        from tests.sample_data import odds_response
+        return odds_response([("Book A", 2.1, 3.4, 3.6), ("Book B", 2.0, 3.5, 3.8)])
 
     async def get_team_form(self, team_id, season, limit):
         return []

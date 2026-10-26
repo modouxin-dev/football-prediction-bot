@@ -35,28 +35,47 @@ def fixture(fid, home_id, home, away_id, away, kickoff, status="NS", rnd="Regula
     }
 
 
-def odds_response(prices):
-    """prices: [(博彩公司, 主, 平, 客)]。故意把非胜平负的盘口放在前面，检验解析没有取“第一个盘口”。"""
+def odds_response(prices, handicap=-0.5):
+    """prices: [(博彩公司, 主, 平, 客)]。故意把非胜平负的盘口放在前面，检验解析没有取“第一个盘口”。
+
+    ``handicap`` 为全场亚洲盘的盘口线（主队视角，负=主队让球）。
+    传 None 表示本场不开亚盘——用于测「无盘不推荐」策略。
+
+    ⚠️ 为什么默认要带亚盘：真实数据源实测返回 id=4 Asian Handicap
+    （/oddsprobe 对 fixture 1551707，Pro 套餐共 76 个盘口）。
+    若测试样本没有亚盘，所有 Prediction 都会因「无盘不推荐」被过滤掉，
+    依赖 build_predictions 造数据的既有用例会整体失效——
+    那不是被测逻辑坏了，而是样本与真实数据源不一致。
+    """
     bookmakers = []
     for i, (name, h, d, a) in enumerate(prices, start=1):
-        bookmakers.append(
-            {
-                "id": i,
-                "name": name,
-                "bets": [
-                    {"id": 5, "name": "Goals Over/Under", "values": [{"value": "Over 2.5", "odd": "1.90"}]},
-                    {
-                        "id": 1,
-                        "name": "Match Winner",
-                        "values": [
-                            {"value": "Home", "odd": str(h)},
-                            {"value": "Draw", "odd": str(d)},
-                            {"value": "Away", "odd": str(a)},
-                        ],
-                    },
+        bets = [
+            {"id": 5, "name": "Goals Over/Under", "values": [{"value": "Over 2.5", "odd": "1.90"}]},
+        ]
+        if handicap is not None:
+            # 同一档盘口线在两侧符号相反：Home -0.5 与 Away +0.5 是一回事
+            bets.append({
+                "id": 4,
+                "name": "Asian Handicap",
+                "values": [
+                    {"value": f"Home {handicap:+.2f}".rstrip("0").rstrip(".")
+                              if handicap != 0 else "Home 0",
+                     "odd": "1.95"},
+                    {"value": f"Away {-handicap:+.2f}".rstrip("0").rstrip(".")
+                              if handicap != 0 else "Away 0",
+                     "odd": "1.85"},
                 ],
-            }
-        )
+            })
+        bets.append({
+            "id": 1,
+            "name": "Match Winner",
+            "values": [
+                {"value": "Home", "odd": str(h)},
+                {"value": "Draw", "odd": str(d)},
+                {"value": "Away", "odd": str(a)},
+            ],
+        })
+        bookmakers.append({"id": i, "name": name, "bets": bets})
     return [{"fixture": {"id": 1}, "bookmakers": bookmakers}]
 
 
