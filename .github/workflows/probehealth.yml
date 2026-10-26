@@ -1,5 +1,7 @@
 name: probehealth
-on: workflow_dispatch:
+on:
+  push:
+    branches: [probe/health-ver]
 jobs:
   p:
     runs-on: ubuntu-latest
@@ -7,7 +9,4 @@ jobs:
       - run: |
           echo "=== /health ==="
           curl -s -m 30 "https://football-prediction-bot-production-fb03.up.railway.app/health"
-          echo
-          echo "=== /health/model (stale_pending) ==="
-          curl -s -m 30 "https://football-prediction-bot-production-fb03.up.railway.app/health/model" | head -c 400
           echo
