@@ -1493,6 +1493,17 @@ class PredictionRepository:
             "with_odds": {"total": 0, "hit": 0},
             "without_odds": {"total": 0, "hit": 0},
         }
+        # 「按把握度分档」：用于验证推荐闸门（REC_MIN_CONFIDENCE）到底对不对。
+        # 只有它能回答「阈值从 0.55 提到 0.65，准确率真的涨了吗」——
+        # 否则调阈值就是瞎调，涨了跌了都说不清原因。
+        # 分档边界与回测标定（0.45/0.55/0.65/0.70）对齐，方便直接对照。
+        conf_bins: dict[str, dict[str, float]] = {
+            "c_lt45": {"total": 0, "hit": 0},
+            "c_45_55": {"total": 0, "hit": 0},
+            "c_55_65": {"total": 0, "hit": 0},
+            "c_65_70": {"total": 0, "hit": 0},
+            "c_ge70": {"total": 0, "hit": 0},
+        }
         for r in rows:
             actual = _outcome(r["actual_home"], r["actual_away"])
             if actual is None:
@@ -1501,6 +1512,16 @@ class PredictionRepository:
             ok = (r["result"] == actual)
             if ok:
                 hit += 1
+            # 把握度分档：取预测当时的 top1 概率（落库在 inputs.confidence）
+            conf = _confidence_of(r["inputs"])
+            if conf is not None:
+                bk = ("c_lt45" if conf < 0.45 else
+                      "c_45_55" if conf < 0.55 else
+                      "c_55_65" if conf < 0.65 else
+                      "c_65_70" if conf < 0.70 else "c_ge70")
+                conf_bins[bk]["total"] += 1
+                if ok:
+                    conf_bins[bk]["hit"] += 1
             # 赔率：inputs 是 JSON，没有该字段的老记录如实跳过
             picked = _odds_of(r["inputs"], r["result"])
             key = "with_odds" if picked is not None else "without_odds"
@@ -1535,6 +1556,16 @@ class PredictionRepository:
                     "rate": (v["hit"] / v["total"]) if v["total"] else None,
                 }
                 for k, v in split.items()
+            },
+            # 把握度分档命中率：直接对应回测标定的那几档，
+            # 用来判断「闸门阈值该定在哪」——有数据才能调，不能凭感觉。
+            "conf_bins": {
+                k: {
+                    "total": int(v["total"]),
+                    "hit": int(v["hit"]),
+                    "rate": (v["hit"] / v["total"]) if v["total"] else None,
+                }
+                for k, v in conf_bins.items()
             },
         }
 
@@ -2749,6 +2780,32 @@ def _odds_of(raw_inputs: Any, result: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return v if v > 1.0 else None   # 赔率 ≤1 是脏数据
+
+def _confidence_of(raw_inputs: Any) -> float | None:
+    """从 inputs JSON 里取预测当时的把握度（top1 概率）。
+
+    为什么单独存而不是事后再算：事后重算会用到当时的模型参数，
+    而参数会随调参变化 —— 那样「分档命中率」反映的是**当前参数**下的值，
+    不是预测当时的真实把握，分档就失去意义。
+
+    缺失（老记录）→ None，由调用方跳过。绝不用 0 填充：
+    0 会被归进最低档，把「没有数据」伪装成「把握度很低」。
+    """
+    if not raw_inputs:
+        return None
+    try:
+        data = json.loads(raw_inputs) if isinstance(raw_inputs, str) else raw_inputs
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    val = data.get("confidence")
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    return v if 0.0 <= v <= 1.0 else None
+
 
 def _outcome(home: int | None, away: int | None) -> str | None:
     """真实比分 → 胜平负标签（与模型 result 字段同一套口径）。"""
