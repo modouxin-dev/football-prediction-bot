@@ -63,10 +63,22 @@ def test_predictions_use_real_team_strength():
     assert strong_home.odds["n"] == 2 and strong_home.best is not None
 
 
-def test_odds_failure_degrades_gracefully():
-    _, _, preds = build(FakeAPI({2026: default_fixtures()}, odds_error=APIError("boom")))
-    assert len(preds) == 2 and all(p.odds is None and p.best is None for p in preds)
-    assert "暂无" in ui.format_prediction(preds[0], TZ)
+def test_odds_failure_means_no_recommendation():
+    """赔率取不到 → 没有亚盘 → 按策略不予推荐（不再是「照常出预测」）。
+
+    策略变更（项目方向：核心标准是准确率）：
+    过去是「没有赔率也照常出预测，展示层写暂无」；
+    现在无亚盘就没有「模型 vs 市场」的偏差参照，推了无法验证也无法复盘，
+    因此整场不推荐、不入库。
+
+    这里守的是**降级仍然可见**：不是静默消失，而是把原因说清楚。
+    """
+    svc, _, preds = build(FakeAPI({2026: default_fixtures()},
+                                  odds_error=APIError("boom")))
+    assert preds == [], "无亚盘时不应产生任何推荐"
+    # 全被跳过时必须留痕，否则用户看到「一场不推」会以为机器人坏了
+    assert svc.no_handicap_count == 2
+    assert "未开盘亚洲盘" in (svc.last_note or "")
 
 
 def test_refresh_refetches_odds_bypassing_cache():
@@ -116,7 +128,15 @@ def test_all_views_render_without_errors_and_stay_within_telegram_limit():
 
 
 def test_odds_and_h2h_views_handle_missing_data():
-    p = build(FakeAPI({2026: default_fixtures()}, odds=[]))[2][0]
+    """展示层在无赔率/无交锋时仍要说清楚，不能空白或报错。
+
+    注意：无赔率的场次现在**不会进入推荐列表**（无盘不推荐），
+    所以这里必须绕开 build_predictions 的过滤，直接取 Prediction 本体
+    来测展示层——被测的是「渲染会不会崩」，不是「推不推」。
+    """
+    svc, api, _ = build(FakeAPI({2026: default_fixtures()}, odds=[]))
+    p = run(svc._predict_one(run(svc._model_for(39)),
+                             NOW + timedelta(hours=2), default_fixtures()[0]))
     assert "暂无赔率" in ui.format_odds_detail(p, TZ)
     assert "暂无历史交锋" in ui.format_h2h(p, [], TZ)
 
