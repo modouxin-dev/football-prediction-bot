@@ -162,3 +162,90 @@ def test_static_placeholder_is_distinguishable() -> None:
     """静态占位文案须与「脚本已运行」时的文案不同，否则无法区分卡死与加载中。"""
     html = INDEX.read_text(encoding="utf-8")
     assert "初始化中" in html, "静态占位未改文案：卡死与加载中在视觉上无法区分"
+
+
+# ---- 渲染引用必须在本函数内声明 -------------------------------------------
+# 真实事故（2026-10-26）：周期战绩的 fetch 被误写进诊断函数 runDiagnostics
+# 的局部作用域里，而渲染处 periodCard(period, true) 在 load() 内引用它——
+# 跨作用域访问不到，抛 ReferenceError: period is not defined，
+# **整个 innerHTML 赋值中断，看板全白，只显示「加载失败」**。
+#
+# 这类错误 node --check 抓不到（语法完全合法），pytest 也抓不到
+# （.html 不在扫描范围），只能靠这里的静态作用域检查兜住。
+
+import re as _re
+
+
+def _load_fn_body() -> str:
+    """提取 async function load() 的完整函数体（按大括号配平）。"""
+    html = INDEX.read_text(encoding="utf-8")
+    start = html.index("async function load(){")
+    i = html.index("{", start)
+    depth, j = 0, i
+    while j < len(html):
+        if html[j] == "{":
+            depth += 1
+        elif html[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return html[i:j + 1]
+
+
+def _global_functions() -> set[str]:
+    """全脚本顶层的 function 声明——它们在任何函数内都可见。"""
+    html = INDEX.read_text(encoding="utf-8")
+    return set(_re.findall(r"^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)",
+                           html, _re.M))
+
+
+def _declared_in(body: str) -> set[str]:
+    """收集函数体内声明的标识符：解构数组 / const / let / var / catch 形参。"""
+    names: set[str] = set()
+    # catch(err) 的形参——同样是本作用域内可见的局部绑定
+    for m in _re.finditer(r"catch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)", body):
+        names.add(m.group(1))
+    # 解构：const [a, b, c] = ...
+    for m in _re.finditer(r"\b(?:const|let|var)\s*\[([^\]]*)\]", body):
+        names.update(x.strip() for x in m.group(1).split(",") if x.strip())
+    # 解构对象：const {a, b} = ...
+    for m in _re.finditer(r"\b(?:const|let|var)\s*\{([^}]*)\}", body):
+        names.update(x.strip() for x in m.group(1).split(",") if x.strip())
+    # 普通声明：const x = / let x = / var x =
+    for m in _re.finditer(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)", body):
+        names.add(m.group(1))
+    return names
+
+
+def test_render_references_are_declared_in_load():
+    """load() 里渲染用到的变量，必须就在 load() 内声明。
+
+    漏一个就整页白屏——且只有浏览器控制台能看到 ReferenceError。
+    """
+    body = _load_fn_body()
+    declared = _declared_in(body)
+
+    # 渲染段里所有 Card(...) / section(...) 调用的第一个实参标识符
+    used = set()
+    for m in _re.finditer(r"\b([A-Za-z_$][\w$]*)\((\s*[A-Za-z_$][\w$]*)\s*[,)]", body):
+        used.add(m.group(2).strip())
+
+    # 只校验「像局部变量」的小写标识符，放过字面量与内置
+    locals_used = {u for u in used if u[:1].islower()}
+    visible = declared | _global_functions()
+    missing = sorted(u for u in locals_used if u not in visible)
+    assert not missing, (
+        f"load() 渲染引用了未在本函数声明的变量：{missing}。"
+        "跨作用域引用会让整页 innerHTML 赋值抛 ReferenceError 而白屏"
+    )
+
+
+def test_period_is_fetched_inside_load():
+    """周期战绩的数据必须在 load() 内取，不能只存在于诊断函数。"""
+    body = _load_fn_body()
+    assert "/stats/period" in body, (
+        "load() 没有请求 /stats/period——周期战绩会拿不到数据，"
+        "或引用到别处定义的同名变量而抛 ReferenceError"
+    )
+    assert "period" in _declared_in(body), "load() 内没有 period 变量"
