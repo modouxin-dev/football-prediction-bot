@@ -1446,6 +1446,59 @@ class PredictionRepository:
             log.warning("取样僵尸行 ID 失败：%s", exc)
             return []
 
+    def stale_pending_rows_for_day(self, day: str) -> list[tuple[str, str, str]]:
+        """某天的僵尸行 (fixture_id, home, away)，供「队名兜底」匹配。
+
+        跨源 ID 对不上时，队名是唯一还能用的定位依据——故需要把队名一起
+        取出来，而不是只取 ID。
+
+        Returns:
+            [(fixture_id, home, away), ...]，队名是**落库时的原始数据**。
+        """
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT fixture_id, COALESCE(home, '') AS h, COALESCE(away, '') AS a "
+                "FROM predictions WHERE actual_home IS NULL "
+                "AND substr(kickoff, 1, 10) = ?", (str(day),),
+            ).fetchall()
+            return [(str(r["fixture_id"]), str(r["h"]), str(r["a"]))
+                    for r in rows if r["fixture_id"] is not None]
+        except Exception as exc:
+            log.warning("取某日僵尸行失败：%s", exc)
+            return []
+
+    def stale_pending_id_kinds(self) -> dict[str, int]:
+        """僵尸行的 ID 形态分布：备用源前缀 vs 纯数字。
+
+        为什么需要：这两个源的 ID **不在同一个编号空间**——主源是
+        1500000 量级，备用源（fd- 前缀）实测是 560593 量级。剥掉前缀
+        也变不出主源 ID。看到这个分布就能立刻判断「补不回来」是不是
+        跨源 ID 导致的，而不用去猜。
+
+        Returns:
+            {"fd": n, "numeric": n}
+        """
+        try:
+            conn = self._connect()
+            floor = (datetime.now(timezone.utc)
+                     - timedelta(days=self.SETTLE_PENDING_FLOOR_DAYS)).isoformat()
+            rows = conn.execute(
+                "SELECT fixture_id FROM predictions WHERE actual_home IS NULL "
+                "AND kickoff IS NOT NULL AND kickoff < ?", (floor,),
+            ).fetchall()
+            out = {"fd": 0, "numeric": 0}
+            for r in rows:
+                fid = str(r["fixture_id"] or "")
+                if fid.startswith("fd-"):
+                    out["fd"] += 1
+                else:
+                    out["numeric"] += 1
+            return out
+        except Exception as exc:
+            log.warning("统计僵尸行 ID 形态失败：%s", exc)
+            return {"fd": 0, "numeric": 0}
+
     def stale_pending_leagues(self, limit: int = 8) -> list[tuple[str, int]]:
         """僵尸行按联赛分组计数（含空值），用于定位「补不回来」的原因。
 

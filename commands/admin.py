@@ -298,9 +298,16 @@ async def settlebackfill_cmd(update, context) -> None:
         sample = service.repo.stale_pending_sample_ids()
         if sample:
             lines.append(f"库内 ID 样例　<code>{esc(', '.join(sample[:4]))}</code>")
-        if res["unmatched_sample"]:
-            lines.append(f"源端 ID 样例　<code>"
-                         f"{esc(', '.join(res['unmatched_sample'][:4]))}</code>")
+        # ID 形态分布是**关键诊断**：两个源的 ID 不在同一编号空间，
+        # 备用源（fd- 前缀）的编号在主源里根本不存在，剥前缀也没用。
+        # 看到这个分布就能确认「补不回来」是不是跨源 ID 造成的。
+        kinds = res.get("id_kinds") or {}
+        if kinds and (kinds.get("fd") or kinds.get("numeric")):
+            lines.append(f"ID 形态　　　备用源 fd- {kinds.get('fd', 0)} 条"
+                         f" · 主源纯数字 {kinds.get('numeric', 0)} 条")
+        if res.get("matched_by_name"):
+            lines.append(f"队名兜底　　补回 {res['matched_by_name']} 场"
+                         f"（这些 ID 跨源对不上，靠队名+日期定位）")
         if res["fetched_fixtures"] == 0:
             lines.append("")
             lines.append("<i>⚠️ 数据源在这些日期没有返回任何比赛。"
