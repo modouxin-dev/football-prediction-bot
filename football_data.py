@@ -11,6 +11,7 @@
 - 免费层限制：无赔率、无历史交锋、无球员统计，对应方法返回空值（不伪造）。
 """
 from __future__ import annotations
+from errfmt import fmt_exc
 
 import asyncio
 import logging
@@ -81,6 +82,22 @@ STATUS_MAP: dict[str, str] = {
 }
 
 
+def _as_date(day) -> date:
+    """把 date / datetime / ISO 字符串统一成 date（备用源模块本地副本）。
+
+    ⚠️ 与 api_client._as_date 是**故意重复**的两份：football_data.py 是
+    独立的备用源模块，不 import 主源模块，避免两个数据源耦合。
+    两处行为必须一致——测试同时覆盖。
+    """
+    if isinstance(day, datetime):
+        return day.date()
+    if isinstance(day, date):
+        return day
+    if isinstance(day, str):
+        return date.fromisoformat(day.strip())
+    raise ValueError(f"无法识别的日期类型：{type(day).__name__}（{day!r}））".replace("））","）"))
+
+
 class FootballDataError(RuntimeError):
     """备用数据源错误。消息里不会出现 Token。"""
 
@@ -145,7 +162,7 @@ class FootballDataAPI:
             try:
                 resp = await self._client.get(url, params=params, headers=self._headers)
             except httpx.HTTPError as exc:
-                last_error = f"网络错误：{type(exc).__name__}"
+                last_error = f"网络错误：{fmt_exc(exc)}"
                 log.warning("备用源请求 %s 失败（第 %d 次）", path, attempt + 1)
             else:
                 if resp.status_code == 429:
@@ -321,9 +338,10 @@ class FootballDataAPI:
             return False
         return date_from <= dt.date() <= date_to
 
-    async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict]:
+    async def get_fixtures(self, league_id: int, season: int, date_from, date_to) -> list[dict]:
         code = _code_for(league_id)
-        params = {"dateFrom": date_from.isoformat(), "dateTo": date_to.isoformat()}
+        params = {"dateFrom": _as_date(date_from).isoformat(),
+                  "dateTo": _as_date(date_to).isoformat()}
         payload = await self._get(f"competitions/{code}/matches", params, ttl=TTL_MATCHES)
         matches = payload.get("matches") or []
 
