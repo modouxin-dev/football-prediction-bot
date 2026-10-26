@@ -84,3 +84,59 @@ def test_error_output_includes_build_version():
     """
     src = _oddsprobe_source()
     assert "_build_version()" in src
+
+
+# ---- 出口必须分片：实测 Message is too long -------------------------------
+# 生产日志（2026-10-26 07:54）:
+#   File "/app/commands/admin.py", line 1431, in oddsprobe_cmd
+#   telegram.error.BadRequest: Message is too long
+# 一场比赛的盘口全列出来有几十个 bet，拼成单条远超 Telegram 4096。
+# 异常发生在最后一步——前面取数、解析全部白做，用户收不到任何回复。
+
+
+def test_output_uses_reply_html_not_bare_reply_text():
+    """oddsprobe 出口必须走 reply_html（内含 split_html_blocks 分片）。
+
+    ⚠️ 同样必须用 AST 而不是字符串搜索——第一版用
+    ``assert "reply_text" not in src`` 又命中了函数自己的注释
+    （注释里写了「不能直接 reply_text」），已修复的代码过不了测试。
+    这是本文件里第二次踩同一个坑，故明确：判代码一律走 AST Call 节点。
+    """
+    src = _oddsprobe_source()
+    tree = ast.parse(src)
+
+    called: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                called.add(func.attr)
+            elif isinstance(func, ast.Name):
+                called.add(func.id)
+
+    assert "reply_html" in called, "出口没走 reply_html，长盘口会 400"
+    assert "reply_text" not in called, (
+        "仍有裸 reply_text 调用——单条超 4096 会抛 Message is too long，"
+        "且异常发生在最后一步，前面取数全白做"
+    )
+
+
+def test_split_html_blocks_actually_splits_long_odds_output():
+    """分片工具对超长盘口文本必须真的切成多块。
+
+    光断言「调用了 reply_html」不够——如果分片函数对这种文本返回一块，
+    照样 400。这里构造真实的超长盘口文本验证。
+    """
+    from bot_handler import split_html_blocks
+
+    lines = ["💱 盘口探测", "探测对象　fixture 1570431", ""]
+    for i in range(80):  # 80 个 bet：一场比赛的实际盘口数量级
+        lines.append(f"id={i} · Bet Name {i}　（3 项）")
+        lines.append("　" + " / ".join(f"Home {i}={1.9 + i / 100:.2f}" for _ in range(3)))
+    text = "\n".join(lines)
+
+    assert len(text) > 4096, f"构造的文本只有 {len(text)} 字符，测不出问题"
+    blocks = split_html_blocks(text)
+    assert len(blocks) > 1, "分片函数没切开——长文本仍会撞 4096"
+    for b in blocks:
+        assert len(b) <= 4096, f"分出来仍有 {len(b)} 字符的超长块"
