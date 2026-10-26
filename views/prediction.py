@@ -162,6 +162,45 @@ class PredictionView:
         # 一旦有人另处构造 Prediction（如从库里回填、未来新增代码路径）就会在此
         # 抛 TypeError，导致整条推送失败。显式校验让降级逻辑自洽：
         # 任一缺失都走「赔率暂无」，而不是让整条消息崩掉。
+        # ---- 亚洲盘 + 比分推荐（项目主推方向）----
+        # 放在胜平负之后、赔率之前：它是「推荐」，比参考性的赔率更要紧。
+        ah = getattr(p, "asian", None)
+        lines += [BLANK, SEP, BLANK, "🎯 <b>亚洲盘推荐</b>", SEP]
+        if ah:
+            line = ah["line"]
+            # 盘口线按主队视角展示：负=主队让球
+            line_txt = f"{line:+.2f}".rstrip("0").rstrip(".")
+            h_side, a_side = ah["home"], ah["away"]
+            # 推荐哪一边：按模型赢盘概率与赔率隐含概率的差（edge）选
+            pick = "home" if h_side["edge"] >= a_side["edge"] else "away"
+            pick_side = h_side if pick == "home" else a_side
+            pick_name = esc(team_mobile(p.home)) if pick == "home" else esc(team_mobile(p.away))
+            lines.append(
+                kv_line("🏷", "盘口", f"主队 {line_txt} · {ah['n']}家", CORE_LABEL_WIDTH))
+            lines.append(
+                kv_line("📌", "推荐",
+                        f"<b>{pick_name} {pick_side['odds']:.2f}</b>",
+                        CORE_LABEL_WIDTH))
+            lines.append(
+                kv_line("📊", "赢盘概率",
+                        f"{pick_side['prob']:.1%} · 偏差 {pick_side['edge']:+.1%}",
+                        CORE_LABEL_WIDTH))
+            # 走水提示：整数盘/平手盘存在退本金的情形，必须说清
+            if abs(line) < 1e-9 or abs(line % 1.0) < 1e-9:
+                lines.append("<i>　打平走水</i>")
+        else:
+            lines.append(kv_line("🏷", "盘口", "未开盘", CORE_LABEL_WIDTH))
+            lines.append("<i>　不编造推荐</i>")
+
+        # 比分推荐：直接取泊松矩阵 top1，与「最可能比分」同源，不自相矛盾
+        top_scores = (p.analysis.get("top_scores") or [])[:3]
+        if top_scores:
+            lines += [BLANK, SEP, BLANK, "🎯 <b>比分推荐</b>", SEP]
+            lines.append(kv_line("🥇", "首选", esc(top_scores[0][0]), CORE_LABEL_WIDTH))
+            if len(top_scores) > 1:
+                alt = " · ".join(f"{sc}" for sc, _ in top_scores[1:])
+                lines.append(kv_line("🥈", "备选", esc(alt), CORE_LABEL_WIDTH))
+
         if p.best and p.odds:
             key, o = p.best
             # 不打 🚀 Value Bet 标记：1110 场实测按 edge 阈值下注的 ROI 恒为负

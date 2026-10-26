@@ -753,7 +753,7 @@ def _norm_injuries(raw: list[dict]) -> list[dict]:
     return list(grouped.values())
 
 
-def _norm_odds(raw: Any) -> dict | None:
+def _norm_odds(raw: Any, fid: str | None = None) -> dict | None:
     """赔率取各公司中位数，并给出市场隐含概率。
 
     只报单一公司的报价会被异常值带偏；中位数抗离群。
@@ -769,6 +769,33 @@ def _norm_odds(raw: Any) -> dict | None:
         cons = consensus_odds(rows)
     except Exception:  # 赔率只是附加信息，解析失败不应影响整场展示
         return None
+
+    # 顺手把亚洲盘的真实选项落盘（**零额外请求**）。
+    #
+    # 为什么在这里做：亚盘解析必须基于实测的 value 写法，而 raw 就是
+    # /odds 的完整响应，已经在内存里了——再单独调一次就是纯浪费额度。
+    #
+    # 为什么需要它：凭记忆猜 bet id / 选项写法会导致解析永远取不到值，
+    # 而取不到值是**静默**的（不报错、不告警，只是推荐里没有亚盘）。
+    # 落盘后管理员打开 /oddsprobe 端点即可核对真实写法。
+    #
+    # 失败一律静默：这是诊断设施，绝不能拖累赔率展示主流程。
+    try:
+        import oddsprobe_log
+        from analyzer import ASIAN_HANDICAP_BET_ID
+        bets = []
+        for item in raw or []:
+            for book in (item.get("bookmakers") or [])[:3]:   # 3 家足够看清写法
+                for bet in book.get("bets") or []:
+                    if bet.get("id") == ASIAN_HANDICAP_BET_ID:
+                        bets.append(bet)
+                        break
+            if bets:
+                break
+        if bets:
+            oddsprobe_log.record_bets(fid or "?", bets[:3])
+    except Exception:
+        pass
     if not cons:
         return None
     probs = implied_probabilities(cons) or {}
@@ -934,7 +961,7 @@ async def prediction_detail(fixture_id: str) -> JSONResponse:
             if od_err and raw_odds is None:
                 detail_errors["odds"] = od_err
             lineups = _norm_lineups(raw_lineups or [])
-            odds = _norm_odds(raw_odds)
+            odds = _norm_odds(raw_odds, fid)
             # 告诉前端这份数据是何时真拉取的，以及是否用了过期缓存
             if lu_at:
                 detail_fetched["lineups"] = lu_at
