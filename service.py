@@ -19,6 +19,8 @@ from analyzer import (LeagueModel, MatchAnalyzer, TeamStrength,
                       apply_market_adjustment, build_league_model,
                       calculate_prediction_level, collect_1x2_odds,
                       consensus_odds, implied_probabilities)
+from analyzer import (asian_handicap_edge, collect_asian_handicap_odds,
+                      consensus_asian_handicap, score_matrix_from_analysis)
 from prematch import side_lineup, squad_factors
 from ensemble import FALLBACK_PROBS, EnsemblePredictor
 from api_client import APIError, FootballAPI
@@ -268,6 +270,9 @@ class Prediction:
     fixture: dict[str, Any]
     bookmakers: list[dict[str, Any]] = field(default_factory=list)
     odds: dict[str, Any] | None = None
+    #: 亚洲盘推荐（全场，bet id=4）。None 表示未开盘/取不到——
+    #: 绝不用胜平负折算冒充，那是另一件事。
+    asian: dict[str, Any] | None = None
     outcomes: dict[str, Any] = field(default_factory=dict)
     best: tuple[str, dict[str, Any]] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1119,6 +1124,17 @@ class PredictionService:
             odds_response = []
         bookmakers = collect_1x2_odds(odds_response)
         odds = consensus_odds(bookmakers)
+        # 亚盘：从同一份 /odds 响应里解析，**不再额外发请求**。
+        # 盘口线由数据源实际开盘决定，这里只挑「公司数最多」的主流盘。
+        asian = None
+        try:
+            ah_rows = collect_asian_handicap_odds(odds_response)
+            ah_cons = consensus_asian_handicap(ah_rows)
+            if ah_cons:
+                asian = asian_handicap_edge(score_matrix_from_analysis(analysis), ah_cons)
+        except Exception as exc:  # 亚盘是增强项，失败不能拖累整条预测
+            log.debug("亚盘解析失败（fixture=%s）：%s", fixture_id, exc)
+            asian = None
         # edge 由泊松口径计算：它是「模型 vs 市场」的差异，若先换成市场口径
         # 则 edge 恒为 -抽水，失去信息量。故两者的先后顺序不能颠倒。
         outcomes = self.analyzer.evaluate_outcomes(analysis, odds)
@@ -1231,6 +1247,7 @@ class PredictionService:
             fixture=fx,
             bookmakers=bookmakers,
             odds=odds,
+            asian=asian,
             source=self.source_label,
             outcomes=outcomes,
             best=best,
