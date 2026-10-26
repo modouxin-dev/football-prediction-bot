@@ -136,6 +136,10 @@ class Settings:
     topn_min: int
     topn_max: int
     topn_min_confidence: float
+    # 推荐闸门：只有同时满足「模型够有把握」且「赔率不过分离谱」才推
+    rec_min_confidence: float   # 模型 top1 概率下限，0=不限
+    rec_min_odds: float        # 推荐方向赔率下限，0=不限
+    rec_max_odds: float        # 推荐方向赔率上限，0=不限
     season_mode: str  # "auto"（自动识别可用赛季并降级）/ "fixed"（只用目标赛季，不降级）
     allow_season_fallback: bool
     # 备用数据源 football-data.org（主源不可用时接管赛程/赛果/积分榜）
@@ -511,6 +515,28 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         topn_min=_get_int(env, "TOPN_MIN", 3),
         topn_max=_get_int(env, "TOPN_MAX", 7),
         topn_min_confidence=_get_float(env, "TOPN_MIN_CONFIDENCE", 0.0),
+        # ---- 推荐闸门默认值：来自**真实赛果回测**，不是拍脑袋 ----
+        #
+        # 置信度阈值用 openfootball 真实赛果（英超 2020-21~2024-25 +
+        # 西甲/德甲/意甲，3158 场 walk-forward）标定：
+        #     阈值    覆盖     命中率
+        #     0.00    100%     52.18%
+        #     0.45    89.9%    54.00%
+        #     0.55    69.6%    57.30%   ← 默认
+        #     0.65    49.5%    61.33%
+        #     0.70    40.5%    62.44%
+        # 取 0.55：准确率 +5 个百分点，仍覆盖约七成场次。
+        # 再往上提准确率还会涨，但覆盖面掉得更快，且**这是覆盖率换来的**，
+        # 不代表模型变强了 —— 别把它当成模型优化的成绩。
+        rec_min_confidence=_get_float(env, "REC_MIN_CONFIDENCE", 0.55),
+        # 赔率区间：**只防极端，不是最优值**。
+        # 下限 1.30：赔率 1.1 的比赛命中率能到 80%+，但押注它是负 EV，
+        #            用这种比赛刷出来的"高准确率"是假的。
+        # 上限 5.00：超过 5 倍基本是彩票，方差极大，几百场样本内完全不可信。
+        # ⚠️ 这两个数**没有真实赔率标定过**（历史赔率取不到），
+        #    只用于挡住两端极端值。要精细调，先攒真实赔率再看分组统计。
+        rec_min_odds=_get_float(env, "REC_MIN_ODDS", 1.30),
+        rec_max_odds=_get_float(env, "REC_MAX_ODDS", 5.00),
         season=season,
         season_mode=season_mode,
         allow_season_fallback=allow_season_fallback,

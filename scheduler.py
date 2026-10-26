@@ -319,9 +319,29 @@ async def run_push(app, *, widen: bool = False, chat_id: object = None) -> PushR
         elif service.last_note:
             note = service.last_note  # 降级/空结果的真实原因，必须让用户看到
 
+    # 推荐闸门：先按「把握度 + 赔率区间」筛掉不该推的，再取最有把握的 N 场。
+    #
+    # 顺序不能反：闸门是**绝对值门槛**（这场够不够格），topn 是**相对排序**
+    # （够格的里面挑最好的几个）。若先 topn 再闸门，会在「今天本来就只有
+    # 3 场且都不够格」时把这 3 场推上去——闸门就形同虚设。
+    gated = service.gate_predictions(predictions)
+    gate_note = None
+    if service.last_gate and service.last_gate.get("in"):
+        g = service.last_gate
+        blocked = g["in"] - g["pass"]
+        if blocked > 0:
+            gate_note = (
+                f"🚦 推荐闸门：{g['in']} 场候选中 {blocked} 场未通过"
+                f"（无亚盘 {g['no_handicap']} · 把握度<{settings.rec_min_confidence:.0%} "
+                f"{g['low_confidence']} · 赔率过低 {g['odds_low']} · 赔率过高 {g['odds_high']}），"
+                f"推送 {g['pass']} 场。"
+            )
+    if gate_note:
+        note = f"{note}\n{gate_note}" if note else gate_note
+
     # 只推最有把握的 N 场：场次铺满会把重点淹没，低把握场次还会拉低整体命中率。
     # 砍掉的场数必须写进 note，否则用户无从判断是「今天只有 3 场」还是「被砍到 3 场」。
-    picked = service.select_top_predictions(predictions)
+    picked = service.select_top_predictions(gated)
     topn_note = service.last_note if service.last_note != note else None
     if topn_note:
         note = f"{note}\n{topn_note}" if note else topn_note

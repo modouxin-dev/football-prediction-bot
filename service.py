@@ -297,6 +297,36 @@ class Prediction:
         """
         return bool(self.asian)
 
+    def recommended_odds(self) -> float | None:
+        """推荐方向上的亚盘赔率。None = 无亚盘或取不到。
+
+        只取**推荐那一侧**的赔率，不取两侧均值——闸门要筛的是
+        「这场推的那个注值不值」，均值会把两侧混成一个没有意义的数。
+        """
+        ah = self.asian
+        if not ah:
+            return None
+        side = self.asian_side()
+        if side is None:
+            return None
+        try:
+            v = float((ah.get(side) or {}).get("odds") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return v if v > 1.0 else None
+
+    def asian_side(self) -> str | None:
+        """亚盘推荐方向：模型赢盘概率更高的那一侧。"""
+        ah = self.asian
+        if not ah:
+            return None
+        prob = ah.get("prob") or {}
+        h = float(prob.get("home") or 0.0)
+        a = float(prob.get("away") or 0.0)
+        if h <= 0 and a <= 0:
+            return None
+        return "home" if h >= a else "away"
+
     @property
     def low_sample(self) -> bool:
         return min(self.home_strength.games_home, self.away_strength.games_away) < LOW_SAMPLE_GAMES
@@ -488,6 +518,10 @@ class PredictionService:
             cache[lid] = model
         return model
 
+    #: 上次推荐闸门的拦截计数（每个原因各多少场）。默认空字典，
+    #: 闸门一旦静默，误杀多少就永远不知道，阈值也就永远调不对。
+    last_gate: dict[str, int] = {}
+
     @staticmethod
     def _day_window(day, tz) -> tuple[datetime, datetime]:
         """自然日 [00:00, 23:59:59] 在 UTC 下的区间。
@@ -581,6 +615,65 @@ class PredictionService:
             except (TypeError, ValueError):
                 vals.append(0.0)
         return max(vals) if vals else 0.0
+
+    def gate_predictions(self, predictions: list[Prediction]) -> list[Prediction]:
+        """推荐闸门：在「有亚盘」之外，再按**置信度**与**赔率区间**筛一遍。
+
+        为什么加这两道
+        --------------
+        置信度（实测标定，可信）：
+            真实赛果回测（3158 场 walk-forward）显示阈值与准确率单调相关：
+                0.00 → 52.18%｜0.45 → 54.00%｜0.55 → 57.30%
+                0.65 → 61.33%｜0.70 → 62.44%
+            这是**用覆盖率换准确率**：推得越少越准，但模型并没有变强。
+
+        赔率区间（未标定，只防极端）：
+            下限挡住「押 1.1 倍刷准确率」——那种比赛命中率 80%+ 却是负 EV，
+            准确率数字好看但毫无用处。
+            上限挡住 5 倍以上的彩票——方差极大，几百场样本内完全不可信。
+
+        ⚠️ 每个被砍的原因都要计数。闸门一旦静默，误杀多少就永远不知道，
+        阈值也就永远调不对。
+        """
+        s = self.settings
+        min_conf = float(getattr(s, "rec_min_confidence", 0.0) or 0.0)
+        min_odds = float(getattr(s, "rec_min_odds", 0.0) or 0.0)
+        max_odds = float(getattr(s, "rec_max_odds", 0.0) or 0.0)
+        if max_odds > 0 and min_odds > 0 and max_odds < min_odds:
+            min_odds, max_odds = max_odds, min_odds
+
+        stat = {"in": len(predictions or []), "no_handicap": 0,
+                "low_confidence": 0, "odds_low": 0, "odds_high": 0,
+                "no_odds": 0, "pass": 0}
+        kept: list[Prediction] = []
+        for p in predictions or []:
+            if not p.recommendable:
+                stat["no_handicap"] += 1
+                continue
+            if min_conf > 0 and self.confidence_of(p) < min_conf:
+                stat["low_confidence"] += 1
+                continue
+            odds = p.recommended_odds()
+            if odds is None:
+                # 有亚盘却拿不到赔率：不拦（亚盘门槛已是最硬的筛子），
+                # 只计数——若它长期不为 0，说明解析有问题，值得查。
+                stat["no_odds"] += 1
+            elif min_odds > 0 and odds < min_odds:
+                stat["odds_low"] += 1
+                continue
+            elif max_odds > 0 and odds > max_odds:
+                stat["odds_high"] += 1
+                continue
+            kept.append(p)
+        stat["pass"] = len(kept)
+        self.last_gate = stat
+        if stat["in"] and not kept:
+            self.last_note = (
+                f"ℹ️ 今日 {stat['in']} 场候选全部未通过推荐闸门"
+                f"（无亚盘 {stat['no_handicap']} · 把握度不足 {stat['low_confidence']}"
+                f" · 赔率过低 {stat['odds_low']} · 赔率过高 {stat['odds_high']}），本次不推送。"
+            )
+        return kept
 
     def select_top_predictions(
         self, predictions: list[Prediction], *,
@@ -1265,6 +1358,10 @@ class PredictionService:
                 # 两者混用会让 T 被市场成分稀释到 ≈1.0，泊松的偏差得不到修正。
                 "model_probs": _model_probs_of(analysis),
                 "market_blended": bool(analysis.get("market_blended")),
+                # 把握度（融合后 top1 概率）：落库用于「按把握度分档统计命中率」。
+                # 必须**当时落库**而不是事后重算——事后算会用当前模型参数，
+                # 分档统计就变成「当前参数下的值」，无法用于验证闸门阈值。
+                "confidence": round(max(final_p), 6),
                 # 决策链证据：阶段式概率 + 输入特征 + 市场口径。
                 # 落库而非现算——事后重算会重新拉积分榜并再烧一次额度，
                 # 且可能算出一个与当初推送不一致的结论。

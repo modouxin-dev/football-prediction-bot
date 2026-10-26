@@ -92,6 +92,15 @@ def test_run_push_sends_html_messages_with_keyboard_to_chat_id():
     让用户能从汇总一键跳进赛程看单场细节。
     """
     app, _, _ = make_app(FakeAPI({2026: live_fixtures(2, 5)}), warm=False)
+    # 本例断言的是「2 场合成 1 条汇总」，不是闸门逻辑（闸门由
+    # test_recommend_gate 覆盖）。默认阈值 0.55 会拦掉样本里的低把握场次，
+    # 使 pushed 数变成 1，测的就跑偏了 —— 故这里显式关掉闸门。
+    # Settings 是 frozen dataclass，只能整体替换，不能逐字段赋值。
+    import dataclasses
+    open_settings = dataclasses.replace(
+        SETTINGS, rec_min_confidence=0.0, rec_min_odds=0.0, rec_max_odds=0.0)
+    app.bot_data["settings"] = open_settings
+    app.bot_data["service"].settings = open_settings
     result = run(main.run_push(app))
     assert result.sent == 2 and result.note is None
     # 汇总压成 1 条：2 场比赛只应产生 1 次发送

@@ -97,6 +97,12 @@ class _Service:
     async def build_predictions(self, **kw):
         return self._p
 
+    def gate_predictions(self, predictions):
+        # 本批测试断言的是收件人路由，不是闸门逻辑（闸门由 test_recommend_gate 覆盖），
+        # 这里必须原样返回，否则场次被改动后测的就跑偏了。
+        self.last_gate = {"in": len(predictions or []), "pass": len(predictions or [])}
+        return predictions
+
     def select_top_predictions(self, predictions, **kw):
         # 本批测试断言的是收件人路由，不是筛选逻辑（筛选由 test_topn_* 覆盖），
         # 这里必须原样返回，否则 1 场候选会被下限逻辑改写，测的就跑偏了。
