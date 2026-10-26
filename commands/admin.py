@@ -282,6 +282,15 @@ async def settlebackfill_cmd(update, context) -> None:
         lines.append("")
         lines.append(f"取到比赛　　{res['fetched_fixtures']} 场"
                      f"（其中已完场 {res['finished_fixtures']}）")
+        # 这批僵尸行到底属于哪些联赛、哪个时间段——看不到就只能靠猜。
+        # 若显示的联赛不在当前配置里，说明是历史配置遗留，
+        # 按当前联赛过滤永远取不到。
+        if res.get("leagues"):
+            lg = "、".join(f"{esc(k)} {v}" for k, v in res["leagues"][:5])
+            lines.append(f"僵尸行联赛　{lg}")
+        dr = res.get("date_range") or ("", "")
+        if dr[0]:
+            lines.append(f"僵尸行日期　{esc(dr[0])} ~ {esc(dr[1])}")
         sample = service.repo.stale_pending_sample_ids()
         if sample:
             lines.append(f"库内 ID 样例　<code>{esc(', '.join(sample[:4]))}</code>")
