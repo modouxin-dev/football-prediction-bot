@@ -627,6 +627,44 @@ TEAM_NAMES: dict[str, str] = {
     "Atlante": "亚特兰特",
     "Mazatlan": "马萨特兰", "Mazatlán": "马萨特兰", "Mazatlan FC": "马萨特兰",
 
+    # ── 英冠 / 英甲（数据源常下发去词缀短名，必须两条都收）──────────
+    # 实测：API-Football 对英格兰球队下发 "Norwich"、"Luton"、"QPR" 这类短名，
+    # 而字典原本只收 "Norwich City FC"。归一键不同（norwich vs norwich city），
+    # 短名会整条落空。故完整名与短名都写。
+    "Southampton FC": "南安普顿", "Southampton": "南安普顿",
+    "Leicester City FC": "莱斯特城", "Leicester City": "莱斯特城",
+    "Leicester": "莱斯特城",
+    "Huddersfield Town": "哈德斯菲尔德", "Huddersfield": "哈德斯菲尔德",
+    "Cardiff City": "加的夫", "Cardiff": "加的夫",
+    "Sheffield United": "谢菲尔德联", "Sheffield Utd": "谢菲尔德联",
+    "Coventry City FC": "考文垂", "Coventry City": "考文垂",
+    "Norwich City": "诺维奇", "Norwich": "诺维奇",
+    "Luton Town": "卢顿", "Luton": "卢顿",
+    "Reading FC": "雷丁", "Reading": "雷丁",
+    "Queens Park Rangers": "女王公园巡游者", "QPR": "女王公园巡游者",
+    "Middlesbrough FC": "米德尔斯堡", "Middlesbrough": "米德尔斯堡",
+    "Watford FC": "沃特福德", "Watford": "沃特福德",
+    "Wigan Athletic": "维冈", "Wigan": "维冈",
+    # ── 德甲 ────────────────────────────────────────
+    "1899 Hoffenheim": "霍芬海姆",
+    # ── 西乙 / 法乙 / 意乙 ───────────────────────────
+    "Deportivo La Coruna": "拉科鲁尼亚", "Deportivo La Coruña": "拉科鲁尼亚",
+    "Estac Troyes": "特鲁瓦", "ES Troyes AC": "特鲁瓦", "Troyes": "特鲁瓦",
+    "Le Mans FC": "勒芒", "Le Mans": "勒芒", "Le Mans UC72": "勒芒",
+    "Frosinone Calcio": "弗罗西诺内", "Frosinone": "弗罗西诺内",
+    # ── 荷甲 / 荷乙 ──────────────────────────────────
+    "ADO Den Haag": "海牙",
+    "SC Cambuur": "坎布尔", "Cambuur": "坎布尔",
+    # ── 葡超 / 葡甲 ──────────────────────────────────
+    "Sport Lisboa e Benfica": "本菲卡", "Sport Lisboa Benfica": "本菲卡",
+    "Alverca": "阿尔韦卡", "FC Alverca": "阿尔韦卡",
+    "Academico Viseu": "维塞乌", "Académico de Viseu": "维塞乌",
+    "Academico de Viseu FC": "维塞乌",
+    # ── 巴甲 / 哥伦比甲 ──────────────────────────────
+    "Atletico Paranaense": "巴拉纳竞技",
+    "Deportivo Pasto": "帕斯托", "Deportivo Pasto SA": "帕斯托",
+    "Deportes Tolima": "托利马体育",
+
 }
 
 
