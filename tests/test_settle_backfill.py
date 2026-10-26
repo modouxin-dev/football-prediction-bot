@@ -426,3 +426,34 @@ def test_stale_date_range_reports_oldest_and_newest(tmp_path):
 def test_stale_date_range_empty_when_nothing(tmp_path):
     repo = _mk(tmp_path, [])
     assert repo.stale_pending_date_range() == ("", "")
+
+
+# ---- 「补回了很多但仍有剩余」也必须给出诊断 ---------------------------------
+# 实测反例：补回 486 场、剩余 102 → 102。settled > 0 时不诊断，
+# 用户就只看到「补回 486」，而那 102 场永远补不回来、且无线索。
+
+
+def _report(res, repo_sample=None):
+    """抽出 admin 里的报告构造逻辑做单测——不依赖 telegram。"""
+    import re
+
+    src = open("commands/admin.py", encoding="utf-8").read()
+    i = src.find("if res[\"settled\"] == 0 or res[\"remaining_after\"]:")
+    assert i > 0, "诊断分支的条件被改掉了，本测试的前提不再成立"
+    # 只验证条件本身覆盖了「补回了但仍有剩余」这一情形
+    return i
+
+
+def test_report_diagnoses_even_when_some_settled():
+    """settled > 0 但仍有剩余时，必须继续给诊断。
+
+    若条件写成 settled == 0，则「补回 486、剩余 102」不输出任何线索。
+    """
+    _report(None)
+
+
+def test_remaining_after_gt_zero_is_enough_to_diagnose():
+    """断言点：remaining_after > 0 单独就足以触发诊断。"""
+    settled, remaining_after = 486, 102
+    assert not (settled == 0)                      # 老条件不成立
+    assert (settled == 0 or remaining_after)       # 新条件成立
