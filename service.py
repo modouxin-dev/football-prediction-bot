@@ -25,6 +25,7 @@ from config import Settings
 from context import (context_factors, merge_factors, player_ratings,
                      squad_positions, weighted_absence_load)
 from data_source import DataSourceError
+from formatkit import _team_key
 from repository import PredictionRepository
 from signal_capture import capture as capture_signal_ab, split_factors
 from signal_ab import CHANGE_APPLIED, SIGNAL_LINEUP, SIGNAL_RATING
@@ -2020,10 +2021,20 @@ class PredictionService:
         Args:
             max_days: 本次最多补多少天（额度保护）。剩余的天下次再补。
 
-        ID 匹配必须兼容两种写法：库里 ``predictions.fixture_id`` 可能是
-        ``fd-555051``（备用源前缀）或 ``555051``（主源），而数据源按日期
-        返回的永远是其中一种。只精确匹配一种会导致「取到了却补不回来」。
-        这个坑在赛程页 JOIN 上已经踩过一次（PR #103），此处不能重犯。
+        ID 匹配的两层问题
+        ------------------
+        第一层：库里可能是 ``fd-555051``（备用源前缀）或 ``555051``（主源），
+        只精确匹配一种会导致「取到了却补不回来」（PR #103 已处理）。
+
+        第二层（更隐蔽，**前缀剥离对它无效**）：两个源的 ID **不在同一个
+        编号空间**。主源 API-Football 的 ID 是 1500000 量级；备用源
+        football-data.org 用的是自己的编号（实测样例 560593 量级）。
+        所以 ``fd-560593`` 剥掉前缀得到 ``560593``，与主源返回的
+        ``1570410`` 毫无关系——线上线下都对不上。
+
+        前缀剥离只对「同一源内部」有效（赛程页 JOIN 就是那种情况），
+        对**跨源**匹配必然失败。故此处在 ID 匹配之后再加一道
+        「日期 + 双方队名」兜底（见 _match_by_teams）。
 
         Returns:
             {scanned_days, settled, remaining_before, remaining_after,
@@ -2041,10 +2052,12 @@ class PredictionService:
                     "remaining_after": self.repo.count_stale_pending(),
                     "days_done": 0, "failed_days": [],
                     "fetched_fixtures": 0, "finished_fixtures": 0,
-                    "unmatched_sample": []}
+                    "unmatched_sample": [], "matched_by_name": 0,
+                    "id_kinds": self.repo.stale_pending_id_kinds()}
 
         before = self.repo.count_stale_pending()
         settled = 0
+        matched_by_name = 0
         failed: list[str] = []
         fetched = 0
         finished = 0
@@ -2077,6 +2090,7 @@ class PredictionService:
                 # 该日无数据（可能是无效日期或数据源无该日记录）。
                 # 不标记为失败——它不是错误，只是没取到东西。
                 continue
+            finished_today: list[dict] = []
             for fx in by_id.values():
                 short = ((fx.get("fixture") or {}).get("status") or {}).get("short")
                 if short not in _FINISHED:
@@ -2086,11 +2100,22 @@ class PredictionService:
                 if home is None or away is None:
                     continue
                 finished += 1
+                finished_today.append(fx)
                 fid = str((fx.get("fixture") or {}).get("id"))
                 if self._settle_any_id(fid, int(home), int(away), fx):
                     settled += 1
                 elif len(unmatched) < 6:
                     unmatched.append(fid)
+
+            # ── 队名兜底：跨源 ID 天然对不上时的唯一出路 ──
+            # 备用源行的 ID（fd-560593）在主源的编号空间里根本不存在，
+            # 再怎么剥离前缀也匹配不上。但这些行有 home/away 队名和日期，
+            # 而当天全部比赛**已经取回来了**，不需要额外请求就能按名字定位。
+            # 不匹配就什么都不做（安全）；匹配上且唯一才写库。
+            if finished_today:
+                by_name = self._settle_by_team_names(d, finished_today)
+                settled += by_name
+                matched_by_name += by_name
 
         after = self.repo.count_stale_pending()
         result = {
@@ -2106,6 +2131,8 @@ class PredictionService:
             # 补回 0 场时的定位信息：这批僵尸行到底是哪些联赛、哪些日期。
             "leagues": self.repo.stale_pending_leagues(),
             "date_range": self.repo.stale_pending_date_range(),
+            "matched_by_name": matched_by_name,
+            "id_kinds": self.repo.stale_pending_id_kinds(),
         }
         if settled:
             log.info("结算回填：补回 %d 场（%d→%d）", settled, before, after)
@@ -2118,6 +2145,59 @@ class PredictionService:
                         len(days), fetched, finished,
                         self.repo.stale_pending_sample_ids(), unmatched)
         return result
+
+    def _settle_by_team_names(self, day: str, finished: list[dict]) -> int:
+        """按「日期 + 双方队名」给跨源 ID 的僵尸行补赛果。
+
+        为什么需要：备用源（football-data.org）的 ID 在自己的编号空间里
+        （实测样例 560593 量级），主源 API-Football 是 1500000 量级。
+        ``fd-560593`` 剥掉前缀也变不出主源的 ID，ID 匹配必然失败。
+
+        但这些行存了 home/away 队名和 kickoff 日期，而当天全部比赛
+        **已经取回来了**，不需要额外请求——按名字定位不花额度。
+
+        安全边界（宁可不补，也不写错比分）：
+        - 只有**双方队名都匹配**才考虑；
+        - 当天候选中**必须恰好一个**，有歧义就放弃；
+        - 比分缺失或不是已完场的不参与（由调用方保证）。
+
+        写错的代价比不写高得多：错误的比分会直接进命中率统计，
+        污染模型评估；而少补一场只是样本少一点。
+
+        Returns:
+            成功补回的场次数。
+        """
+        rows = self.repo.stale_pending_rows_for_day(day)
+        if not rows:
+            return 0
+        # 预先建索引，避免对每行都遍历全部比赛
+        index: dict[tuple[str, str], list[dict]] = {}
+        for fx in finished:
+            teams = fx.get("teams") or {}
+            hk = _team_key(((teams.get("home") or {}).get("name")) or "")
+            ak = _team_key(((teams.get("away") or {}).get("name")) or "")
+            if not hk or not ak:
+                continue
+            index.setdefault((hk, ak), []).append(fx)
+
+        done = 0
+        for fid, home_name, away_name in rows:
+            hk = _team_key(home_name or "")
+            ak = _team_key(away_name or "")
+            if not hk or not ak:
+                continue
+            cands = index.get((hk, ak)) or []
+            if len(cands) != 1:      # 0 个=没匹配；≥2 个=有歧义，一律放弃
+                continue
+            fx = cands[0]
+            goals = fx.get("goals") or {}
+            home, away = goals.get("home"), goals.get("away")
+            if home is None or away is None:
+                continue
+            if self.repo.settle(str(fid), int(home), int(away)):
+                self._sync_elo(fx, int(home), int(away))
+                done += 1
+        return done
 
     def _settle_any_id(self, fid: str, home: int, away: int,
                        fixture: dict[str, Any]) -> bool:
