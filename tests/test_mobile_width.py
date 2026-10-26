@@ -93,8 +93,10 @@ def test_team_mobile_prefers_chinese_short_name():
 
 def test_team_mobile_never_invents_chinese():
     """未收录的队宁可显示（截断的）英文原名，也不编造中文名。"""
-    out = team_mobile("Ipswich Town FC")
-    assert "Ipswich" in out
+    # 同样不能用真实队名当「未收录」样本（Ipswich 已被收录，见
+    # test_fixture_list_polish 的注释），改用虚构队名。
+    out = team_mobile("Nowhere Rovers")
+    assert "Nowhere" in out
     assert display_width(out) <= 16
 
 
