@@ -21,6 +21,7 @@ from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
 from repository import BRIER_RANDOM, quota_today
 from scheduler import DAILY_JOB, run_push
+import oddsprobe_log as _probe_log
 from support import describe_error, reply_html
 from templates import LEAGUE_SHORT, resolve_league
 from tghtml import normalize
@@ -1317,26 +1318,39 @@ ODDS_PROBE_MAX_TRIES = 5
 
 
 async def oddsprobe_cmd(update, context) -> None:
-    """/oddsprobe — 导出单场赔率的**真实盘口结构**（盘口 id / 名称 / 选项）。
+    """/oddsprobe — 探测单场的**真实盘口结构**（盘口 id / 名称 / 选项）。
 
     为什么需要 / Why: 亚洲盘在数据源码表里的 id 与选项写法**必须实测确认**。
     凭记忆猜 id 会导致解析永远取不到值——而取不到值是「静默」的：
     不报错、不告警，只是推荐里没有亚盘，看不出是没做还是没取到。
 
-    这里把一场真实比赛的**全部盘口**原样列出来，据此确定：
-    - 亚盘（让球）对应哪个 bet id / name
-    - 其选项（values）的写法，如 "Home -0.5" / "Away +1.25"
-    - 该套餐是否真的返回亚盘（有些套餐只给 1X2）
+    为什么不把全部盘口发回 Telegram（真实事故）：
+    一场比赛的盘口全列出来有几十个 bet，拼成单条远超 Telegram 4096 上限，
+    抛 BadRequest: Message is too long；而异常发生在**最后一步**——
+    前面取数、解析全白做，用户侧只看到「机器人没回复」，
+    分不清是命令没跑、没取到数据，还是消息太长。
 
-    不加推断、不做猜测：只把数据源说了什么原样打印。
+    因此本命令改为三层保障：
+    1. **先回一条「正在探测」**：让用户立刻知道命令已被接收
+    2. **结果先落盘**（oddsprobe_log）：不依赖任何一条消息是否发送成功
+    3. **只回精简摘要**（每盘一行 id·名称·选项数），保证一定发得出去
+
+    完整选项（values）从网页端点 ``/oddsprobe`` 取——JSON 无长度限制。
     """
     await _typing(update)
     args = (context.args or []) if getattr(context, "args", None) else []
     fid = str(args[0]).strip() if args and str(args[0]).strip() else None
 
-    # ⚠️ 此前这里调的是 _settings() / _api()，而 admin 模块里**根本没有
-    # 这两个函数**——命令一跑就 NameError。它注册了却从没被真正执行过，
-    # 所以一直没暴露。统一走 bot_data，与其他命令一致。
+    # ① 先回一条，避免「发了命令、机器人没反应」的困惑
+    try:
+        await reply_html(update.effective_message,
+                         section_join([section("💱 盘口探测", [
+                             f"⏳ 正在探测 fixture <code>{esc(fid or '自动选场')}</code>…",
+                             f"构建版本　<code>{esc(_build_version())}</code>",
+                         ])]), None)
+    except Exception:
+        pass  # 首条发不出去也要继续探测：结果会落盘
+
     app = context.application
     settings = app.bot_data.get("settings")
     router = app.bot_data.get("api")
@@ -1352,6 +1366,7 @@ async def oddsprobe_cmd(update, context) -> None:
     try:
         probe = await api.get_odds(int(fid)) if fid else None
     except Exception as exc:  # noqa: BLE001 - 诊断要把原因显示出来
+        _probe_log.record_run(fid or "", False, 0, describe_error(exc))
         await reply_html(update.effective_message,
                          section_join([section("💱 盘口探测", [
                              f"❌ 指定 fixture {esc(fid or '')} 取赔率失败：{esc(describe_error(exc))}",
@@ -1367,8 +1382,7 @@ async def oddsprobe_cmd(update, context) -> None:
             # ⚠️ 直接传 date 对象，不调 .isoformat()。
             # 此前写的是 (today + timedelta(days=off)).isoformat()，
             # 生成 str 后传给接口——而 str 没有 .isoformat()，接口内部
-            # 再调一次就抛 AttributeError。接口入口现已归一化（_as_date），
-            # 但这里不该依赖下游兜底：源头不产生字符串就不会有这个错。
+            # 再调一次就抛 AttributeError。源头不产生字符串就不会有这个错。
             #
             # 同时限制探测场次：/odds 是付费端点，逐个试会快速烧额度。
             tried = 0
@@ -1388,6 +1402,7 @@ async def oddsprobe_cmd(update, context) -> None:
                 if probe or tried >= ODDS_PROBE_MAX_TRIES:
                     break
         except Exception as exc:  # noqa: BLE001
+            _probe_log.record_run(fid or "", False, 0, describe_error(exc))
             await reply_html(update.effective_message,
                              section_join([section("💱 盘口探测", [
                                  f"❌ 自动选场失败：{esc(describe_error(exc))}",
@@ -1398,6 +1413,7 @@ async def oddsprobe_cmd(update, context) -> None:
             return
 
     if not probe:
+        _probe_log.record_run(fid or "", False, 0, "未取到任何赔率")
         await reply_html(update.effective_message,
                          section_join([section("💱 盘口探测", [
                              "⚠️ 未取到任何赔率。可能该套餐不含 /odds，或近期均无开盘比赛。",
@@ -1415,31 +1431,30 @@ async def oddsprobe_cmd(update, context) -> None:
                 key = (str(bet.get("id")), str(bet.get("name") or "").strip())
                 if key in seen:
                     continue
-                vals = []
-                for v in (bet.get("values") or [])[:6]:
-                    vals.append(f"{v.get('value')}={v.get('odd')}")
-                seen[key] = {"vals": vals, "n": len(bet.get("values") or [])}
+                seen[key] = {"bet": bet, "n": len(bet.get("values") or [])}
 
+    # ② 先落盘：完整结构存库，后续无论消息发不发得出去都能取到
+    n_saved = _probe_log.record_bets(
+        fid, [info["bet"] for info in seen.values()])
+    _probe_log.record_run(fid, True, len(seen))
+
+    # ③ 只回精简摘要：每个盘一行，几十个盘也就几十行，绝不会超 4096。
+    # 完整 values 走网页端点 /oddsprobe（JSON 无长度限制）。
     lines = [f"探测对象　fixture <code>{esc(str(fid))}</code>",
              f"构建版本　<code>{esc(_build_version())}</code>",
-             f"博彩公司　{len(books)} 家", ""]
+             f"博彩公司　{len(books)} 家",
+             f"盘口总数　{len(seen)} 个（已存库 {n_saved} 条）", ""]
     for (bid, bname), info in sorted(seen.items(), key=lambda kv: kv[0][0]):
         head = f"id={bid} · {bname}" if bname else f"id={bid}"
         lines.append(f"<b>{esc(head)}</b>　（{info['n']} 项）")
-        lines.append("　" + esc(" / ".join(info["vals"]) or "无选项"))
 
     lines.append("")
-    lines.append("<i>把上面这段原样发给我即可据此实现亚盘解析——"
-                 "不需要你判断哪个是亚盘。</i>")
+    lines.append("<i>完整选项见网页端点 <code>/oddsprobe</code>——"
+                 "Telegram 单条有 4096 上限，全量选项放不下。</i>")
 
-    # ⚠️ 必须走 reply_html 分片，不能直接 reply_text。
-    # 实测（生产日志 2026-10-26 07:54）：一场比赛的盘口全列出来有几十个 bet，
-    # 拼成单条远超 Telegram 4096 上限，抛
-    #   telegram.error.BadRequest: Message is too long
-    # 而异常发生在最后一步——前面取数、解析全部白做，用户收不到任何回复。
-    # reply_html 内部调 split_html_blocks，按行切并在拆口处闭合/重开标签。
     await reply_html(update.effective_message,
                      section_join([section("💱 盘口探测", lines)]), None)
+
 
 
 async def _typing(update) -> None:

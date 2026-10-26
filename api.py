@@ -1013,6 +1013,40 @@ async def teammiss(limit: int = 300) -> JSONResponse:
     })
 
 
+@app.get("/oddsprobe")
+async def odds_probe(limit: int = 200) -> JSONResponse:
+    """导出最近一次 /oddsprobe 探测到的**完整盘口结构**（含全部选项）。
+
+    ⚠️ 为什么要走网页端点而不是 Telegram：
+    一场比赛有几十个盘口，全部列出远超 Telegram 单条 4096 上限
+    （实测 BadRequest: Message is too long，异常发生在最后一步，
+    用户侧只看到「机器人没回复」）。JSON 端点没有这个限制。
+
+    管理员打开本 URL 即可复制盘口 id / 名称 / 选项写法，
+    据此实现亚盘解析——不凭记忆猜 bet id。
+
+    同时返回最近几次探测的成败记录 ``runs``：
+    用于区分「命令没跑」「跑了但没取到盘口」「取到了但消息发不出去」。
+    """
+    limit = max(1, min(int(limit), 1000))
+    try:
+        import oddsprobe_log
+        bets = oddsprobe_log.latest_bets(limit=limit)
+        runs = oddsprobe_log.latest_runs(limit=10)
+        fid = oddsprobe_log.latest_fixture_id()
+    except Exception as exc:
+        log.warning("读取盘口探测结果失败：%s", exc)
+        bets, runs, fid = [], [], None
+    return JSONResponse({
+        "version": _VERSION,
+        "fixture_id": fid,
+        "count": len(bets),
+        "bets": bets,
+        "runs": runs,
+        "hint": "bet id 与选项写法以这里为准；亚盘通常名为 Asian Handicap。",
+    })
+
+
 @app.get("/live")
 async def live(detail: int = 1) -> JSONResponse:
     """正在进行的比赛：实时比分 + 阵容 + 伤停 + 赔率。
