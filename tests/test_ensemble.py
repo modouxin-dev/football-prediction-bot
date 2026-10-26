@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 import math
 
 import pytest
@@ -309,7 +311,14 @@ def test_service_survives_without_odds():
     api = FakeAPI({2026: default_fixtures()}, odds=[])
     svc = PredictionService(settings, api)
     preds = asyncio.run(svc.build_predictions(now=NOW))
-    assert preds
+    # 无赔率 → 无亚盘 → 按「无盘不推荐」策略整场不推荐（项目方向：准确率优先）。
+    # 这里守的是「集成器在无市场路时仍能算出结论」，故绕过推荐门槛直接造一场：
+    # 单独调 _predict_one 取到 Prediction 本体来断言集成口径。
+    assert preds == [], "无亚盘时不应产生推荐"
+    raw = asyncio.run(svc._predict_one(
+        asyncio.run(svc._model_for(39)), NOW + timedelta(hours=2),
+        default_fixtures()[0]))
+    preds = [raw]
     for p in preds:
         ens = p.analysis.get("ensemble") or {}
         # 无赔率时 market 不应出现在已用列表里
