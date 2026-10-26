@@ -286,7 +286,8 @@ class WalkForwardBacktester:
                  use_dsa: bool = False, use_dsa_clamp: bool = False,
                  use_sot: bool = False, use_calib: bool = False,
                  use_market: bool = False,
-                 market_weight: float | None = None) -> None:
+                 market_weight: float | None = None,
+                 elo_blend: float | None = None) -> None:
         self.min_history = max(0, int(min_history))
         # 市场锚定融合权重：None → 纯市场（历史口径）；0~1 → w·市场+(1−w)·模型。
         # 生产是融合口径（service 传 MARKET_BLEND_WEIGHT，默认 0.75），
@@ -308,6 +309,11 @@ class WalkForwardBacktester:
         # 回测必须同口径，否则验证的不是真实上线行为。
         self.use_market = bool(use_market)
         self.use_elo = bool(use_elo)
+        # Elo 差 → λ 系数的强度。None 表示沿用 elo.ELO_BLEND（0.6，当前默认）。
+        # 可调是为了让「该不该启用 Elo、融合多强」能被回测回答——
+        # 0.6 是保守取值，不是文献定值，Hvattum & Arntzen (2010, n=30524)
+        # 只说明 Elo 与统计模型互补，未给出跨联赛可用的融合强度。
+        self.elo_blend = elo_blend
         self.use_dc = bool(use_dc)
         # DSA：需要 history 里累积逐场日志（见 _observe）
         self.use_dsa = bool(use_dsa)
@@ -424,7 +430,10 @@ class WalkForwardBacktester:
         if self.use_elo:
             rh = self._ratings.get(str(home_id), DEFAULT_RATING)
             ra = self._ratings.get(str(away_id), DEFAULT_RATING)
-            elo_factor = elo_multiplier(rh, ra)
+            elo_factor = elo_multiplier(
+                rh, ra,
+                **({"blend": self.elo_blend} if self.elo_blend is not None else {}))
+
 
         # λ 基准必须是**进球**均值。
         # 射正数口径下 model.avg_*_goals 是射正均值（约 4~5），
@@ -575,6 +584,11 @@ class WalkForwardBacktester:
                     slot["hit"] += hit
                     report.records.append({
                         "fixture_id": m.get("fixture_id") or m.get("id"),
+                        # 三项概率**必须**保留：Brier 与 RPS 都需要完整向量，
+                        # 只有 prob（预测方向的单项概率）算不出来。
+                        # 缺它就无法对候选模型做配对 bootstrap，
+                        # 也就无法回答「该不该启用 Elo」。
+                        "probs": [float(probs[0]), float(probs[1]), float(probs[2])],
                         "prob": probs[pred],
                         "predicted": OUTCOME_NAMES[pred],
                         "actual": OUTCOME_NAMES[actual],
