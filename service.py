@@ -1302,6 +1302,28 @@ class PredictionService:
         name = str(lg.get("name") or "").strip().lower()
         return any(k in name for k in cls._NAT_KEYWORDS)
 
+    async def _fetch_all_by_date_raw(self, day) -> list[dict[str, Any]]:
+        """某一天的全部比赛，**不做联赛筛选**，供结算回填专用。
+
+        与 ``_fetch_all_by_date`` 的两点关键差异，都是回填场景硬要求的：
+
+        1. **接受 str 或 date**。``stale_pending_days()`` 返回的是 ISO
+           字符串，而取数接口内部调 ``day.isoformat()``——str 没有该方法，
+           会抛 AttributeError。实测：
+           ``str("2026-10-19").isoformat()`` → AttributeError。
+           而该异常会被本方法内层的 except 吞掉并返回 []，外层看到「没抛
+           异常」就记为「取数成功」，于是出现「扫描 17 天、成功取数 17 天、
+           取到比赛 0 场、补回 0 场」这种全程无报错却毫无进展的假象。
+
+        2. **不做联赛筛选**。回填靠 fixture_id 精确匹配，ID 本身就是足够
+           严格的过滤条件；而 ``_fetch_all_by_date`` 只保留当前配置的联赛，
+           若僵尸行属于历史配置过、后来去掉的联赛，就永远取不到。
+
+        异常照常向上抛——回填要把它记进 failed_days，不能静默。
+        """
+        d = date.fromisoformat(day) if isinstance(day, str) else day
+        return await self.api.get_fixtures_by_date(d)
+
     async def _fetch_all_by_date(self, day) -> list[dict[str, Any]]:
         """某一天的全部赛程：一次请求拿全天，再按需筛选。
 
@@ -2029,7 +2051,21 @@ class PredictionService:
         unmatched: list[str] = []
         for d in days:
             try:
-                fixtures = await self._fetch_all_by_date(d)
+                # ⚠️ 必须转成 date 再传：stale_pending_days() 返回的是
+                # **ISO 字符串**，而取数接口内部调 day.isoformat()——
+                # str 没有该方法，会抛 AttributeError。而这个异常会被
+                # 取数函数内层的 except 吞掉并静默返回 []，于是外层看到
+                # 「没抛异常」就记为「取数成功」，实际取到 0 场。
+                # 实测：str("2026-10-19").isoformat() → AttributeError。
+                # 这个坑让回填扫了 17 天、显示「成功取数 17 天」，
+                # 却一场都没补回来，且不报错——最难排查的一类故障。
+                #
+                # ⚠️ 同时刻意不走 _fetch_all_by_date：那个方法按**当前
+                # 配置的联赛**过滤，而僵尸行可能属于历史配置过、后来去掉
+                # 的联赛（或国家队赛事）。回填靠 fixture_id 精确匹配，
+                # ID 本身就是足够严格的过滤条件，再加联赛过滤只会漏掉
+                # 本该补回的场次。
+                fixtures = await self._fetch_all_by_date_raw(d)
             except Exception as exc:
                 log.warning("结算回填：%s 取数失败：%s", d, exc)
                 failed.append(d)
@@ -2067,6 +2103,9 @@ class PredictionService:
             "fetched_fixtures": fetched,
             "finished_fixtures": finished,
             "unmatched_sample": unmatched,
+            # 补回 0 场时的定位信息：这批僵尸行到底是哪些联赛、哪些日期。
+            "leagues": self.repo.stale_pending_leagues(),
+            "date_range": self.repo.stale_pending_date_range(),
         }
         if settled:
             log.info("结算回填：补回 %d 场（%d→%d）", settled, before, after)
