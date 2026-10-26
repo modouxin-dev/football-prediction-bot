@@ -1446,6 +1446,79 @@ class PredictionRepository:
             log.warning("取样僵尸行 ID 失败：%s", exc)
             return []
 
+    def period_stats(self, days: int) -> dict[str, Any]:
+        """按时间窗口（最近 N 天）统计胜率、平均赔率与 ROI。
+
+        为什么单列：只有「总命中率」看不出趋势。模型近期是否走坏、
+        某段时间是不是靠高赔冷门堆出来的命中率，都必须分窗口看。
+
+        口径说明（三个数字都不能只看一个）
+        --------------------------------
+        - ``rate``：命中率。高不等于赚——押冷门也能有 30% 命中率。
+        - ``avg_odds``：推荐项的平均赔率。高赔 + 高命中才是有用的组合。
+        - ``roi``：每场押 1 单位的净收益 / 场次。命中拿 (赔率−1)，
+          未中亏 1。**这是唯一把两者合起来的指标**，也是用户真正关心的。
+
+        ⚠️ 赔率取自 ``inputs.odds``（预测当时落库的市场报价）。老记录
+        没有这个字段 → 归入 ``no_odds`` 并从 ROI 计算中剔除，**不做
+        假设填充**：用平均赔率补会虚报 ROI，那是自欺欺人。
+
+        Args:
+            days: 窗口天数（7=周，30=月）
+
+        Returns:
+            {days, total, hit, rate, avg_odds, roi, no_odds, stake}
+        """
+        try:
+            conn = self._connect()
+            rows = list(conn.execute(
+                "SELECT result, actual_home, actual_away, inputs, kickoff "
+                "FROM predictions WHERE actual_home IS NOT NULL "
+                "AND actual_away IS NOT NULL AND kickoff IS NOT NULL "
+                "AND kickoff >= ? ORDER BY kickoff",
+                ((datetime.now(timezone.utc) - timedelta(days=int(days))).isoformat(),),
+            ))
+        except Exception as exc:
+            log.warning("统计 %d 天窗口失败：%s", days, exc)
+            return {"days": int(days), "total": 0, "hit": 0, "rate": None,
+                    "avg_odds": None, "roi": None, "no_odds": 0, "stake": 0}
+
+        total = hit = no_odds = 0
+        odds_sum = 0.0
+        odds_n = 0
+        returned = 0.0      # 命中场次返还总额（含本金）
+        for r in rows:
+            actual = _outcome(r["actual_home"], r["actual_away"])
+            if actual is None:
+                continue
+            total += 1
+            ok = (r["result"] == actual)
+            if ok:
+                hit += 1
+            # 赔率：inputs 是 JSON，没有该字段的老记录如实跳过
+            picked = _odds_of(r["inputs"], r["result"])
+            if picked is None:
+                no_odds += 1
+                continue
+            odds_sum += picked
+            odds_n += 1
+            if ok:
+                returned += picked
+
+        stake = float(odds_n)   # 只有有赔率的场次计入 ROI 本金
+        return {
+            "days": int(days),
+            "total": total,
+            "hit": hit,
+            "rate": (hit / total) if total else None,
+            "avg_odds": (odds_sum / odds_n) if odds_n else None,
+            # ROI：(返还 − 本金) / 本金。odds_n=0 时为 None 而不是 0——
+            # 0 会被读成「打平」，实际是「没有数据」。
+            "roi": ((returned - stake) / stake) if stake else None,
+            "no_odds": no_odds,
+            "stake": int(stake),
+        }
+
     def stale_pending_rows_for_day(self, day: str) -> list[tuple[str, str, str]]:
         """某天的僵尸行 (fixture_id, home, away)，供「队名兜底」匹配。
 
@@ -2621,6 +2694,42 @@ def brier_logloss(probs: dict[str, float], actual: str) -> tuple[float, float] |
     logloss = -math.log(max(vec[outcome_index], LOGLOSS_FLOOR))
     return brier, logloss
 
+
+
+# 预测方向（中文，与 _outcome 一致）→ 赔率字典的键（英文）
+_RESULT_TO_ODDS_KEY = {"主胜": "home", "平局": "draw", "客胜": "away",
+                       "home": "home", "draw": "draw", "away": "away"}
+
+
+def _odds_of(raw_inputs: Any, result: Any) -> float | None:
+    """从 inputs JSON 里取「推荐方向对应的赔率」。
+
+    推荐方向 result 是 home/draw/away，赔率字典键同构，直接对应即可。
+    解析失败、缺字段、缺推荐方向 → 一律 None，由调用方如实跳过。
+    """
+    if not raw_inputs or not result:
+        return None
+    try:
+        data = json.loads(raw_inputs) if isinstance(raw_inputs, str) else raw_inputs
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    odds = data.get("odds")
+    if not isinstance(odds, dict):
+        return None
+    # ⚠️ result 存的是**中文方向**（"主胜"/"平局"/"客胜"，与 _outcome 一致），
+    # 而赔率字典是英文键。不做这层映射会永远取不到值，
+    # 于是所有场次都被当成「无赔率」——ROI 恒为 None，且看不出原因。
+    key = _RESULT_TO_ODDS_KEY.get(str(result).strip())
+    if not key:
+        return None
+    val = odds.get(key)
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 1.0 else None   # 赔率 ≤1 是脏数据
 
 def _outcome(home: int | None, away: int | None) -> str | None:
     """真实比分 → 胜平负标签（与模型 result 字段同一套口径）。"""

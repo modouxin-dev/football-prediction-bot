@@ -1213,6 +1213,14 @@ class PredictionService:
                 "btts": analysis.get("btts"),
                 "top_scores": analysis.get("top_scores") or [],
                 "rho": analysis.get("rho"),
+                # 1X2 赔率（各家中位数）落库：不存的话「赔率统计 / ROI」
+                # 事后根本算不出来——赔率是**当时的市场报价**，事后拉不到，
+                # 整季重拉既烧额度又拿不到历史盘口。这是赔率类统计的唯一数据源。
+                "odds": (
+                    {"home": round(float(odds["home"]), 3),
+                     "draw": round(float(odds["draw"]), 3),
+                     "away": round(float(odds["away"]), 3)}
+                    if odds else None),
                 # 赔率取不到时保留真实原因（套餐不含 / 未开盘 / 限流），
                 # 展示层据此如实说明，而不是笼统显示「暂无赔率数据」。
                 "odds_error": odds_error,

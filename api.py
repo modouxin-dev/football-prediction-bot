@@ -301,6 +301,33 @@ async def stats() -> JSONResponse:
     })
 
 
+@app.get("/stats/period")
+async def stats_period(days: str = "7,30") -> JSONResponse:
+    """分时间窗口的胜率 / 平均赔率 / ROI（周 = 7 天，月 = 30 天）。
+
+    为什么三个数字一起给：只看命中率会被高赔冷门误导（30% 命中率
+    押 5.0 的冷门是赚的，押 1.2 的热门是亏的）。ROI 把两者合起来，
+    是唯一能直接回答「这套推荐到底赚不赚」的指标。
+
+    无赔率的场次（老记录）从 ROI 中剔除并单独报 ``no_odds``，
+    不做平均赔率填充——填充会虚报 ROI。
+    """
+    try:
+        wanted = [int(x) for x in str(days).split(",") if str(x).strip().isdigit()]
+    except ValueError:
+        wanted = [7, 30]
+    wanted = [w for w in wanted if 0 < w <= 365] or [7, 30]
+    repo = _repo()
+    out = {}
+    try:
+        for d in wanted:
+            out[str(d)] = repo.period_stats(d)
+    except Exception as exc:
+        log.exception("/stats/period 计算失败")
+        raise HTTPException(status_code=500, detail=f"计算失败：{exc}") from exc
+    return JSONResponse({"status": "ok", "version": _VERSION, "periods": out})
+
+
 @app.get("/health/model")
 async def model_health() -> JSONResponse:
     """模型健康度：Log Loss 趋势、校准曲线、各信心等级命中率。
