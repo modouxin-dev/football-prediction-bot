@@ -204,3 +204,34 @@ def test_disclaimer_keeps_compliance_core():
 
     assert "不构成投注建议" in DISCLAIMER
     assert display_width(_plain(DISCLAIMER)) <= MOBILE_MAX_COLS
+
+
+def test_asian_handicap_section_fits_mobile(pred):
+    """亚盘推荐节不得超宽——这是项目主推方向，宽度回归要覆盖到。
+
+    真实事故：初版提示语「套餐不含亚盘或该场未开盘时不会编造推荐」
+    实测 40 列 > 36，手机上必折行。
+    """
+    from bot_handler import BotUI
+
+    class _FakeAsian:
+        pass
+
+    pred.asian = {"line": -0.75, "n": 5,
+                  "home": {"prob": 0.62, "odds": 1.95, "edge": 0.05, "ev": 0.21},
+                  "away": {"prob": 0.38, "odds": 1.85, "edge": -0.02, "ev": -0.30}}
+    text = BotUI.format_prediction(pred, TZ)
+    longest = _longest_prose(text)
+    assert longest <= MOBILE_MAX_COLS, f"亚盘节最长 {longest} 列，手机上会折行"
+    assert "亚洲盘推荐" in text
+    pred.asian = None
+
+
+def test_no_asian_handicap_still_fits_mobile(pred):
+    """未开盘时的降级文案同样不得超宽。"""
+    from bot_handler import BotUI
+
+    pred.asian = None
+    text = BotUI.format_prediction(pred, TZ)
+    assert _longest_prose(text) <= MOBILE_MAX_COLS
+    assert "未开盘" in text
