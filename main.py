@@ -995,6 +995,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 #: 且**从业务日志完全看不出原因**——只会看到一堆 409 Conflict。
 _CONFLICT_COUNT = 0
 
+#: 启动同步的硬上限（秒）。超过就放弃等待、先让机器人上线——
+#: 详见下方启动同步处的说明：这段 await 会阻塞 Telegram 注册。
+STARTUP_SYNC_TIMEOUT = 25.0
+
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     global _CONFLICT_COUNT
@@ -1072,13 +1076,25 @@ async def post_init(app: Application) -> None:
     app.bot_data["api"] = api
     service = PredictionService(settings, api, MatchAnalyzer())
     app.bot_data["service"] = service
-    # 启动同步：先把未来 30 天赛程拉到本地库，机器人起来就有数据可展示
+    # 启动同步：先把未来 30 天赛程拉到本地库，机器人起来就有数据可展示。
+    #
+    # 必须设上限：这段 await 发生在 run_polling() 之前，**同步没跑完机器人
+    # 就不会向 Telegram 注册**，期间用户发的命令一条都收不到。
+    # 实测过一次事故：主源当日额度打满 → 全部落到备用源 → 备用源 429
+    # → 10 个联赛各退避重试、连续空转上百秒，表现为「机器人不理人」，
+    # 而日志里只有一堆 429，看不出根因是启动被拖住了。
+    # 赛程数据晚几分钟到不影响任何功能（查询会按需回源），但机器人哑掉是硬伤。
     try:
-        first = await service.sync.run_startup()
-        log.info("启动同步：收到 %d 场，保存 %d 场（本地库共 %d 场）",
-                 first.get("received", 0), first.get("saved", 0), service.repo.matches_count())
+        first = await asyncio.wait_for(
+            service.sync.run_startup(), timeout=STARTUP_SYNC_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.warning("启动同步超时（%.0fs），先让机器人上线，赛程将按需回源",
+                    STARTUP_SYNC_TIMEOUT)
     except Exception as exc:  # 启动同步失败也要让机器人正常起来
         log.warning("启动同步失败（将按需回源）：%s", exc)
+    else:
+        log.info("启动同步：收到 %d 场，保存 %d 场（本地库共 %d 场）",
+                 first.get("received", 0), first.get("saved", 0), service.repo.matches_count())
 
     # 在 application 启动后调用（异步上下文）
     await send_heartbeat(app)
