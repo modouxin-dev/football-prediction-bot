@@ -282,6 +282,22 @@ class Prediction:
     season: int = 0  # 实际使用的赛季（降级后可能不同于配置的赛季），展示给用户  # 实际使用的数据源（主源或备用源），必须如实展示
 
     @property
+    def recommendable(self) -> bool:
+        """是否给出推荐：**有全场亚洲盘才可推荐**。
+
+        为什么以此为门槛（项目方向：核心标准就是准确率）：
+        1. 开盘本身就是一次筛选——博彩公司只对信息足够充分、数据可靠的比赛定价。
+           不开盘的场次多为小联赛/低级别赛事，数据稀疏，模型本来就估不准。
+        2. 无盘场次无法计算「模型 vs 市场」的偏差，推荐失去参照系，
+           推出来的东西既无法验证也无法复盘。
+        3. 有盘才有赔率，ROI 统计才有意义（无赔率记录会被从 ROI 剔除）。
+
+        ⚠️ 这是**刻意收缩覆盖面换准确率**的取舍：推送场次会减少，
+        故 skipped_no_handicap 必须可观测，方便判断误杀是否过多。
+        """
+        return bool(self.asian)
+
+    @property
     def low_sample(self) -> bool:
         return min(self.home_strength.games_home, self.away_strength.games_away) < LOW_SAMPLE_GAMES
 
@@ -367,6 +383,7 @@ class PredictionService:
         self.fixture_day_label: str = ""  # 赛程实际覆盖的日期范围，供标题显示
         self.last_note: str | None = None  # 最近一次操作的降级/空结果提示，由上层展示给用户
         self.truncated_count: int = 0  # 最近一次预测被上限砍掉的场数（0 表示未截断）
+        self.no_handicap_count: int = 0  # 因无全场亚盘而未推荐的场数（可观测误杀量）
         # 键统一为 str：主源是数字 ID、备用源 football-data.org 是 'fd-123'
         # （见 football_data.py:217），两边都必须能用同一个 key 查到。
         # 此前注解写成 OrderedDict[int, ...] 与实际不符，会误导维护者去传 int。
@@ -525,13 +542,28 @@ class PredictionService:
         # 一场比赛只能用它所属联赛的积分榜建模；同一联赛的积分榜只请求一次。
         models: dict[int, LeagueModel] = {}
         predictions = []
+        no_handicap = 0
         for kickoff, fx in upcoming:
             lid = self._league_id_of(fx)
             if lid not in models:
                 models[lid] = await self._model_for(lid, models)
             prediction = await self._predict_one(models[lid], kickoff, fx)
+            # 无全场亚盘 → 不推荐（核心标准是准确率，宁缺勿滥）
+            if not prediction.recommendable:
+                no_handicap += 1
+                continue
             self._remember(prediction)
             predictions.append(prediction)
+        if no_handicap:
+            # 必须留痕：否则用户看到「赛程 8 场 / 预测 3 场」会以为是坏了
+            self.no_handicap_count = no_handicap
+            self.last_note = (
+                (self.last_note or "")
+                + f"\nℹ️ 另有 {no_handicap} 场未开盘亚洲盘，"
+                  f"按「无盘不推荐」策略不予推荐。"
+            ).strip()
+        else:
+            self.no_handicap_count = 0
         return predictions
 
     @staticmethod
@@ -619,6 +651,9 @@ class PredictionService:
         end = now + timedelta(days=max(1, int(days)))
         stats: dict[str, Any] = {
             "saved": 0, "errors": [], "per_league": {}, "window_days": days,
+            # 无亚盘而跳过：必须可观测——「刻意收缩覆盖面换准确率」的取舍
+            # 到底砍掉了多少场，不能靠猜。若这个数长期偏高，说明误杀过多。
+            "skipped_no_handicap": 0,
         }
 
         # 第一阶段：先把各联赛窗口内未开赛的赛程收集齐。
@@ -672,6 +707,13 @@ class PredictionService:
                     log.warning("自动预测：fixture %s 失败：%s",
                                 (fx.get("fixture") or {}).get("id"), exc)
                     continue
+                # 无全场亚盘 → 不推荐、不落盘（核心标准是准确率，宁缺勿滥）。
+                # 赛前刷新会再试一次：亚盘常在临近开赛才开，故这里是
+                # 「暂时不推」而非「永久放弃」。
+                if not prediction.recommendable:
+                    stats["skipped_no_handicap"] += 1
+                    progressed = True
+                    continue
                 self._remember(prediction)
                 saved_per[lid] += 1
                 total += 1
@@ -714,6 +756,8 @@ class PredictionService:
         """
         stats: dict[str, Any] = {
             "checked": 0, "refreshed": 0, "skipped": 0, "errors": [],
+            # 无全场亚盘而跳过（核心标准是准确率：没盘就不推荐）
+            "skipped_no_handicap": 0,
             # 本轮实际重算过的比赛明细，供赛前二次推送按"距开赛多久 +
             # 是否拿到阵容"决定推送时机。放在这里而不是让调用方重查一遍，
             # 是为了避免两处算出不同的 lead（时间会流逝）。
@@ -767,6 +811,11 @@ class PredictionService:
             except Exception as exc:
                 stats["errors"].append(f"fixture {fid} 预测失败：{exc}")
                 log.warning("赛前刷新：fixture %s 失败：%s", fid, exc)
+                continue
+            # 无全场亚盘 → 不推荐。这里离开赛更近，是补盘的最后机会：
+            # 若此刻仍无盘，这场基本确定不会有盘，放弃它。
+            if not prediction.recommendable:
+                stats["skipped_no_handicap"] += 1
                 continue
             self._remember(prediction)
             stats["refreshed"] += 1
