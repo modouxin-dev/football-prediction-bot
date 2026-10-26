@@ -157,6 +157,76 @@ def diag_pool_line(rows: list[tuple[int, int | None, str | None]]) -> str:
     return " · ".join(parts)
 
 
+
+async def modelselect_cmd(update, context) -> None:
+    """/modelselect — 用真实语料跑候选对比，输出带 95% 置信区间的结论。
+
+    为什么需要这个命令：
+    ELO_BLEND=0.6、市场权重 0.75 都是**产品参数**，不是理论解。
+    Hvattum & Arntzen (2010, n=30524) 只说明 Elo 与统计模型互补，
+    Ley et al. (2019) 的 390 天半衰期是英超结果——都给不出本项目的数值。
+
+    因此不靠拍脑袋调参，而是把候选摆在同一批真实语料上做
+    **配对 bootstrap**，只有同时满足三条预先注册的规则才建议采纳：
+      ① Brier 改善 ② RPS 不退化 ③ 95% CI 不跨 0
+
+    ⚠️ 本命令只**给结论**，不自动改线上参数。
+    """
+    app = context.application
+    service = app.bot_data["service"]
+    try:
+        matches, info = load_corpus(service.repo, "")
+    except Exception as exc:  # noqa: BLE001 - 诊断要把原因显示出来
+        await update.message.reply_text(f"❌ 语料加载失败：{esc(str(exc))}")
+        return
+
+    from model_select import Candidate, run_experiment
+
+    # 基线 = 当前线上配置（纯泊松，Elo 未启用）
+    cands = [
+        Candidate(key="base", use_elo=False),
+        Candidate(key="elo_blend_0.3", use_elo=True, elo_blend=0.3),
+        Candidate(key="elo_blend_0.6", use_elo=True, elo_blend=0.6),
+        Candidate(key="elo_blend_0.9", use_elo=True, elo_blend=0.9),
+    ]
+    min_hist = min(200, max(20, len(matches) // 5))
+    res = run_experiment(matches, cands, baseline_key="base",
+                         min_history=min_hist, n_boot=2000)
+
+    lines = [f"🧪 <b>模型选择实验</b>（{len(matches)} 场语料）"]
+    for k, v in (info or {}).items():
+        lines.append(f"  · {esc(str(k))}: {esc(str(v))}")
+    lines.append("")
+    lines.append(f"判定：<b>{esc(res.verdict)}</b>")
+    lines.append(f"基线：{esc(res.baseline_key)} → 胜出：{esc(res.winner_key)}")
+    lines.append(f"有效场次：{res.n_matches}")
+    lines.append("")
+    for row in res.table:
+        b = row.get("brier")
+        r = row.get("rps")
+        ll = row.get("log_loss")
+        line = (f"• <code>{esc(str(row['key']))}</code>  "
+                f"Brier {b:.4f} · RPS {r:.4f} · LL {ll:.4f}"
+                if None not in (b, r, ll)
+                else f"• <code>{esc(str(row['key']))}</code>  指标不可得")
+        lines.append(line)
+        rules = row.get("rules")
+        if rules:
+            marks = "".join("✅" if rules[k] else "❌"
+                            for k in ("brier_improves", "rps_not_worse",
+                                      "ci_significant"))
+            lines.append(f"   规则 {marks}（Brier↑ / RPS不退化 / CI显著）")
+        boot = row.get("vs_baseline")
+        if isinstance(boot, dict) and "error" not in boot:
+            lines.append(
+                f"   Δ Brier {boot['mean_diff']:+.4f} "
+                f"[95% CI {boot['ci_low']:+.4f}, {boot['ci_high']:+.4f}]")
+    lines.append("")
+    lines.append(f"<i>{esc(res.reason)}</i>")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="HTML")
+
+
 async def diag_cmd(update, context) -> None:
     """/diag — 直连主源探活，暴露真实失败原因（套餐 / 赛季 / 配额 / 冷却）。
 
@@ -1171,6 +1241,8 @@ def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("test", test_cmd, admin_only=True, description="立即推送一次预测")
     dispatcher.register("status", status_cmd, admin_only=True, description="运行状态诊断")
     dispatcher.register("diag", diag_cmd, admin_only=True, description="直连主源探活，显示真实失败原因")
+    dispatcher.register("modelselect", modelselect_cmd, admin_only=True,
+                        description="候选模型对比（配对 bootstrap + 95% CI）")
     dispatcher.register("stats", stats_cmd, admin_only=True, description="命中率统计")
     dispatcher.register("storage", storage_cmd, admin_only=True, description="存储自检")
     dispatcher.register("backfill", backfill_cmd, admin_only=True,
