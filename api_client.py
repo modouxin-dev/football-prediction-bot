@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Callable
 
 import httpx
@@ -171,6 +171,32 @@ def flatten_standings(response: list[dict[str, Any]]) -> list[dict]:
         for group in (item.get("league") or {}).get("standings") or []:
             rows.extend(group)
     return rows
+
+
+def _as_date(day) -> date:
+    """把 date / datetime / ISO 字符串统一成 date。
+
+    为什么存在：``.isoformat()`` 只在 date 上有，字符串传进来会抛
+    AttributeError；datetime 的 isoformat 带时间部分，拼进查询参数
+    会让数据源按「某时刻」而不是「某天」理解。两类都是静默错误的来源。
+
+    Args:
+        day: date / datetime / "YYYY-MM-DD"
+
+    Returns:
+        归一化后的 date
+
+    Raises:
+        ValueError: 类型或格式非法——**显式抛出**让调用方看见，
+            而不是被内层 except 吞成「今天没有比赛」。
+    """
+    if isinstance(day, datetime):
+        return day.date()
+    if isinstance(day, date):
+        return day
+    if isinstance(day, str):
+        return date.fromisoformat(day.strip())
+    raise ValueError(f"无法识别的日期类型：{type(day).__name__}（{day!r}）")
 
 
 class FootballAPI:
@@ -350,9 +376,24 @@ class FootballAPI:
         params = {"league": league_id, "season": season, "from": date_from.isoformat(), "to": date_to.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
-    async def get_fixtures_by_date(self, day: date) -> list[dict[str, Any]]:
-        """某一天的全部赛程（不按联赛过滤）。"""
-        params = {"date": day.isoformat()}
+    async def get_fixtures_by_date(self, day) -> list[dict[str, Any]]:
+        """某一天的全部赛程（不按联赛过滤）。
+
+        ⚠️ ``day`` 可以是 ``date``、``datetime`` 或 ISO 字符串
+        （``"2026-10-26"``），**在入口统一归一化**。
+
+        为什么必须在这里做而不是靠调用方自觉：这个坑历史上踩了两次——
+        - 结算回填（PR #112）：``stale_pending_days()`` 返回字符串，
+          ``"2026-10-26".isoformat()`` 抛 AttributeError，异常被内层
+          ``except Exception`` 吞成空列表，表现为「成功取数 17 天、
+          补回 0 场」——全程无报错却毫无进展。
+        - ``/oddsprobe``：同样的字符串，同样静默失败。
+
+        只在调用方改，下一个调用点还会再犯。归一化收到入口，
+        这一类 bug 整体消失。
+        """
+        d = _as_date(day)
+        params = {"date": d.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
     async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict[str, Any]]:
