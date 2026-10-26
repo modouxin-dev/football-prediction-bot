@@ -689,6 +689,16 @@ function jobsCard(jb, noHead){
 // ROI 把两者合起来，是唯一能回答「这套推荐到底赚不赚」的指标。
 // ⚠️ 无数据的 dim 显示成「—」而不是 0：0 会被读成「打平」。
 function periodCard(pt, noHead){
+  // 分组命中率（有盘 vs 无盘）：验证「无盘不推荐」这个策略到底对不对。
+  // 没这行，策略就只是拍脑袋——跑一段时间后这里能直接看出
+  // 砍掉的那批是不是真的更差。
+  const _sp = (pt && pt.periods && pt.periods['30'] && pt.periods['30'].split) || null;
+  const _spTxt = (_sp && _sp.with_odds.total && _sp.without_odds.total)
+    ? `<div class="muted" style="font-size:12px;margin-top:6px">
+        📌 有盘 ${_sp.with_odds.total} 场命中 ${(_sp.with_odds.rate*100).toFixed(1)}%
+        · 无盘 ${_sp.without_odds.total} 场命中 ${(_sp.without_odds.rate*100).toFixed(1)}%
+      </div>`
+    : '';
   const head = `<div class="card">`
     + (noHead ? '' : '<h2>周期战绩 <span>周 = 近 7 天 · 月 = 近 30 天</span></h2>');
   const ps = (pt && pt.periods) || {};
@@ -721,7 +731,7 @@ function periodCard(pt, noHead){
   return head + `<table class="tb"><thead><tr>
       <th>周期</th><th class="num">场次</th><th class="num">胜率</th>
       <th class="num">平均赔率</th><th class="num">ROI</th>
-    </tr></thead><tbody>${rows}</tbody></table>` + note + `</div>`;
+    </tr></thead><tbody>${rows}</tbody></table>` + note + _spTxt + `</div>`;
 }
 
 function quotaCard(qt, noHead){
