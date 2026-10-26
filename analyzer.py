@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -681,6 +682,221 @@ def collect_1x2_odds(odds_response: Iterable[dict] | None) -> list[dict]:
                     rows.append({"bookmaker": bookmaker.get("name") or "?", **prices})
                 break
     return rows
+
+
+# ---- 亚洲盘 ---------------------------------------------------------------
+#: 全场亚洲盘在数据源码表里的 bet id（**实测确认，非推测**）。
+#: 依据：/oddsprobe 对 fixture 1551707 的真实响应，Pro 套餐返回 76 个盘口，
+#: 其中 id=4 名为 "Asian Handicap"（30 项）。另有 id=19 上半场、id=104 下半场，
+#: 均为半场盘，样本更薄、噪声更大，暂不使用。
+#:
+#: ⚠️ 不要凭记忆改这个数字。第三方文档与实测一致才敢写死；若数据源变更，
+#: /oddsprobe 端点会显示新的 id，改之前先去那里确认。
+ASIAN_HANDICAP_BET_ID = 4
+
+#: 亚盘盘口线的常见档位。只用于「识别」，不用于生成推荐——
+#: 推什么盘由数据源实际开盘决定，这里不做任何补全。
+_AH_QUARTER = (0.25, 0.75)
+
+
+def _parse_handicap_line(value: str) -> float | None:
+    """从选项文本里解析盘口线，如 "Home -0.5" → -0.5，"Away +1.25" → 1.25。
+
+    为什么自适应而不硬编码写法：value 文本 = 「方向 + 盘口线」，
+    盘口线本身可能是 -0.5 / +1.25 等任意档位。写死枚举既覆盖不全，
+    也会在新档位出现时静默失效。
+
+    ⚠️ **取第一个数，不是最后一个**：方向词后紧跟的才是主盘口线。
+    实测前我假设过「Home -0.5 (-1)」这种括号形态并写成了取最后一个，
+    结果 "Home -0.5 (-1)" 会被解析成 -1.0 —— 盘口线直接错一档，
+    而亚盘差 0.25 就是完全不同的注。括号形态目前**没有实测证据**，
+    取第一个在纯 "Home -1.25" 形态下也正确，故按有证据的形态来。
+
+    解析不了返回 None（不猜）——调用方据此跳过该选项。
+    """
+    if not value:
+        return None
+    matches = re.findall(r"([+-]?\d+(?:\.\d+)?)", str(value))
+    if not matches:
+        return None
+    try:
+        return float(matches[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _ah_side(value: str) -> str | None:
+    """判断选项属于主队(home)还是客队(away)。"""
+    low = str(value or "").strip().lower()
+    if low.startswith("home"):
+        return "home"
+    if low.startswith("away"):
+        return "away"
+    return None
+
+
+def collect_asian_handicap_odds(odds_response: Iterable[dict] | None) -> list[dict]:
+    """从 /odds 响应提取各公司的全场亚洲盘赔率。
+
+    返回 [{"bookmaker", "line", "home", "away"}, ...]。
+    ``line`` 是**主队视角**的让球数：负=主队让球，正=主队受让。
+
+    同一家公司可能开出多个盘口线（如同时有 -0.5 与 -1.0），
+    这里**全部保留**，由调用方按需要挑选——不做「取第一条」的隐式假设，
+    那种假设会让推荐悄悄固定在某个盘口线上而看不出原因。
+
+    配对逻辑：同一 line 的 home 与 away 必须**都取到**才算一条有效记录。
+    只有单边说明另一边没开盘，硬凑会给出错误的对手赔率。
+    """
+    rows: list[dict] = []
+    for item in odds_response or []:
+        for bookmaker in item.get("bookmakers") or []:
+            books: dict[float, dict[str, float]] = {}
+            for bet in bookmaker.get("bets") or []:
+                if bet.get("id") != ASIAN_HANDICAP_BET_ID:
+                    continue
+                # 名称也校验一层：id 对但名字变了说明数据源改了口径，
+                # 这时宁可不要，也不要按旧口径解析出错误的盘口线。
+                name = str(bet.get("name") or "").strip().lower()
+                if name and name != "asian handicap":
+                    continue
+                for value in bet.get("values") or []:
+                    raw = str(value.get("value") or "")
+                    line = _parse_handicap_line(raw)
+                    side = _ah_side(raw)
+                    odd = _num(value.get("odd"))
+                    if line is None or side is None or odd <= 1.0:
+                        continue
+                    # ⚠️ 关键：同一档盘口线在 home/away 两侧**符号相反**
+                    # （"Home -0.5" 与 "Away +0.5" 是同一档）。
+                    # 不归一到主队视角就永远配不上对——实测前这里漏了取负，
+                    # 结果是 home 存到 -0.5、away 存到 +0.5，两条记录各自缺边
+                    # 而被整体丢弃，亚盘永远解析不出来（静默失败）。
+                    main_line = line if side == "home" else -line
+                    books.setdefault(main_line, {})[side] = odd
+                break
+            for line, sides in books.items():
+                if "home" in sides and "away" in sides:
+                    rows.append({"bookmaker": bookmaker.get("name") or "?",
+                                 "line": line, **sides})
+    return rows
+
+
+def consensus_asian_handicap(rows: list[dict]) -> dict | None:
+    """同一盘口线跨公司的赔率中位数；选**公司数最多**的那条线。
+
+    为什么按公司数选而不是取第一条或取中位数线：
+    主流盘口线（多数公司都开的那个）流动性最好、报价最可信。
+    公司数少的是边缘盘口线，报价噪声大。
+
+    与 consensus_odds 一样取中位数而非均值——抗异常报价。
+    """
+    if not rows:
+        return None
+    by_line: dict[float, list[dict]] = {}
+    for r in rows:
+        by_line.setdefault(r["line"], []).append(r)
+    line, group = max(by_line.items(), key=lambda kv: (len(kv[1]), -abs(kv[0])))
+    return {
+        "line": line,
+        "home": statistics.median(g["home"] for g in group),
+        "away": statistics.median(g["away"] for g in group),
+        "n": len(group),
+    }
+
+
+def asian_handicap_prob(matrix: list[list[float]], line: float) -> dict[str, float]:
+    """按亚盘盘口线在比分矩阵上结算，返回主/客两方的赢盘概率。
+
+    结算规则（这是亚盘与欧盘的根本区别，算错就全错）：
+    - 整数盘（如 -1）：让球后平局 → **走水**，本金退还，不计胜负
+    - 半盘（如 -0.5）：无走水，必分胜负
+    -  quarter 盘（如 -0.75）：等于 -0.5 与 -1 各押一半
+
+    输入 ``line`` 为主队视角：负=主队让球。
+
+    为什么从比分矩阵算而不是用 λ 直接推：矩阵已含 Dixon-Coles 修正
+    （低比分相关性），直接用 λ 推会与项目其余部分口径不一致。
+    """
+    n = len(matrix)
+    line = float(line)
+
+    def _settle_at(h: int, a: int, handicap: float) -> tuple[float, float]:
+        """单档盘口下，比分 (h,a) 的主/客赢盘结果（1=赢, 0=输, 0.5=走水）。"""
+        diff = (h - a) + handicap      # handicap 为负表示主队让球
+        if diff > 0:
+            return 1.0, 0.0
+        if diff < 0:
+            return 0.0, 1.0
+        return 0.5, 0.5                # 走水：两边都退本金
+
+    # quarter 盘拆成相邻的两个半/整数盘各一半
+    frac = abs(line) % 1.0
+    if abs(frac - 0.25) < 1e-9 or abs(frac - 0.75) < 1e-9:
+        # -0.75 → -0.5 与 -1.0 各半；-0.25 → 0 与 -0.5 各半
+        base = math.floor(abs(line))
+        lower = base + 0.5 if abs(line) > base else base
+        upper = lower + 0.5
+        legs = [(lower * (-1 if line < 0 else 1), 0.5),
+                (upper * (-1 if line < 0 else 1), 0.5)]
+    else:
+        legs = [(line, 1.0)]
+
+    home = 0.0
+    away = 0.0
+    for handicap, weight in legs:
+        # handicap 已是主队视角（负=主队让球），直接参与结算：
+        # diff = (主队进球 − 客队进球) + handicap > 0 即主队赢盘。
+        # ⚠️ 此前写成 hcap = -handicap（多取一次负），结果让球越多
+        # 主队赢盘概率反而越高（-1.5 得 0.89 > -0.5 的 0.72），符号彻底反了。
+        for h in range(n):
+            for a in range(n):
+                p = matrix[h][a]
+                if p <= 0:
+                    continue
+                ph, pa = _settle_at(h, a, handicap)
+                home += p * ph * weight
+                away += p * pa * weight
+    return {"home": home, "away": away}
+
+
+def score_matrix_from_analysis(analysis: dict) -> list[list[float]]:
+    """由 analyze 结果重建比分矩阵（复现 predict_match 内部的同一口径）。
+
+    为什么需要它：``predict_match`` 内部算了矩阵但**没有返回**，
+    而亚盘结算必须在矩阵上做。这里用同样的 λ 与 ρ 重建，
+    保证与「最可能比分」「大 2.5 球」等既有结论完全自洽——
+    若另起一套算法，会出现「同一个预测里两处结论打架」。
+
+    ρ 缺省为 0（纯泊松），与 dc_score_matrix 的向后兼容语义一致。
+    """
+    return dc_score_matrix(
+        float(analysis.get("lambda_home") or 0.0),
+        float(analysis.get("lambda_away") or 0.0),
+        max_goals=MAX_GOALS,
+        rho=float(analysis.get("rho") or 0.0),
+    )
+
+
+def asian_handicap_edge(matrix: list[list[float]], ah: dict | None) -> dict | None:
+    """亚盘的价值偏差：模型赢盘概率 vs 赔率隐含概率。"""
+    if not ah:
+        return None
+    probs = asian_handicap_prob(matrix, ah["line"])
+    out = {"line": ah["line"], "n": ah.get("n"), "prob": probs,
+           "home": {}, "away": {}}
+    for side in ("home", "away"):
+        price = ah.get(side)
+        p = probs[side]
+        # 走水概率不计入 EV：本金退还既不是赢也不是输
+        out[side] = {"prob": p, "odds": price,
+                     "edge": (p - 1 / price) if price and price > 1.0 else 0.0,
+                     "ev": (p * price - 1) if price and price > 1.0 else 0.0}
+    # 抽水：两边隐含概率之和 − 1，用来判断这个盘开得贵不贵
+    hp = 1 / ah["home"] if ah.get("home") else 0
+    ap = 1 / ah["away"] if ah.get("away") else 0
+    out["overround"] = hp + ap - 1
+    return out
 
 
 def consensus_odds(rows: list[dict]) -> dict | None:
