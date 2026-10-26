@@ -21,7 +21,7 @@ from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
 from repository import BRIER_RANDOM, quota_today
 from scheduler import DAILY_JOB, run_push
-from support import describe_error
+from support import describe_error, reply_html
 from templates import LEAGUE_SHORT, resolve_league
 from tghtml import normalize
 
@@ -489,7 +489,7 @@ async def diag_cmd(update, context) -> None:
     body = section_join([
         section("🔬 主源诊断", [kv_line(i, k, v, width=W) for i, k, v in rows]),
     ])
-    await update.message.reply_text(normalize(body), parse_mode="HTML")
+    await reply_html(update.effective_message, body, None)
 
 
 SOT_PROBE_DEFAULT = 5
@@ -553,7 +553,7 @@ async def sot_probe_cmd(update, context) -> None:
         rows: list[tuple[str, str, str]] = [("⚠️", "探测对象", "本地库还没有已完场的比赛，先跑一次同步或 /backfill")]
         body = section_join([section("🔬 场面数据探测",
                                      [kv_line(i, k, v, width=W) for i, k, v in rows])])
-        await update.message.reply_text(normalize(body), parse_mode="HTML")
+        await reply_html(update.effective_message, body, None)
         return
 
     results: list[dict[str, Any]] = []
@@ -619,7 +619,8 @@ async def sot_probe_cmd(update, context) -> None:
         lines.append("📋 逐场结果")
         lines.extend(detail)
     body = section_join([section("🔬 场面数据探测", lines)])
-    await update.message.reply_text(normalize(body), parse_mode="HTML")
+    # 「逐场结果」逐行累加，场次数一多就超 4096，必须分片
+    await reply_html(update.effective_message, body, None)
 
 
 async def _account_status_preferring_primary(api: Any) -> dict[str, Any]:
@@ -729,9 +730,8 @@ async def status_cmd(update, context) -> None:
         section("🛰", "数据源诊断", *rows(source_rows)),
     ]
     text = section_join(blocks)
-    await update.effective_message.reply_text(
-        normalize(text), parse_mode="HTML", disable_web_page_preview=True
-    )
+    # /status 的诊断行随探测项增长（联赛、数据源、缓存…），同样会撞 4096
+    await reply_html(update.effective_message, text, None)
 
 
 # 校准结论的最小样本量。低于此值只给数字不给结论——32 场就宣称 90% 准确率
@@ -1344,17 +1344,19 @@ async def oddsprobe_cmd(update, context) -> None:
     # 走主源即可（备用源 football-data.org 不提供盘口）。
     api = getattr(router, "primary", router)
     if api is None or settings is None:
-        await update.message.reply_text(normalize(
-            section("💱 盘口探测", ["赔率客户端不可用"])),
-            parse_mode="HTML")
+        await reply_html(update.effective_message,
+                         section_join([section("💱 盘口探测", ["赔率客户端不可用"])]),
+                         None)
         return
 
     try:
         probe = await api.get_odds(int(fid)) if fid else None
     except Exception as exc:  # noqa: BLE001 - 诊断要把原因显示出来
-        await update.message.reply_text(normalize(section("💱 盘口探测", [
-            f"❌ 指定 fixture {esc(fid or '')} 取赔率失败：{esc(describe_error(exc))}",
-        ])), parse_mode="HTML")
+        await reply_html(update.effective_message,
+                         section_join([section("💱 盘口探测", [
+                             f"❌ 指定 fixture {esc(fid or '')} 取赔率失败：{esc(describe_error(exc))}",
+                             f"构建版本　<code>{esc(_build_version())}</code>",
+                         ])]), None)
         return
 
     if not probe:
@@ -1386,19 +1388,21 @@ async def oddsprobe_cmd(update, context) -> None:
                 if probe or tried >= ODDS_PROBE_MAX_TRIES:
                     break
         except Exception as exc:  # noqa: BLE001
-            await update.message.reply_text(normalize(section("💱 盘口探测", [
-                f"❌ 自动选场失败：{esc(describe_error(exc))}",
-                f"构建版本　<code>{esc(_build_version())}</code>",
-                "<i>若版本不是 main 最新提交，说明生产跑的是旧构建，"
-                "请先重新部署再试。</i>",
-            ])), parse_mode="HTML")
+            await reply_html(update.effective_message,
+                             section_join([section("💱 盘口探测", [
+                                 f"❌ 自动选场失败：{esc(describe_error(exc))}",
+                                 f"构建版本　<code>{esc(_build_version())}</code>",
+                                 "<i>若版本不是 main 最新提交，说明生产跑的是旧构建，"
+                                 "请先重新部署再试。</i>",
+                             ])]), None)
             return
 
     if not probe:
-        await update.message.reply_text(normalize(section("💱 盘口探测", [
-            "⚠️ 未取到任何赔率。可能该套餐不含 /odds，或近期均无开盘比赛。",
-            "用法：/oddsprobe <fixture_id>（先跑 /diag 看探测对象）",
-        ])), parse_mode="HTML")
+        await reply_html(update.effective_message,
+                         section_join([section("💱 盘口探测", [
+                             "⚠️ 未取到任何赔率。可能该套餐不含 /odds，或近期均无开盘比赛。",
+                             "用法：/oddsprobe <fixture_id>（先跑 /diag 看探测对象）",
+                         ])]), None)
         return
 
     # 汇总：同一 bet id 在不同博彩公司下重复出现，按 (id, name) 去重
@@ -1428,8 +1432,14 @@ async def oddsprobe_cmd(update, context) -> None:
     lines.append("<i>把上面这段原样发给我即可据此实现亚盘解析——"
                  "不需要你判断哪个是亚盘。</i>")
 
-    await update.message.reply_text(normalize(section("💱 盘口探测", lines)),
-                                    parse_mode="HTML")
+    # ⚠️ 必须走 reply_html 分片，不能直接 reply_text。
+    # 实测（生产日志 2026-10-26 07:54）：一场比赛的盘口全列出来有几十个 bet，
+    # 拼成单条远超 Telegram 4096 上限，抛
+    #   telegram.error.BadRequest: Message is too long
+    # 而异常发生在最后一步——前面取数、解析全部白做，用户收不到任何回复。
+    # reply_html 内部调 split_html_blocks，按行切并在拆口处闭合/重开标签。
+    await reply_html(update.effective_message,
+                     section_join([section("💱 盘口探测", lines)]), None)
 
 
 async def _typing(update) -> None:
