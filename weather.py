@@ -59,6 +59,7 @@ import logging
 import math
 from datetime import datetime, timezone
 from typing import Any
+from errfmt import fmt_exc
 
 log = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ class WeatherClient:
                 return None
             results = (resp.json() or {}).get("results") or []
         except Exception as exc:
-            log.info("地理编码异常（city=%s）：%s", name, type(exc).__name__)
+            log.info("地理编码异常（city=%s）：%s", name, fmt_exc(exc))
             return None
 
         if not results:
@@ -247,7 +248,7 @@ class WeatherClient:
                     return None
                 cached = (resp.json() or {}).get("hourly") or {}
             except Exception as exc:
-                log.info("天气异常（%s）：%s", key, type(exc).__name__)
+                log.info("天气异常（%s）：%s", key, fmt_exc(exc))
                 return None
             self._fc.set(key, cached, now)
 
