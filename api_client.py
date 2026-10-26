@@ -5,6 +5,7 @@
   - apisports：api-football.com 官方直连，使用 API_FOOTBALL_KEY
 """
 from __future__ import annotations
+from errfmt import fmt_exc
 
 import asyncio
 import logging
@@ -282,8 +283,8 @@ class FootballAPI:
             try:
                 resp = await self._client.get(url, params=params, headers=self._headers)
             except httpx.HTTPError as exc:
-                last_error = f"网络错误：{type(exc).__name__}"
-                log.warning("请求 %s 失败（第 %d 次）：%s", path, attempt + 1, type(exc).__name__)
+                last_error = f"网络错误：{fmt_exc(exc)}"
+                log.warning("请求 %s 失败（第 %d 次）：%s", path, attempt + 1, fmt_exc(exc))
             else:
                 self._track_quota(resp)
                 if resp.status_code == 429 or resp.status_code >= 500:
@@ -371,9 +372,18 @@ class FootballAPI:
         return str(errors)
 
     # ---- 业务接口 ---------------------------------------------------------
-    async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict[str, Any]]:
-        """指定日期范围（含）内的赛程。"""
-        params = {"league": league_id, "season": season, "from": date_from.isoformat(), "to": date_to.isoformat()}
+    async def get_fixtures(self, league_id: int, season: int, date_from, date_to) -> list[dict[str, Any]]:
+        """指定日期范围（含）内的赛程。
+
+        两个端点同样走 ``_as_date`` 归一化——理由与 ``get_fixtures_by_date``
+        相同：``str`` 没有 ``.isoformat()``，而调用方传字符串是常态
+        （配置、CLI、数据库取出的都是字符串）。
+        """
+        params = {
+            "league": league_id, "season": season,
+            "from": _as_date(date_from).isoformat(),
+            "to": _as_date(date_to).isoformat(),
+        }
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
     async def get_fixtures_by_date(self, day) -> list[dict[str, Any]]:
