@@ -113,12 +113,59 @@ def test_stale_count_for_day_drops_after_settle(tmp_path):
 # ---- 回填编排 ---------------------------------------------------------------
 
 
-class _FakeRepo:
-    """最小替身：只提供回填方法用到的接口。"""
+def test_id_candidates_covers_both_writings():
+    """两种写法都要覆盖——这是「取到了却补不回来」的直接原因。"""
+    from service import PredictionService
 
-    def __init__(self, days: list[str], stale_before: int = 100):
+    assert PredictionService._id_candidates("555051") == ["555051", "fd-555051"]
+    assert PredictionService._id_candidates("fd-555051") == ["fd-555051", "555051"]
+
+
+def test_settle_any_id_falls_back_to_prefixed():
+    """库里存的是 fd- 前缀时，用裸 ID 也要能补回来。"""
+    from service import PredictionService
+
+    class R:
+        def __init__(self): self.called = []
+        def settle(self, fid, h, a):
+            self.called.append(str(fid))
+            return str(fid) == "fd-555051"
+
+    svc = object.__new__(PredictionService)
+    svc.repo = R()
+    svc.elo_enabled = False
+    svc._sync_elo = lambda *a, **k: None
+    assert svc._settle_any_id("555051", 1, 0, {}) is True
+    assert svc.repo.called == ["555051", "fd-555051"]
+
+
+def test_settle_any_id_does_not_double_sync_elo():
+    """命中即止，绝不两种写法都写——那会把 Elo 同步两遍。"""
+    from service import PredictionService
+
+    class R:
+        def settle(self, fid, h, a): return True   # 第一次就命中
+
+    svc = object.__new__(PredictionService)
+    svc.repo = R()
+    synced = []
+    svc._sync_elo = lambda *a, **k: synced.append(1)
+    svc._settle_any_id("555051", 1, 0, {})
+    assert len(synced) == 1
+
+
+class _FakeRepo:
+    """最小替身：只提供回填方法用到的接口。
+
+    known 里的 ID 才会被 settleset 命中——这样才能测出「取到了但 ID 对不上」
+    的真实场景（补回 0 场）。若 settle 恒真，该场景永远测不到。
+    """
+
+    def __init__(self, days: list[str], stale_before: int = 100,
+                 known: set[str] | None = None):
         self._days = days
         self._stale = stale_before
+        self._known = known or {"1", "2"}
         self.settled: list[tuple[str, int, int]] = []
 
     def stale_pending_days(self, limit: int = 60) -> list[str]:
@@ -127,7 +174,12 @@ class _FakeRepo:
     def count_stale_pending(self) -> int:
         return self._stale
 
+    def stale_pending_sample_ids(self, limit: int = 6) -> list[str]:
+        return sorted(self._known)[:limit]
+
     def settle(self, fixture_id, home, away) -> bool:
+        if str(fixture_id) not in self._known:
+            return False
         self.settled.append((str(fixture_id), int(home), int(away)))
         self._stale = max(0, self._stale - 1)
         return True
@@ -207,3 +259,50 @@ async def test_backfill_decreases_remaining(tmp_path):
     res = await svc.backfill_stale_settlements()
     assert res["remaining_before"] == 463
     assert res["remaining_after"] == 462
+
+
+@pytest.mark.asyncio
+async def test_backfill_reports_diagnostics_when_zero_settled():
+    """补回 0 场时必须给出可分辨原因的字段，否则无从排查。"""
+    from service import PredictionService
+
+    svc = object.__new__(PredictionService)
+    svc.repo = _FakeRepo(["2026-08-01"], stale_before=10)
+    svc.elo_enabled = False
+    svc.refresh_calibration = lambda: None
+
+    async def _fetch(d):
+        # 已完场，但 ID 在库里不存在 → 补不回来
+        return [{"fixture": {"id": "999999", "status": {"short": "FT"}},
+                 "goals": {"home": 1, "away": 0}}]
+
+    svc._fetch_all_by_date = _fetch
+    res = await svc.backfill_stale_settlements()
+    assert res["settled"] == 0
+    # 三个诊断字段必须都在，用于区分「没取到」与「ID 对不上」
+    assert res["fetched_fixtures"] == 1
+    assert res["finished_fixtures"] == 1
+    assert res["unmatched_sample"] == ["999999"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_via_prefixed_id():
+    """真实场景：库里存 fd- 前缀，数据源返回裸 ID。"""
+    from service import PredictionService
+
+    svc = object.__new__(PredictionService)
+    # 库里存的是带前缀的 ID，数据源返回裸 ID
+    svc.repo = _FakeRepo(["2026-08-01"], stale_before=5, known={"fd-555051"})
+    svc.elo_enabled = False
+    svc.refresh_calibration = lambda: None
+
+    async def _fetch(d):
+        return [{"fixture": {"id": "555051", "status": {"short": "FT"}},
+                 "goals": {"home": 2, "away": 1}}]
+
+    svc._fetch_all_by_date = _fetch
+    res = await svc.backfill_stale_settlements()
+    # 数据源给裸 ID，库里存 fd- 前缀 —— 靠候选回退命中
+    assert res["settled"] == 1
+    assert res["finished_fixtures"] == 1
+    assert svc.repo.settled == [("fd-555051", 2, 1)]

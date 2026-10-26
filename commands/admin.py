@@ -276,6 +276,32 @@ async def settlebackfill_cmd(update, context) -> None:
         f"补回场次　　<b>{res['settled']}</b>",
         f"超期未结算　{res['remaining_before']} → <b>{res['remaining_after']}</b>",
     ]
+    # 补回 0 场时，必须说清卡在哪一环：是没取到数据，还是取到了但 ID 对不上。
+    # 两者表象一样，处置完全不同——没有这段就只能靠猜。
+    if res["settled"] == 0:
+        lines.append("")
+        lines.append(f"取到比赛　　{res['fetched_fixtures']} 场"
+                     f"（其中已完场 {res['finished_fixtures']}）")
+        sample = service.repo.stale_pending_sample_ids()
+        if sample:
+            lines.append(f"库内 ID 样例　<code>{esc(', '.join(sample[:4]))}</code>")
+        if res["unmatched_sample"]:
+            lines.append(f"源端 ID 样例　<code>"
+                         f"{esc(', '.join(res['unmatched_sample'][:4]))}</code>")
+        if res["fetched_fixtures"] == 0:
+            lines.append("")
+            lines.append("<i>⚠️ 数据源在这些日期没有返回任何比赛。"
+                         "可能是赛季/日期超出该套餐的历史范围，"
+                         "或当日确实无赛程。</i>")
+        elif res["finished_fixtures"] == 0:
+            lines.append("")
+            lines.append("<i>⚠️ 取到了比赛但都不是已完场状态，"
+                         "说明这些日期的数据尚未归档比分。</i>")
+        else:
+            lines.append("")
+            lines.append("<i>⚠️ 取到了已完场比赛，但 ID 与库内记录对不上"
+                         "（上方两组样例对比即可确认）。"
+                         "这类场次需另行核对归属。</i>")
     if res["remaining_after"]:
         lines.append("")
         lines.append(f"<i>仍有 {res['remaining_after']} 场未结算，"

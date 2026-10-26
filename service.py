@@ -1998,21 +1998,35 @@ class PredictionService:
         Args:
             max_days: 本次最多补多少天（额度保护）。剩余的天下次再补。
 
+        ID 匹配必须兼容两种写法：库里 ``predictions.fixture_id`` 可能是
+        ``fd-555051``（备用源前缀）或 ``555051``（主源），而数据源按日期
+        返回的永远是其中一种。只精确匹配一种会导致「取到了却补不回来」。
+        这个坑在赛程页 JOIN 上已经踩过一次（PR #103），此处不能重犯。
+
         Returns:
             {scanned_days, settled, remaining_before, remaining_after,
-             days_done, failed_days}。
+             days_done, failed_days, fetched_fixtures, finished_fixtures,
+             unmatched_sample}。
             额度耗尽或取数失败都会如实反映在 failed_days 里，不上报为成功。
+            fetched/finished/unmatched_sample 用于区分
+            「没取到数据」与「取到了但 ID 对不上」——两者表象都是补回 0 场，
+            但处置完全不同。
         """
         days = self.repo.stale_pending_days(limit=int(max_days))
         if not days:
             return {"scanned_days": 0, "settled": 0,
                     "remaining_before": self.repo.count_stale_pending(),
                     "remaining_after": self.repo.count_stale_pending(),
-                    "days_done": 0, "failed_days": []}
+                    "days_done": 0, "failed_days": [],
+                    "fetched_fixtures": 0, "finished_fixtures": 0,
+                    "unmatched_sample": []}
 
         before = self.repo.count_stale_pending()
         settled = 0
         failed: list[str] = []
+        fetched = 0
+        finished = 0
+        unmatched: list[str] = []
         for d in days:
             try:
                 fixtures = await self._fetch_all_by_date(d)
@@ -2022,6 +2036,7 @@ class PredictionService:
                 continue
             by_id = {str((fx.get("fixture") or {}).get("id")): fx
                      for fx in fixtures or []}
+            fetched += len(by_id)
             if not by_id:
                 # 该日无数据（可能是无效日期或数据源无该日记录）。
                 # 不标记为失败——它不是错误，只是没取到东西。
@@ -2034,10 +2049,12 @@ class PredictionService:
                 home, away = goals.get("home"), goals.get("away")
                 if home is None or away is None:
                     continue
+                finished += 1
                 fid = str((fx.get("fixture") or {}).get("id"))
-                if self.repo.settle(fid, int(home), int(away)):
+                if self._settle_any_id(fid, int(home), int(away), fx):
                     settled += 1
-                    self._sync_elo(fx, int(home), int(away))
+                elif len(unmatched) < 6:
+                    unmatched.append(fid)
 
         after = self.repo.count_stale_pending()
         result = {
@@ -2047,11 +2064,43 @@ class PredictionService:
             "remaining_after": after,
             "days_done": len(days) - len(failed),
             "failed_days": failed,
+            "fetched_fixtures": fetched,
+            "finished_fixtures": finished,
+            "unmatched_sample": unmatched,
         }
         if settled:
             log.info("结算回填：补回 %d 场（%d→%d）", settled, before, after)
             self.refresh_calibration()
+        else:
+            # 补回 0 场时必须留下可诊断的信息，否则无从判断卡在哪一环。
+            log.warning("结算回填：0 场补回（扫描 %d 天，取到 %d 场，"
+                        "其中已完场 %d）。库内僵尸行 ID 样例：%s；"
+                        "未匹配上的数据源 ID 样例：%s",
+                        len(days), fetched, finished,
+                        self.repo.stale_pending_sample_ids(), unmatched)
         return result
+
+    def _settle_any_id(self, fid: str, home: int, away: int,
+                       fixture: dict[str, Any]) -> bool:
+        """用兼容两种写法的 ID 回写赛果，成功则同步 Elo。
+
+        库里的 fixture_id 可能是 ``fd-555051``（备用源）或 ``555051``（主源）。
+        数据源按日期返回的固定是其中一种，故逐个尝试，命中即止。
+        绝不「两种都写」——那会重复同步 Elo，把评分算两遍。
+        """
+        for cand in self._id_candidates(fid):
+            if self.repo.settle(cand, home, away):
+                self._sync_elo(fixture, home, away)
+                return True
+        return False
+
+    @staticmethod
+    def _id_candidates(fid: str) -> list[str]:
+        """生成 ID 的所有可能写法，按最可能命中的顺序排列。"""
+        s = str(fid)
+        if s.startswith("fd-"):
+            return [s, s[3:]]
+        return [s, f"fd-{s}"]
 
     def _sync_elo(self, fixture: dict[str, Any], home_score: int, away_score: int) -> None:
         """把一场已结束比赛计入 Elo。任何异常都不影响结算主流程。"""
