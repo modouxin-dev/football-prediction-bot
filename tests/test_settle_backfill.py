@@ -183,6 +183,16 @@ class _FakeRepo:
     def stale_pending_date_range(self):
         return (self._days[0], self._days[-1]) if self._days else ("", "")
 
+    # 队名兜底用：默认返回空，需要时由测试覆盖
+    rows_for_day: dict = None
+    id_kinds: dict = None
+
+    def stale_pending_rows_for_day(self, day):
+        return list((self.rows_for_day or {}).get(day, []))
+
+    def stale_pending_id_kinds(self):
+        return dict(self.id_kinds or {"fd": 0, "numeric": 0})
+
     def settle(self, fixture_id, home, away) -> bool:
         if str(fixture_id) not in self._known:
             return False
@@ -457,3 +467,126 @@ def test_remaining_after_gt_zero_is_enough_to_diagnose():
     settled, remaining_after = 486, 102
     assert not (settled == 0)                      # 老条件不成立
     assert (settled == 0 or remaining_after)       # 新条件成立
+
+
+# ---- 跨源 ID：队名兜底 -------------------------------------------------------
+# 线上实测：库内 fd-560593（备用源编号空间）vs 源端 1570410（主源编号空间）。
+# 剥掉前缀得到 560593，与主源 ID 毫无关系——前缀剥离对跨源无效。
+
+
+def test_cross_source_ids_are_in_different_spaces():
+    """两个源的 ID 在不同编号空间——这是「补不回来」的根因，先留档。
+
+    主源 API-Football 实测 1500000 量级；备用源 football-data.org 实测
+    560593 量级。``fd-560593`` 剥前缀 = ``560593``，与主源 ID 无关。
+    """
+    from service import PredictionService
+
+    cands = PredictionService._id_candidates("fd-560593")
+    assert cands == ["fd-560593", "560593"]
+    assert "1570410" not in cands      # 主源返回的 ID，永远匹配不上
+
+
+def _mk_fx(fid, home_name, away_name, hg, ag, status="FT"):
+    return {"fixture": {"id": fid, "status": {"short": status}},
+            "teams": {"home": {"name": home_name},
+                      "away": {"name": away_name}},
+            "goals": {"home": hg, "away": ag}}
+
+
+@pytest.mark.asyncio
+async def test_settle_by_team_names_matches_cross_source_rows():
+    """ID 对不上时，靠「日期 + 双方队名」补回——且不额外花额度。
+
+    known 里放的是**库里那一行自己的 ID**（fd-560593），不是数据源的
+    （1570410）——这正是真实情形：主源 ID 在库里不存在，所以 ID 匹配失败；
+    但按队名定位后，写的是行自己的 ID，能写进去。
+    """
+    from service import PredictionService
+
+    svc = object.__new__(PredictionService)
+    repo = _FakeRepo(["2026-08-01"], known={"fd-560593"})
+    repo.rows_for_day = {"2026-08-01": [("fd-560593", "Arsenal FC", "Chelsea FC")]}
+    svc.repo = repo
+    svc.elo_enabled = False
+    svc._sync_elo = lambda *a, **k: None
+
+    finished = [_mk_fx("1570410", "Arsenal", "Chelsea", 2, 1)]
+    assert svc._settle_by_team_names("2026-08-01", finished) == 1
+    # 写的是**行自己的 ID**，不是数据源的
+    assert repo.settled == [("fd-560593", 2, 1)]
+
+
+@pytest.mark.asyncio
+async def test_settle_by_team_names_refuses_ambiguous():
+    """有歧义一律放弃——写错比分比少补一场严重得多。"""
+    from service import PredictionService
+
+    svc = object.__new__(PredictionService)
+    repo = _FakeRepo(["2026-08-01"], known={"fd-1"})
+    repo.rows_for_day = {"2026-08-01": [("fd-1", "Arsenal FC", "Chelsea FC")]}
+    svc.repo = repo
+    svc.elo_enabled = False
+    svc._sync_elo = lambda *a, **k: None
+
+    # 同日同名两场（理论上罕见，但出现了就必须放弃而不是猜）
+    finished = [_mk_fx("1570410", "Arsenal", "Chelsea", 2, 1),
+                _mk_fx("1570411", "Arsenal", "Chelsea", 0, 0)]
+    assert svc._settle_by_team_names("2026-08-01", finished) == 0
+    assert repo.settled == []
+
+
+@pytest.mark.asyncio
+async def test_settle_by_team_names_requires_both_sides():
+    """只有主队名对上不算——单侧匹配会张冠李戴。"""
+    from service import PredictionService
+
+    svc = object.__new__(PredictionService)
+    repo = _FakeRepo(["2026-08-01"], known={"fd-1"})
+    repo.rows_for_day = {"2026-08-01": [("fd-1", "Arsenal FC", "Chelsea FC")]}
+    svc.repo = repo
+    svc.elo_enabled = False
+    svc._sync_elo = lambda *a, **k: None
+
+    finished = [_mk_fx("1570410", "Arsenal", "Tottenham", 2, 1)]
+    assert svc._settle_by_team_names("2026-08-01", finished) == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_reports_matched_by_name():
+    """回填结果要如实报出「靠队名补回多少」。"""
+    from service import PredictionService
+
+    class Api:
+        async def get_fixtures_by_date(self, day):
+            return [_mk_fx("1570410", "Arsenal", "Chelsea", 2, 1)]
+
+    svc = object.__new__(PredictionService)
+    repo = _FakeRepo(["2026-08-01"], known={"fd-560593"})
+    repo.rows_for_day = {"2026-08-01": [("fd-560593", "Arsenal FC", "Chelsea FC")]}
+    repo.id_kinds = {"fd": 1, "numeric": 0}
+    svc.repo = repo
+    svc.api = Api()
+    svc.elo_enabled = False
+    svc.refresh_calibration = lambda: None
+    res = await svc.backfill_stale_settlements()
+
+    assert res["settled"] == 1
+    assert res["matched_by_name"] == 1
+    assert res["id_kinds"] == {"fd": 1, "numeric": 0}
+
+
+# ---- ID 形态统计 -------------------------------------------------------------
+
+
+def test_id_kinds_counts_backup_vs_main(tmp_path):
+    repo = _mk(tmp_path, [("fd-560593", _days_ago(30)), ("1570410", _days_ago(20)),
+                          ("fd-560592", _days_ago(25))])
+    assert repo.stale_pending_id_kinds() == {"fd": 2, "numeric": 1}
+
+
+def test_rows_for_day_returns_team_names(tmp_path):
+    """队名兜底要能取到队名——只有 ID 定位不了。"""
+    repo = _mk(tmp_path, [("fd-560593", _days_ago(30))])
+    rows = repo.stale_pending_rows_for_day(_days_ago(30)[:10])
+    assert rows == [("fd-560593", "A", "B")]
