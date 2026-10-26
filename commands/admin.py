@@ -1300,6 +1300,22 @@ async def backtest_cmd(update, context) -> None:
         disable_web_page_preview=True)
 
 
+def _build_version() -> str:
+    """当前构建的提交版本（前 7 位）。
+
+    为什么诊断命令要自带版本：排查时最常遇到的不是「代码写错了」，
+    而是「修复已合入 main，但生产跑的是旧构建」。命令输出里带版本，
+    一眼就能区分这两种情况，不用反复确认部署状态。
+    """
+    return (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]
+
+
+#: /oddsprobe 自动选场时最多探测几场。
+#: /odds 是付费端点，无上限地逐场试会快速烧掉日配额——
+#: 探测的目的是看清盘口结构，一场足够，不需要扫完当天全部比赛。
+ODDS_PROBE_MAX_TRIES = 5
+
+
 async def oddsprobe_cmd(update, context) -> None:
     """/oddsprobe — 导出单场赔率的**真实盘口结构**（盘口 id / 名称 / 选项）。
 
@@ -1346,22 +1362,35 @@ async def oddsprobe_cmd(update, context) -> None:
         from datetime import datetime, timedelta, timezone as _tz
         try:
             today = datetime.now(_tz.utc).date()
+            # ⚠️ 直接传 date 对象，不调 .isoformat()。
+            # 此前写的是 (today + timedelta(days=off)).isoformat()，
+            # 生成 str 后传给接口——而 str 没有 .isoformat()，接口内部
+            # 再调一次就抛 AttributeError。接口入口现已归一化（_as_date），
+            # 但这里不该依赖下游兜底：源头不产生字符串就不会有这个错。
+            #
+            # 同时限制探测场次：/odds 是付费端点，逐个试会快速烧额度。
+            tried = 0
             for off in (0, 1, 2, 3):
-                day = (today + timedelta(days=off)).isoformat()
-                fx = await api.get_fixtures_by_date(day)
+                fx = await api.get_fixtures_by_date(today + timedelta(days=off))
                 for f in fx or []:
                     pid = (f.get("fixture") or {}).get("id")
                     if not pid:
                         continue
+                    if tried >= ODDS_PROBE_MAX_TRIES:
+                        break
+                    tried += 1
                     rows_odds = await api.get_odds(int(pid))
                     if rows_odds:
                         probe, fid = rows_odds, str(pid)
                         break
-                if probe:
+                if probe or tried >= ODDS_PROBE_MAX_TRIES:
                     break
         except Exception as exc:  # noqa: BLE001
             await update.message.reply_text(normalize(section("💱 盘口探测", [
                 f"❌ 自动选场失败：{esc(describe_error(exc))}",
+                f"构建版本　<code>{esc(_build_version())}</code>",
+                "<i>若版本不是 main 最新提交，说明生产跑的是旧构建，"
+                "请先重新部署再试。</i>",
             ])), parse_mode="HTML")
             return
 
@@ -1388,6 +1417,7 @@ async def oddsprobe_cmd(update, context) -> None:
                 seen[key] = {"vals": vals, "n": len(bet.get("values") or [])}
 
     lines = [f"探测对象　fixture <code>{esc(str(fid))}</code>",
+             f"构建版本　<code>{esc(_build_version())}</code>",
              f"博彩公司　{len(books)} 家", ""]
     for (bid, bname), info in sorted(seen.items(), key=lambda kv: kv[0][0]):
         head = f"id={bid} · {bname}" if bname else f"id={bid}"
