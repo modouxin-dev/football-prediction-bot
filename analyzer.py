@@ -830,15 +830,30 @@ def asian_handicap_prob(matrix: list[list[float]], line: float) -> dict[str, flo
             return 0.0, 1.0
         return 0.5, 0.5                # 走水：两边都退本金
 
-    # quarter 盘拆成相邻的两个半/整数盘各一半
+    # quarter 盘拆成相邻的两个半/整数盘各一半。
+    #
+    # ⚠️ 此前这里算错了，且错得很隐蔽：
+    #   base = floor(|line|); lower = base+0.5 if |line|>base else base
+    #   对 -0.25 → floor(0.25)=0 → lower=0.5, upper=1.0
+    #   对 -1.25 → floor(1.25)=1 → lower=1.5, upper=2.0
+    # 即 -0.25 被当成 -0.75 拆，整整差了一档。
+    # 后果：-0.25 打平本应「半输」（0 档走水 + -0.5 档输 = 0.25），
+    # 却算成 0（全输）；-0.25 赢一球本应全赢，却算成 0.75。
+    # 这是**真实比分回测**（openfootball 4718 场）抓出来的，不是推理。
+    #
+    # 正确对照（相邻两档，差 0.5）：
+    #   ±0.25 → 0    与 ±0.5
+    #   ±0.75 → ±0.5 与 ±1.0
+    #   ±1.25 → ±1.0 与 ±1.5
+    #   ±1.75 → ±1.5 与 ±2.0
+    # 统一写法：lower = floor(|line| × 2) / 2，upper = lower + 0.5
     frac = abs(line) % 1.0
     if abs(frac - 0.25) < 1e-9 or abs(frac - 0.75) < 1e-9:
-        # -0.75 → -0.5 与 -1.0 各半；-0.25 → 0 与 -0.5 各半
-        base = math.floor(abs(line))
-        lower = base + 0.5 if abs(line) > base else base
+        absline = abs(line)
+        sign = -1 if line < 0 else 1
+        lower = math.floor(absline * 2.0) / 2.0
         upper = lower + 0.5
-        legs = [(lower * (-1 if line < 0 else 1), 0.5),
-                (upper * (-1 if line < 0 else 1), 0.5)]
+        legs = [(sign * lower, 0.5), (sign * upper, 0.5)]
     else:
         legs = [(line, 1.0)]
 
