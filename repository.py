@@ -1380,6 +1380,58 @@ class PredictionRepository:
             log.warning("统计超期未结算失败：%s", exc)
             return 0
 
+    def stale_pending_days(self, days: int | None = None,
+                           limit: int = 60) -> list[str]:
+        """列出「超期未结算」行所在的**日期**（ISO 日期串，去重、由远及近）。
+
+        有了它才能按天补拉赛果：结算只按「日期」向数据源取数，
+        一次请求覆盖当天全部比赛。463 场若分布在 40 天里，就是 40 次请求，
+        而不是 463 次。
+
+        由远及近排序：先把最老的补掉，僵尸行总量才会单调下降；
+        若由近及远，一旦中途额度耗尽，剩下的永远是最老的那批。
+
+        Args:
+            days: 回溯窗口天数，默认 SETTLE_PENDING_FLOOR_DAYS
+            limit: 本次最多返回多少天（额度保护）
+
+        Returns:
+            日期串列表，如 ['2026-08-01', '2026-08-02']。
+        """
+        days = days if days is not None else self.SETTLE_PENDING_FLOOR_DAYS
+        try:
+            conn = self._connect()
+            floor = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            rows = conn.execute(
+                "SELECT DISTINCT substr(kickoff, 1, 10) AS d FROM predictions "
+                "WHERE actual_home IS NULL AND kickoff IS NOT NULL AND kickoff < ? "
+                "AND substr(kickoff, 1, 10) != '' "
+                "ORDER BY d LIMIT ?", (floor, limit),
+            ).fetchall()
+            seen: list[str] = []
+            for r in rows:
+                d = str(r["d"] or "").strip()
+                # 只接受严格的 YYYY-MM-DD，避免脏数据污染日期参数
+                if len(d) == 10 and d[4] == "-" and d[7] == "-":
+                    seen.append(d)
+            return seen
+        except Exception as exc:
+            log.warning("列出超期未结算日期失败：%s", exc)
+            return []
+
+    def stale_pending_count_for_day(self, day: str) -> int:
+        """某天有多少条超期未结算（用于回填前后对账）。"""
+        try:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM predictions WHERE actual_home IS NULL "
+                "AND substr(kickoff, 1, 10) = ?", (str(day),)
+            ).fetchone()
+            return int(row["n"] or 0) if row else 0
+        except Exception as exc:
+            log.warning("统计某日超期未结算失败：%s", exc)
+            return 0
+
     # ---- 统计 ---------------------------------------------------------------
     def settled_samples(self, limit: int = 2000) -> list[tuple[Any, ...]]:
         """已结算且三项概率齐全的样本，供温度校准拟合。

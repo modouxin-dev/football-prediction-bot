@@ -227,6 +227,68 @@ async def modelselect_cmd(update, context) -> None:
         "\n".join(lines), parse_mode="HTML")
 
 
+
+async def settlebackfill_cmd(update, context) -> None:
+    """/settlebackfill [天数] — 补回「超期未结算」的历史遗留场次。
+
+    背景：pending() 加了时间下界后，超期行不再堵死结算队列（解决了停摆），
+    但它们**永远不会被结算**（代价）——看板上「超期未结算 N 场」就是这批。
+    既不进命中率统计，也不会自己消失。
+
+    按天补：数据源一次请求返回当天全部比赛，成本是「天数」而非「场次数」。
+    默认一次最多 40 天，避免单次跑爆额度；剩余的下次再补。
+
+    ⚠️ 只回填**真实赛果**，不重算预测。预测概率是当时落盘的，
+    拿现在的积分榜去重算会引入前视偏差，命中率会虚高。
+    """
+    await _typing(update)
+    service = context.application.bot_data["service"]
+    args = list(getattr(context, "args", None) or [])
+    max_days = 40
+    if args:
+        try:
+            max_days = max(1, min(int(args[0]), 200))
+        except ValueError:
+            await update.effective_message.reply_text(
+                "❌ 参数无效。用法：\n`/settlebackfill` 默认 40 天\n`/settlebackfill 100` 指定天数")
+            return
+
+    before = service.repo.count_stale_pending()
+    if before == 0:
+        await update.effective_message.reply_text("✅ 没有超期未结算的场次，无需回填。")
+        return
+
+    progress = await update.effective_message.reply_text(
+        f"⏳ 超期未结算 {before} 场，正在按天回填（最多 {max_days} 天）…")
+    try:
+        res = await service.backfill_stale_settlements(max_days=max_days)
+    except Exception as exc:
+        log.exception("/settlebackfill 失败")
+        await progress.edit_text(f"❌ 回填失败：{esc(describe_error(exc))}")
+        return
+
+    lines = [
+        f"🧹 <b>结算回填完成</b>",
+        f"",
+        f"扫描天数　　{res['scanned_days']}",
+        f"成功取数　　{res['days_done']} 天"
+        + (f"（失败 {len(res['failed_days'])} 天）" if res["failed_days"] else ""),
+        f"补回场次　　<b>{res['settled']}</b>",
+        f"超期未结算　{res['remaining_before']} → <b>{res['remaining_after']}</b>",
+    ]
+    if res["remaining_after"]:
+        lines.append("")
+        lines.append(f"<i>仍有 {res['remaining_after']} 场未结算，"
+                     f"再跑一次本命令可继续补（默认每次最多 40 天）。</i>")
+    if res["failed_days"]:
+        lines.append("")
+        lines.append(f"失败日期：{esc(', '.join(res['failed_days'][:8]))}"
+                     + ("…" if len(res["failed_days"]) > 8 else ""))
+    lines.append("")
+    lines.append("<i>只回填真实赛果，不重算预测概率（重算会引入前视偏差）。</i>")
+    await progress.edit_text("\n".join(lines), parse_mode="HTML")
+
+
 async def diag_cmd(update, context) -> None:
     """/diag — 直连主源探活，暴露真实失败原因（套餐 / 赛季 / 配额 / 冷却）。
 
@@ -1243,6 +1305,8 @@ def register(dispatcher: CommandDispatcher) -> None:
     dispatcher.register("diag", diag_cmd, admin_only=True, description="直连主源探活，显示真实失败原因")
     dispatcher.register("modelselect", modelselect_cmd, admin_only=True,
                         description="候选模型对比（配对 bootstrap + 95% CI）")
+    dispatcher.register("settlebackfill", settlebackfill_cmd, admin_only=True,
+                        description="补回超期未结算的历史场次（按天）")
     dispatcher.register("stats", stats_cmd, admin_only=True, description="命中率统计")
     dispatcher.register("storage", storage_cmd, admin_only=True, description="存储自检")
     dispatcher.register("backfill", backfill_cmd, admin_only=True,
