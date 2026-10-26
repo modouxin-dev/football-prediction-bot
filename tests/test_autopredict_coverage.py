@@ -95,7 +95,10 @@ def test_auto_predict_quota_does_not_starve_tail_leagues():
 
     async def _predict(self, model, kickoff, fx):
         calls.append((int(fx["fixture"]["id"]) // 1000, 1))
-        return types.SimpleNamespace(fixture_id=fx["fixture"]["id"])
+        # recommendable=True：本例测的是「配额分配是否公平」，
+        # 不是亚盘策略。假预测必须带这个属性，否则会被无盘过滤掉。
+        return types.SimpleNamespace(fixture_id=fx["fixture"]["id"],
+                                     recommendable=True)
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(PredictionService, "_fetch_fixtures", _fetch)
