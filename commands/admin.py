@@ -276,9 +276,13 @@ async def settlebackfill_cmd(update, context) -> None:
         f"补回场次　　<b>{res['settled']}</b>",
         f"超期未结算　{res['remaining_before']} → <b>{res['remaining_after']}</b>",
     ]
-    # 补回 0 场时，必须说清卡在哪一环：是没取到数据，还是取到了但 ID 对不上。
-    # 两者表象一样，处置完全不同——没有这段就只能靠猜。
-    if res["settled"] == 0:
+    # ⚠️ 条件是「补回 0 场」**或**「仍有剩余」，不能只看补回 0 场。
+    # 实测反例：补回 486 场、剩余 102 → 102。此时 settled > 0，若只在
+    # 补回 0 场时才诊断，用户看到的就是「补回很多，但剩下的永远补不回来」，
+    # 且**没有任何线索**说明剩下的卡在哪——那 102 场才是真正需要处理的。
+    # 补回的场次里混着窗口内的正常未结算行（它们本就会被常规结算处理），
+    # 光看「补回 486」会误以为全部搞定。
+    if res["settled"] == 0 or res["remaining_after"]:
         lines.append("")
         lines.append(f"取到比赛　　{res['fetched_fixtures']} 场"
                      f"（其中已完场 {res['finished_fixtures']}）")
@@ -306,11 +310,18 @@ async def settlebackfill_cmd(update, context) -> None:
             lines.append("")
             lines.append("<i>⚠️ 取到了比赛但都不是已完场状态，"
                          "说明这些日期的数据尚未归档比分。</i>")
-        else:
+        elif res["settled"] == 0:
             lines.append("")
             lines.append("<i>⚠️ 取到了已完场比赛，但 ID 与库内记录对不上"
                          "（上方两组样例对比即可确认）。"
                          "这类场次需另行核对归属。</i>")
+        else:
+            lines.append("")
+            lines.append(f"<i>⚠️ 补回了 {res['settled']} 场，但仍有 "
+                         f"{res['remaining_after']} 场没补回来——"
+                         f"这些的 ID 与数据源对不上（多为赛季切换后失效的旧 ID），"
+                         f"再跑本命令也不会变。需要按上面样例核对归属，"
+                         f"或标记为放弃。</i>")
     if res["remaining_after"]:
         lines.append("")
         lines.append(f"<i>仍有 {res['remaining_after']} 场未结算，"
