@@ -355,7 +355,13 @@ def test_env_example_has_no_real_token():
 
 # ---- 限流与缓存 ---------------------------------------------------------------
 def test_429_uses_exponential_backoff_and_gives_up():
-    """429 最多重试 2 次后放弃，不无限重试耗尽额度。"""
+    """429 不无限重试耗尽额度。
+
+    此前断言「首次 + 2 次重试 = 3 次」，但确认限流后设置的是
+    **整源冷却 60 秒**，而退避只有 1s / 2s —— 在 60 秒冷却窗口内
+    再试必然还是 429，那 2 次重试拿不到数据、只占用同步时间窗。
+    改为确认限流后立即失败：真实请求 1 次。
+    """
     calls = {"n": 0}
 
     def limited(request):
@@ -366,7 +372,8 @@ def test_429_uses_exponential_backoff_and_gives_up():
     with pytest.raises(FootballDataError) as exc:
         run(fd.get_fixtures(39, 2026, date(2026, 9, 25), date(2026, 9, 25)))
     assert "429" in str(exc.value)
-    assert calls["n"] == 3  # 首次 + 2 次重试
+    # 冷却窗口 60s 远大于退避时长，秒级重试必然仍是 429：只发 1 次。
+    assert calls["n"] == 1
 
 
 def test_matches_are_cached_to_save_quota():

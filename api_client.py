@@ -97,6 +97,24 @@ class APIError(RuntimeError):
     """数据源返回错误（额度用尽、订阅无效、参数错误等）。"""
 
 
+# 「当日额度耗尽」的判据特征。额度是按天结算的硬上限，一旦打光，
+# 当天内任何重试都必然失败——重试只是白烧调用方的时间窗。
+# 判据必须**精确**：只认"按天结算"的措辞，不含 "day" 的一律视为
+# 可恢复的临时限流（每分钟/每秒），照旧退避重试。
+# 实测生产返回的原文："You have reached the request limit for the day."
+_DAILY_QUOTA_MARKERS = ("request limit for the day", "reached the request limit")
+
+
+def _is_daily_quota_exhausted(*parts: object) -> bool:
+    """判断错误是否属于「当日额度耗尽」这类当天不可恢复的失败。
+
+    只在**明确出现按天结算措辞**时返回 True。未知措辞一律返回 False：
+    误判成"额度耗尽"会让整套系统当天拒发所有请求，比多试两次更糟。
+    """
+    blob = " ".join(str(p) for p in parts if p).lower()
+    return "day" in blob and any(m in blob for m in _DAILY_QUOTA_MARKERS)
+
+
 SHOT_ON_TARGET_TYPES = ("Shots on Goal", "Shots on Target")
 
 
@@ -290,6 +308,14 @@ class FootballAPI:
                 if resp.status_code == 429 or resp.status_code >= 500:
                     last_error = self._describe_http(resp)
                     log.warning("请求 %s 失败（第 %d 次）：%s", path, attempt + 1, last_error)
+                    # 429 有两种截然不同的含义：临时限流（可恢复）与
+                    # 当日额度耗尽（当天不可恢复）。此前二者一视同仁地退避
+                    # 重试 3 次，于是额度打光后每个调用点仍各烧 3 次无效请求，
+                    # 而熔断开关始终未启动 —— 系统处于无人知晓的空转。
+                    if resp.status_code == 429 and _is_daily_quota_exhausted(
+                            last_error, self._safe_body_text(resp)):
+                        self._mark_quota_exhausted(last_error)
+                        break
                 elif resp.status_code >= 400:
                     raise APIError(self._describe_http(resp))
                 else:
@@ -298,6 +324,11 @@ class FootballAPI:
                     if errors:
                         if isinstance(errors, dict) and "rateLimit" in errors:
                             last_error = self._format_errors(errors)
+                            # 同上：rateLimit 里写明"按天"才是真的没救，
+                            # 其余（每分钟限流）照旧退避重试。
+                            if _is_daily_quota_exhausted(last_error):
+                                self._mark_quota_exhausted(last_error)
+                                break
                             retry_wait = max(retry_wait, 6.0) if self._retry_delay else 0
                         else:
                             raise APIError(self._format_errors(errors))
@@ -309,6 +340,24 @@ class FootballAPI:
                 await asyncio.sleep(retry_wait)
 
         raise APIError(last_error)
+
+    def _mark_quota_exhausted(self, reason: str) -> None:
+        """确认当日额度已耗尽：置熔断，后续请求在入口即被拒发。
+
+        quota_exhausted 只在 _quota_left 已知时为真，所以必须显式写 0，
+        否则接口不返回 remaining 头时熔断永远不启动。
+        """
+        self._quota_left = 0
+        self.quota_remaining = "0"
+        log.error("主源当日额度已耗尽，已熔断至次日重置：%s", str(reason)[:120])
+
+    @staticmethod
+    def _safe_body_text(resp: httpx.Response) -> str:
+        """安全读取响应体文本用于额度判别；读不到不影响主流程。"""
+        try:
+            return (resp.text or "")[:500]
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _track_quota(self, resp: httpx.Response) -> None:
         remaining = resp.headers.get("x-ratelimit-requests-remaining")

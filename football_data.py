@@ -187,9 +187,11 @@ class FootballDataAPI:
                     self._rate_limited_until = time.monotonic() + RATE_LIMIT_COOLDOWN
                     log.warning("备用源 429 限流（第 %d 次），整源冷却 %.0fs",
                                 attempt + 1, RATE_LIMIT_COOLDOWN)
-                    if attempt < MAX_RETRIES:
-                        await asyncio.sleep(2**attempt)
-                        continue
+                    # 既然已判定整源冷却，重试必然还是 429 —— 此时再睡再试
+                    # 只是把 1 次真实请求放大成 3 次，白白占用同步时间窗。
+                    # 实测：修复前一轮 10 联赛同步的首个请求就发 3 次。
+                    # 冷却由入口的 _rate_limited_until 拦住后续请求，
+                    # 这里立即失败，不做无意义退避。
                     raise FootballDataError(last_error)
                 if resp.status_code == 401:
                     raise FootballDataError("HTTP 401 Token 无效")
