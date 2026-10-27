@@ -144,6 +144,10 @@ class MatchSync:
 
         与 sync_window 的区别：不带日期范围，只按 league+season 请求，
         否则主源会因套餐限制拒绝历史赛季。
+
+        ⚠️ 幂等：已结束的赛季若本地已有该赛季数据则整季跳过，不发请求。
+        历史赛季的赛果不会再变，重复拉取只是白烧额度——实测 5 联赛 × 10 赛季
+        一轮 51 次请求，第二轮新增 0 场，是 100% 空转。
         """
         comps = self.competitions
         result: dict[str, Any] = {
@@ -155,7 +159,23 @@ class MatchSync:
         }
         for league_id in self.league_ids:
             result["per_league"].append(await self._sync_season_one(league_id, season))
+        items = result["per_league"]
+        skipped = [i for i in items if i.get("skipped")]
+        result["skipped"] = len(skipped)
         self._aggregate(result, empty_message="该赛季暂无数据（可能套餐不支持）")
+        # 全部跳过时 received/saved 都是 0，默认文案会误报成「套餐不支持」；
+        # 这里改成真实原因，否则看板上「跳过」看起来像失败。
+        if skipped and len(skipped) == len(items):
+            result["ok"] = True
+            result["http_status"] = "200"
+            result["message"] = (
+                f"赛季 {season} 已结束且本地已有数据，整季跳过"
+                f"（历史赛季不会变，不重复消耗额度）")
+        elif skipped:
+            result["message"] = (
+                f"部分联赛已回填跳过（{len(skipped)}/{len(items)}）："
+                f"{result['message']}" if result.get("message") else
+                f"部分联赛已回填跳过（{len(skipped)}/{len(items)}）")
         self.last_result = result
         return result
 
@@ -167,6 +187,15 @@ class MatchSync:
             "http_status": "200", "received": 0, "saved": 0,
             "message": "", "ok": False,
         }
+        # 已结束的赛季：本地有数据就不再回源。
+        # 进行中的赛季（当前赛季）绝不跳过——它每轮都可能产生新赛果。
+        if _season_is_closed(season, date.today()) and self._season_has_local(comp, season):
+            item["ok"] = True
+            item["skipped"] = True
+            item["message"] = f"赛季 {season} 已结束且本地已有数据，跳过"
+            log.info("赛季 %s 回填跳过（联赛 %s）：已有本地数据且赛季已结束",
+                     season, league_id)
+            return item
         try:
             fixtures = await self.service.api.get_fixtures_by_season(
                 int(league_id), season
@@ -202,6 +231,18 @@ class MatchSync:
         log.info("赛季 %s 回填（联赛 %s）：收到 %d 保存 %d",
                  season, league_id, len(fixtures), saved)
         return item
+
+    def _season_has_local(self, comp: str, season: int) -> bool:
+        """本地库里是否已有该联赛该赛季的比赛。
+
+        只用于「跳过判断」，因此读不到就返回 False（走原路径回源），
+        绝不能因为查询失败就把还没回填的赛季误判成已回填。
+        """
+        d0, d1 = _season_window(season)
+        try:
+            return bool(self.repo.load_matches(str(comp), d0, d1, limit=1))
+        except Exception:  # noqa: BLE001
+            return False
 
     # ---- 汇总 -------------------------------------------------------------
     @staticmethod
@@ -309,3 +350,23 @@ def has_fresh_data(repo, competition: str, date_from: date, date_to: date) -> bo
         return bool(repo.load_matches(str(competition), date_from.isoformat(), date_to.isoformat()))
     except Exception:
         return False
+
+
+def _season_window(season: int) -> tuple[str, str]:
+    """赛季覆盖的日期窗口。
+
+    欧洲主流联赛是跨年制（2024 赛季 = 2024-07 ~ 2025-06），
+    取 07-01 ~ 次年 06-30 能完整覆盖，且不与相邻赛季重叠。
+    """
+    return f"{season}-07-01", f"{season + 1}-06-30"
+
+
+def _season_is_closed(season: int, today: date) -> bool:
+    """该赛季是否已经结束（结束后不会再产生新赛果）。
+
+    7 月及以后视为新赛季已开打，此前仍算上赛季进行中。
+    只有「已结束」的赛季才允许跳过——进行中的赛季每轮都可能出新赛果，
+    跳过会让本地库停在过去某个时点。
+    """
+    current_opening = today.year if today.month >= 7 else today.year - 1
+    return int(season) < current_opening
