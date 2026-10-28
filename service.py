@@ -1171,7 +1171,13 @@ class PredictionService:
 
         # 位置映射：伤停端点没有位置，靠球队名单补上
         positions: dict[str, dict[str, str]] = {}
-        if squad_call:
+        # ⚠️ 没有伤停时不要取名单：positions 的唯一用途是给
+        # weighted_absence_load 做位置加权，而该函数在 not injuries 时
+        # 直接 return 0.0（context.py:193）。此前无条件取，等于每场预测
+        # 白烧 2 次 /players/squads（主客各一次）——实测一轮 12 场就是
+        # 24 次，占冷启动请求量的 43%。缓存命中时省不下，但每次重启
+        # 缓存清空后都会再烧一遍。
+        if squad_call and injuries:
             for key, tid in (("home", str(home_id)), ("away", str(away_id))):
                 try:
                     raw = await _safe_api_call(lambda tid=tid: squad_call(tid))
