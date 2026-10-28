@@ -45,6 +45,7 @@ import analytics  # noqa: E402
 from templates import resolve_league  # noqa: E402
 import joblog  # noqa: E402
 import paths  # noqa: E402
+import runtime_info  # noqa: E402
 from repository import PredictionRepository  # noqa: E402
 
 # 默认日期必须按项目时区（默认 Asia/Shanghai）算，不能用 UTC。
@@ -265,6 +266,13 @@ async def health() -> JSONResponse:
         "db_path": _DB_PATH,
         "persistent": not bool(warn),
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        # 下面三项用于回答「这个实例到底是不是新部署的那一个」：
+        # version 只能说明代码版本，区分不了「旧容器还在跑同一个 commit」。
+        # 同一份代码部署到多处（Railway + Fly）时，platform + started_at
+        # 是唯一能把它们区分开的依据。
+        "platform": runtime_info.platform(),
+        "started_at": runtime_info.started_at().isoformat(),
+        "uptime_seconds": int(runtime_info.uptime_seconds()),
     }
     if warn:
         payload["warning"] = warn

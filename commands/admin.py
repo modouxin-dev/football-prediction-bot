@@ -20,6 +20,7 @@ from backtest_corpus import load_corpus
 from bot_handler import BotUI, esc
 from formatkit import BLANK, SEP, hbar, kv_line, pad_cjk, section, section_join
 from repository import BRIER_RANDOM, quota_today
+import runtime_info
 from scheduler import DAILY_JOB, run_push
 import oddsprobe_log as _probe_log
 from support import describe_error, reply_html
@@ -673,6 +674,13 @@ async def status_cmd(update, context) -> None:
     W = 12
     runtime_rows = [
         ("🔖", "版本", esc(version)),
+        # 平台 + 启动时刻：多个实例共用同一个 API Key 时（例如 Railway 与
+        # Fly.io 各跑一份），版本号相同、看不出谁是谁。这两项是区分实例的
+        # 唯一依据 —— 而且 Fly 那份只跑 main.py、没有 HTTP 端点，只能靠这里看见。
+        ("🖥", "平台", esc(runtime_info.platform())),
+        ("⏱", "运行时长",
+         f"启动于 {runtime_info.started_at().astimezone(settings.timezone):%m-%d %H:%M}"
+         f" · 已运行 {esc(runtime_info.uptime_human())}"),
         ("🏆", "联赛/赛季", season_line),
         ("⏰", "推送时间",
          f"每天 {settings.push_time:%H:%M}（{esc(settings.timezone.zone)}）"),
