@@ -131,7 +131,11 @@ CREATE TABLE IF NOT EXISTS predictions (
     inputs       TEXT,
     actual_home  INTEGER,
     actual_away  INTEGER,
-    settled_at   TEXT
+    settled_at   TEXT,
+    -- 最后一次重算的时间。与 created_at 分开：created_at 是"首次算出"，
+    -- 重算时它被 ON CONFLICT 覆盖，语义已经不清；updated_at 只表示"最近一次
+    -- 真正消耗额度算过是什么时候"，是去重冷却的唯一依据。
+    updated_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_predictions_kickoff ON predictions(kickoff);
 
@@ -622,6 +626,7 @@ class PredictionRepository:
         self._ensure_signal_ab_columns()
         self._seed_signal_registry()
         self._ensure_prediction_fixture_column()
+        self._ensure_prediction_updated_column()
 
     PREDICTION_FIXTURE_COLUMN = "fixture_json"
 
@@ -641,6 +646,68 @@ class PredictionRepository:
             conn.commit()
         except Exception as exc:
             log.warning("补建 predictions.fixture_json 列失败：%s", exc)
+
+    def prediction_updated_map(self, fixture_ids) -> dict[str, datetime]:
+        """批量取回这些比赛「最后一次重算」的时间，用于去重冷却。
+
+        做成批量而不是逐场查：自动预测一轮要看几十场，逐场查就是几十次
+        SQL；而冷却判断只需要一张表，一次 IN 查询即可。
+
+        查不到（没算过、或旧库该列为空）的比赛**不出现在返回里**——调用方
+        据此认为"没算过，该算"，符合"宁可多算一场也不能漏算"的取向。
+        时间串解析失败的同样当没算过：不能因为一条脏数据就把这场比赛
+        永久锁死在"刚算过"的状态里。
+        """
+        ids = [str(x) for x in (fixture_ids or []) if x is not None]
+        if not ids:
+            return {}
+        out: dict[str, datetime] = {}
+        try:
+            conn = self._connect()
+            for chunk_start in range(0, len(ids), 400):
+                chunk = ids[chunk_start:chunk_start + 400]
+                marks = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT fixture_id, updated_at FROM predictions "
+                    f"WHERE fixture_id IN ({marks})",
+                    tuple(chunk),
+                ).fetchall()
+                for row in rows:
+                    raw = row["updated_at"] if "updated_at" in row.keys() else None
+                    if not raw:
+                        continue
+                    try:
+                        out[str(row["fixture_id"])] = datetime.fromisoformat(raw)
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as exc:
+            # 读冷却判据失败时返回空表：调用方会把所有比赛当成"没算过"。
+            # 这是有意的取向——判据读不出来就退回"照常算"，宁可多花额度，
+            # 也不能让预测静默停更。
+            log.warning("读取预测重算时间失败（按未算过处理）：%s", exc)
+            return {}
+        return out
+
+    PREDICTION_UPDATED_COLUMN = "updated_at"
+
+    def _ensure_prediction_updated_column(self) -> None:
+        """为旧库补上 predictions.updated_at：最近一次重算的时间。
+
+        为什么必须单独一列，不能拿 created_at 顶替：
+            created_at 在 ON CONFLICT DO UPDATE 里被一并覆盖，它实际记的是
+            "最后一次写入时间"，名字却叫创建时间。拿它当冷却判据能跑，
+            但语义是错的——后来人会按名字理解成"首次算出"并在别处误用。
+            去重冷却是额度相关的关键判据，判据的语义必须自明。
+            补列幂等，失败不拖垮启动。
+        """
+        try:
+            conn = self._connect()
+            existing = {r["name"] for r in conn.execute("PRAGMA table_info(predictions)")}
+            if self.PREDICTION_UPDATED_COLUMN not in existing:
+                conn.execute("ALTER TABLE predictions ADD COLUMN updated_at TEXT")
+            conn.commit()
+        except Exception as exc:
+            log.warning("补建 predictions.updated_at 列失败：%s", exc)
 
     # 外部数据缓存 TTL（秒）。按「数据本身多长时间会变一次」定，
     # 而不是按「额度还剩多少」定——额度是结果不是依据。
@@ -1047,8 +1114,8 @@ class PredictionRepository:
                 """INSERT INTO predictions
                    (fixture_id, season, league, home, away, kickoff, model_version,
                     source, level_key, result, home_prob, draw_prob, away_prob,
-                    best_score, created_at, inputs, fixture_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    best_score, created_at, inputs, fixture_json, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(fixture_id) DO UPDATE SET
                      season=excluded.season, kickoff=excluded.kickoff,
                      model_version=excluded.model_version, source=excluded.source,
@@ -1056,6 +1123,7 @@ class PredictionRepository:
                      home_prob=excluded.home_prob, draw_prob=excluded.draw_prob,
                      away_prob=excluded.away_prob, best_score=excluded.best_score,
                      created_at=excluded.created_at, inputs=excluded.inputs,
+                     updated_at=excluded.updated_at,
                      -- 新快照为空时保留旧快照：重算预测不该把已保存的赛程数据抹掉
                      fixture_json=COALESCE(excluded.fixture_json, predictions.fixture_json)""",
                 (
@@ -1076,6 +1144,10 @@ class PredictionRepository:
                     prediction.created_at.isoformat(),
                     json.dumps(getattr(prediction, "inputs", {}), ensure_ascii=False),
                     _dump_fixture_json(getattr(prediction, "fixture", None)),
+                    # 重算时间取"此刻"而非 prediction.created_at：
+                    # 后者是模型对象自带的产出时间，重算时对象可能沿用旧值，
+                    # 拿它当冷却起点会让刚算完的比赛被判定为"很久没算"。
+                    datetime.now(timezone.utc).isoformat(),
                 ),
             )
             conn.commit()
