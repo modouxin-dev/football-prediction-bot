@@ -9,10 +9,11 @@ from errfmt import fmt_exc
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable
 
 import httpx
+import os
 
 # 缓存后端：优先用 cache_manager 的 TTL + LRU 实现（有容量上限，不会无界增长），
 # 取不到时退回简单字典。
@@ -102,6 +103,21 @@ class APIError(RuntimeError):
 # 判据必须**精确**：只认"按天结算"的措辞，不含 "day" 的一律视为
 # 可恢复的临时限流（每分钟/每秒），照旧退避重试。
 # 实测生产返回的原文："You have reached the request limit for the day."
+def _quota_day() -> str:
+    """按额度结算时区取当日日期，供熔断的按天自动解除比对。
+
+    与 repository._quota_day() 保持同一口径（QUOTA_TZ > TIMEZONE > Asia/Shanghai）。
+    这里不直接 import repository —— 它是数据库层，会让底层 HTTP 客户端背上 ORM 依赖。
+    """
+    tzname = os.environ.get("QUOTA_TZ") or os.environ.get("TIMEZONE") or "Asia/Shanghai"
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(tzname)
+    except Exception:  # 容器缺 tzdata 时退化为固定 +8
+        tz = timezone(__import__("datetime").timedelta(hours=8))
+    return datetime.now(tz).strftime("%Y-%m-%d")
+
+
 _DAILY_QUOTA_MARKERS = ("request limit for the day", "reached the request limit")
 
 
@@ -219,6 +235,13 @@ def _as_date(day) -> date:
 
 
 class FootballAPI:
+
+    # 额度熔断的归属日（None = 未熔断）。
+    # 设为**类级**默认值：部分测试用 FootballAPI.__new__() 构造实例以避开
+    # 网络初始化，这类实例不走 __init__，若只在 __init__ 里赋值就会
+    # AttributeError。类级默认让任何构造路径都具备该属性。
+    _quota_exhausted_day: str | None = None
+
     def __init__(
         self,
         api_key: str,
@@ -252,6 +275,8 @@ class FootballAPI:
         # 期间整套系统处于无人知晓的停摆状态。
         self.quota_floor = int(quota_floor) if quota_floor else 0
         self._quota_left: int | None = None
+        # 熔断所属额度日；None = 未熔断。跨日后据此自动解除。
+        self._quota_exhausted_day: str | None = None
         # 实时端点最后一次失败原因（None = 最近一次成功或从未调用）。
         # 用于区分「没有进行中的比赛」与「套餐不支持 live」。
         self.last_live_error: str | None = None
@@ -349,7 +374,9 @@ class FootballAPI:
         """
         self._quota_left = 0
         self.quota_remaining = "0"
-        log.error("主源当日额度已耗尽，已熔断至次日重置：%s", str(reason)[:120])
+        self._quota_exhausted_day = _quota_day()
+        log.error("主源当日额度已耗尽，已熔断至次日（%s）重置：%s",
+                  self._quota_exhausted_day, str(reason)[:120])
 
     @staticmethod
     def _safe_body_text(resp: httpx.Response) -> str:
@@ -368,6 +395,14 @@ class FootballAPI:
             except (TypeError, ValueError):
                 # 头部不是整数（部分网关返回带引号的字符串），保持未知
                 self._quota_left = None
+                return
+            # 维护熔断归属日：额度恢复时立即清除；耗尽时记下当天，
+            # 供 quota_exhausted 跨天自动解除比对。否则「响应头返回 0」
+            # 这条路径同样会形成永不解除的死锁。
+            if self._quota_left > int(getattr(self, "quota_floor", 0) or 0):
+                self._quota_exhausted_day = None
+            elif self._quota_exhausted_day is None:
+                self._quota_exhausted_day = _quota_day()
 
     @property
     def quota_left(self) -> int | None:
@@ -382,6 +417,21 @@ class FootballAPI:
         否则一次头部解析失败就会让整套系统拒发所有请求，
         那比额度打光本身更糟。
         """
+        # 跨天自动解除：额度按日结算，熔断只应在触发当日有效。
+        # 此前熔断是单向锁存——唯一能改写 _quota_left 的 _track_quota 只在
+        # 真实发出请求后执行，而熔断后请求在入口即被拒，永远走不到更新，
+        # 于是主源被永久停用：/status 长期显示「备用源生效中」，
+        # 而数据源侧额度其实仍有剩余。这里按额度日比对解锁。
+        if self._quota_exhausted_day is not None:
+            today = _quota_day()
+            if self._quota_exhausted_day != today:
+                log.info("额度已跨日（%s -> %s），自动解除主源熔断",
+                         self._quota_exhausted_day, today)
+                self._quota_exhausted_day = None
+                self._quota_left = None
+                self.quota_remaining = None
+                return False
+            return True
         left = self._quota_left
         if left is None:
             return False
