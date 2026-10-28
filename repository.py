@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import random
 import sqlite3
 import threading
@@ -444,15 +445,23 @@ def current_quota_task() -> str:
 
 
 def _quota_day() -> str:
-    """按机器人时区（默认 Asia/Shanghai）取当日日期。
+    """按额度结算时区取当日日期，用于本地额度账本分桶。
 
-    免费层额度按自然日重置，所以计数也按「机器人所在时区的自然日」分桶，
-    避免 UTC 与本地时区错位导致跨天统计串味。
+    数据源侧按「自然日」结算（官方响应头 x-ratelimit-requests-remaining
+    即为当日剩余），但官方并未公开重置的具体时刻，因此这里不再硬编码
+    「必然与数据源对齐」，而是允许用 ``QUOTA_TZ`` 单独指定额度结算时区：
+
+    - 未设置时沿用 ``TIMEZONE``（默认 Asia/Shanghai），行为与改动前完全一致；
+    - 观察到数据源真实重置时刻后，设 ``QUOTA_TZ=UTC`` 之类即可对齐，
+      无需改代码。
+
+    若不指定，本进程账本与数据源账本最多可能相差一个时区偏移的窗口，
+    跨天时两处数字会短暂对不上 —— 这是口径差异，不是漏记。
     """
+    tzname = os.environ.get("QUOTA_TZ") or os.environ.get("TIMEZONE") or "Asia/Shanghai"
     try:
-        import os
         from zoneinfo import ZoneInfo
-        tz = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Shanghai"))
+        tz = ZoneInfo(tzname)
     except Exception:  # 容器缺 tzdata 时退化为固定 +8，不影响计数可用性
         from datetime import timedelta
         tz: ZoneInfo | timezone = timezone(timedelta(hours=8))
