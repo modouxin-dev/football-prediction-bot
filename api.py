@@ -676,8 +676,17 @@ def _live_client() -> Any:
             return _LIVE_CLIENT
         from api_client import FootballAPI
 
-        _LIVE_CLIENT = DataSourceRouter(
-            FootballAPI(settings.api_key, provider=settings.api_provider))
+        # 看板进程同样会发真实请求（实时赛况），此前未接 quota_sink，
+        # 这部分消耗完全不进本地账本 —— 这正是「API 侧 3360 / 本地实测 280」
+        # 对不上的机制之一。与 main.py 的机器人侧保持一致地记账。
+        try:
+            from repository import bump_quota as _dash_bump_quota
+            _LIVE_CLIENT = DataSourceRouter(
+                FootballAPI(settings.api_key, provider=settings.api_provider),
+                quota_sink=_dash_bump_quota)
+        except Exception:  # 计数不可用时看板功能不受影响
+            _LIVE_CLIENT = DataSourceRouter(
+                FootballAPI(settings.api_key, provider=settings.api_provider))
     except Exception as exc:  # 客户端不可用绝不能让看板整页 500
         log.warning("实时客户端不可用：%s", exc)
         _LIVE_CLIENT = False
