@@ -108,6 +108,25 @@ PREMATCH_REFRESH_CAP = 24
 # 天气提前太久不准（预报会改），6 小时内才取。
 CONTEXT_WEATHER_WINDOW = 6 * 3600  # 秒
 
+# 自动预测的「重算冷却」：距上次真正算过不足这个时长就跳过。
+#
+# 必须严格小于 AUTO_PREDICT_INTERVAL_HOURS（6 小时），否则下一轮调度
+# 会把所有比赛判成"刚算过"，预测从此不再更新——省额度省到功能停摆。
+# 取 3 小时 = 间隔的一半：
+#   · 正常 6 小时一轮 → 3 < 6，每轮照常重算，功能不受影响；
+#   · 容器反复重启（first=120 秒就会跑一次）→ 重启间隔小于 3 小时时
+#     后续那次直接跳过，这正是要省下的部分。
+# 重启之所以是主要浪费源：进程内存里的缓存在重启后清空，新一轮
+# 会把上一轮刚算完的几十场原样重算一遍，概率几乎没变，额度却照扣。
+AUTO_PREDICT_RECALC_COOLDOWN_HOURS = 3
+
+# 赛前刷新**不做**重算冷却。它每 15 分钟一轮的全部意义就是反复轮询，
+# 等官方公布阵容的那一刻；跳过一次就可能错过整场信号。实测过按
+# "上次算过的时间"兜底：能让始终拿不到阵容的比赛少算几次，但代价是
+# 打破 test_fixture_without_lineups_is_retried_next_run 锁住的语义
+# （官方一直不给阵容时必须下一轮继续试）。阵容信号比额度重要，故不采用。
+# 该场景的去重只依赖 _lineup_already_applied。
+
 
 async def _no_injuries() -> list[dict[str, Any]]:
     """数据源未提供伤停接口时的空实现（保持 gather 结构不变）。"""
@@ -747,7 +766,17 @@ class PredictionService:
             # 无亚盘而跳过：必须可观测——「刻意收缩覆盖面换准确率」的取舍
             # 到底砍掉了多少场，不能靠猜。若这个数长期偏高，说明误杀过多。
             "skipped_no_handicap": 0,
+            # 距上次重算不足冷却期而跳过：这是省下来的额度，必须可观测。
+            # 长期为 0 → 去重没生效；等于 checked 总数 → 冷却设得比调度
+            # 间隔还大，预测已经停止更新。两者都是故障，靠这个数才能发现。
+            "skipped_recent": 0,
+            "checked": 0,
         }
+
+        # 冷却判据在发请求之前一次性取回：逐场查库会把"省额度"变成
+        # "换一种方式花掉"（几十次 SQL），而这些查询本身还不进额度统计。
+        cooldown_seconds = max(
+            0.0, float(AUTO_PREDICT_RECALC_COOLDOWN_HOURS) * 3600.0)
 
         # 第一阶段：先把各联赛窗口内未开赛的赛程收集齐。
         pending: list[tuple[int, list[tuple[Any, dict[str, Any]]], Any]] = []
@@ -775,6 +804,18 @@ class PredictionService:
         cursor: dict[int, int] = {lid: 0 for lid, _, _ in pending}
         saved_per: dict[int, int] = {lid: 0 for lid, _, _ in pending}
         total = 0
+
+        # 一次性取回全部候选的最后重算时间，供循环内做冷却判断。
+        # 放在循环外：pending 在循环里不变，没必要每轮重查。
+        all_ids = [
+            (fx.get("fixture") or {}).get("id")
+            for _lid, upcoming, _n in pending for _k, fx in upcoming
+        ]
+        try:
+            updated_map = self.repo.prediction_updated_map(all_ids)
+        except Exception as exc:  # 判据取不到就全部当"没算过"，照常算
+            log.warning("自动预测：读取重算时间失败（全部重算）：%s", exc)
+            updated_map = {}
         while total < cap:
             progressed = False
             for lid, upcoming, _note in pending:
@@ -794,6 +835,19 @@ class PredictionService:
                         continue
                 kickoff, fx = upcoming[i]
                 cursor[lid] = i + 1
+                # 冷却去重：刚刚算过（通常是重启前的那一轮）就不再发请求。
+                # 只跳过"真的算过"的——无盘跳过那一场没有落盘，下一轮仍会重试。
+                fid = (fx.get("fixture") or {}).get("id")
+                stats["checked"] += 1
+                if cooldown_seconds > 0 and fid is not None:
+                    last = updated_map.get(str(fid))
+                    if last is not None:
+                        # 用绝对值：容器时区与库里存的 UTC 串混用时会算出负数，
+                        # 负差值会让"很久以前算过"被误判成"刚刚算过"。
+                        if abs((now - self._as_utc(last)).total_seconds()) < cooldown_seconds:
+                            stats["skipped_recent"] += 1
+                            progressed = True
+                            continue
                 try:
                     prediction = await self._predict_one(models[lid], kickoff, fx)
                 except Exception as exc:
@@ -884,6 +938,7 @@ class PredictionService:
         candidates.sort(key=lambda item: item[0])
 
         models: dict[int, Any] = {}
+        # 这里不取重算时间做冷却：见文件头部 PREMATCH 冷却的说明。
         for kickoff, fx in candidates[: max(int(cap), 1)]:
             fid = (fx.get("fixture") or {}).get("id")
             stats["checked"] += 1
@@ -922,6 +977,20 @@ class PredictionService:
                 "prediction": prediction,
             })
         return stats
+
+    @staticmethod
+    def _as_utc(moment: datetime) -> datetime:
+        """把时间统一成带 UTC 时区的 datetime，供时间差计算用。
+
+        为什么需要它：库里存的 updated_at 由不同路径写入，有的带时区后缀、
+        有的不带（SQLite 直连写入容易出现 naive 值）。naive 与 aware 相减
+        会直接抛 TypeError；更隐蔽的是，把 naive 当本地时间解释会让差值
+        偏好几小时，冷却判断随之失效。这里一律按 UTC 解释 naive 值，
+        与写入侧的 datetime.now(timezone.utc) 保持一致。
+        """
+        if moment.tzinfo is None:
+            return moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc)
 
     def _lineup_already_applied(self, fixture_id: Any) -> bool:
         """该场是否已经拿到过首发阵容并施加过（用于避免每轮重复请求）。

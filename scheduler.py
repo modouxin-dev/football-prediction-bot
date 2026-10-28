@@ -434,8 +434,8 @@ async def auto_predict_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info(
             "自动预测落盘：%d 场（联赛 %s，窗口 %d 天）",
             r["saved"], list(r["per_league"]), r["window_days"],
-        joblog.ok(db_path, AUTO_PREDICT_JOB)
         )
+        joblog.ok(db_path, AUTO_PREDICT_JOB)
         for err in r["errors"]:
             log.warning("自动预测：%s", err)
     except Exception as exc:  # 自动预测失败绝不能影响推送主流程
