@@ -5,11 +5,10 @@
   - apisports：api-football.com 官方直连，使用 API_FOOTBALL_KEY
 """
 from __future__ import annotations
-from errfmt import fmt_exc
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date
 from typing import Any, Callable
 
 import httpx
@@ -71,8 +70,6 @@ TTL_ODDS = 15 * 60
 TTL_H2H = 12 * 3600
 TTL_FORM = 12 * 3600
 TTL_STATUS = 5 * 60
-# 进行中比赛的比分分钟级变化，缓存必须短；否则「实时」只是看起来实时
-TTL_LIVE = 60
 TTL_SEASONS = 24 * 3600
 TTL_SEASON_FIXTURES = 6 * 3600
 TTL_INJURIES = 3 * 3600
@@ -95,24 +92,6 @@ HTTP_HINTS = {
 
 class APIError(RuntimeError):
     """数据源返回错误（额度用尽、订阅无效、参数错误等）。"""
-
-
-# 「当日额度耗尽」的判据特征。额度是按天结算的硬上限，一旦打光，
-# 当天内任何重试都必然失败——重试只是白烧调用方的时间窗。
-# 判据必须**精确**：只认"按天结算"的措辞，不含 "day" 的一律视为
-# 可恢复的临时限流（每分钟/每秒），照旧退避重试。
-# 实测生产返回的原文："You have reached the request limit for the day."
-_DAILY_QUOTA_MARKERS = ("request limit for the day", "reached the request limit")
-
-
-def _is_daily_quota_exhausted(*parts: object) -> bool:
-    """判断错误是否属于「当日额度耗尽」这类当天不可恢复的失败。
-
-    只在**明确出现按天结算措辞**时返回 True。未知措辞一律返回 False：
-    误判成"额度耗尽"会让整套系统当天拒发所有请求，比多试两次更糟。
-    """
-    blob = " ".join(str(p) for p in parts if p).lower()
-    return "day" in blob and any(m in blob for m in _DAILY_QUOTA_MARKERS)
 
 
 SHOT_ON_TARGET_TYPES = ("Shots on Goal", "Shots on Target")
@@ -192,32 +171,6 @@ def flatten_standings(response: list[dict[str, Any]]) -> list[dict]:
     return rows
 
 
-def _as_date(day) -> date:
-    """把 date / datetime / ISO 字符串统一成 date。
-
-    为什么存在：``.isoformat()`` 只在 date 上有，字符串传进来会抛
-    AttributeError；datetime 的 isoformat 带时间部分，拼进查询参数
-    会让数据源按「某时刻」而不是「某天」理解。两类都是静默错误的来源。
-
-    Args:
-        day: date / datetime / "YYYY-MM-DD"
-
-    Returns:
-        归一化后的 date
-
-    Raises:
-        ValueError: 类型或格式非法——**显式抛出**让调用方看见，
-            而不是被内层 except 吞成「今天没有比赛」。
-    """
-    if isinstance(day, datetime):
-        return day.date()
-    if isinstance(day, date):
-        return day
-    if isinstance(day, str):
-        return date.fromisoformat(day.strip())
-    raise ValueError(f"无法识别的日期类型：{type(day).__name__}（{day!r}）")
-
-
 class FootballAPI:
     def __init__(
         self,
@@ -229,7 +182,6 @@ class FootballAPI:
         retries: int = 2,
         retry_delay: float = 1.5,
         base_url: str | None = None,
-        quota_floor: int = 0,
     ) -> None:
         if provider not in PROVIDERS:
             raise ValueError(f"未知的数据源渠道：{provider}")
@@ -246,15 +198,10 @@ class FootballAPI:
         # 实现，容量上限与过期淘汰都保留。
         self._cache = _new_response_cache()
         self.quota_remaining: str | None = None
-        # 额度熔断阈值：剩余次数低于/等于此值时主动停手。
-        # 此前 quota_remaining 只被记录、从未被读取——有计数、有展示，
-        # 唯独没有熔断。额度打光后会一直发无效请求，直到各调用点各自失败，
-        # 期间整套系统处于无人知晓的停摆状态。
-        self.quota_floor = int(quota_floor) if quota_floor else 0
+        # 数值化的当日剩余额度，仅供「发请求前」的预算闸门使用。
+        # 与 quota_remaining（原始字符串，用于 /status 展示）分开存：
+        # 展示要保留服务端的原始字面值，闸门需要可比较的整数。
         self._quota_left: int | None = None
-        # 实时端点最后一次失败原因（None = 最近一次成功或从未调用）。
-        # 用于区分「没有进行中的比赛」与「套餐不支持 live」。
-        self.last_live_error: str | None = None
 
     async def aclose(self) -> None:
         if self._client is not None and self._owns_client:
@@ -282,40 +229,31 @@ class FootballAPI:
         return data
 
     async def _request(self, path: str, params: dict[str, Any]) -> Any:
-        # ── 额度熔断 ────────────────────────────────────────────────
-        # 已知额度不足时直接拒发，不再消耗最后一次机会。
-        # 额度是按天结算的硬上限，打光后所有数据接口同时失效；
-        # 主动熔断能让失败发生在「可预期、可定位」的位置，
-        # 而不是散落在几十个调用点里各自超时。
-        if self.quota_exhausted:
-            raise APIError(
-                f"数据源额度已耗尽（剩余 {self.quota_remaining}），已主动停止请求。"
-                "额度每日重置，请稍后重试。")
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout)
         url = f"{self._base_url}/{path}"
         last_error = "未知错误"
 
         for attempt in range(self._retries + 1):
+            # 预算闸门：服务端已在上一响应的 x-ratelimit-requests-remaining 里
+            # 明确告知当日额度耗尽。此时再发请求既不会成功，也会把已用计数
+            # 推过套餐上限（线上出现过 7558/7500）。预先拒绝，把失败落在
+            # 「可预期」的位置，而不是靠撞 429 才知道没额度了。
+            # 放在循环内而非循环外：否则 429 把剩余刷成 0 后，
+            # 本轮剩余的重试仍会照发，一次请求被放大成多次无效请求。
+            if self._quota_left is not None and self._quota_left <= 0:
+                raise APIError("数据源当日额度已耗尽（剩余 0 次），本日不再请求")
             retry_wait = self._retry_delay * (attempt + 1)
             try:
                 resp = await self._client.get(url, params=params, headers=self._headers)
             except httpx.HTTPError as exc:
-                last_error = f"网络错误：{fmt_exc(exc)}"
-                log.warning("请求 %s 失败（第 %d 次）：%s", path, attempt + 1, fmt_exc(exc))
+                last_error = f"网络错误：{type(exc).__name__}"
+                log.warning("请求 %s 失败（第 %d 次）：%s", path, attempt + 1, type(exc).__name__)
             else:
                 self._track_quota(resp)
                 if resp.status_code == 429 or resp.status_code >= 500:
                     last_error = self._describe_http(resp)
                     log.warning("请求 %s 失败（第 %d 次）：%s", path, attempt + 1, last_error)
-                    # 429 有两种截然不同的含义：临时限流（可恢复）与
-                    # 当日额度耗尽（当天不可恢复）。此前二者一视同仁地退避
-                    # 重试 3 次，于是额度打光后每个调用点仍各烧 3 次无效请求，
-                    # 而熔断开关始终未启动 —— 系统处于无人知晓的空转。
-                    if resp.status_code == 429 and _is_daily_quota_exhausted(
-                            last_error, self._safe_body_text(resp)):
-                        self._mark_quota_exhausted(last_error)
-                        break
                 elif resp.status_code >= 400:
                     raise APIError(self._describe_http(resp))
                 else:
@@ -324,11 +262,6 @@ class FootballAPI:
                     if errors:
                         if isinstance(errors, dict) and "rateLimit" in errors:
                             last_error = self._format_errors(errors)
-                            # 同上：rateLimit 里写明"按天"才是真的没救，
-                            # 其余（每分钟限流）照旧退避重试。
-                            if _is_daily_quota_exhausted(last_error):
-                                self._mark_quota_exhausted(last_error)
-                                break
                             retry_wait = max(retry_wait, 6.0) if self._retry_delay else 0
                         else:
                             raise APIError(self._format_errors(errors))
@@ -341,51 +274,17 @@ class FootballAPI:
 
         raise APIError(last_error)
 
-    def _mark_quota_exhausted(self, reason: str) -> None:
-        """确认当日额度已耗尽：置熔断，后续请求在入口即被拒发。
-
-        quota_exhausted 只在 _quota_left 已知时为真，所以必须显式写 0，
-        否则接口不返回 remaining 头时熔断永远不启动。
-        """
-        self._quota_left = 0
-        self.quota_remaining = "0"
-        log.error("主源当日额度已耗尽，已熔断至次日重置：%s", str(reason)[:120])
-
-    @staticmethod
-    def _safe_body_text(resp: httpx.Response) -> str:
-        """安全读取响应体文本用于额度判别；读不到不影响主流程。"""
-        try:
-            return (resp.text or "")[:500]
-        except Exception:  # noqa: BLE001
-            return ""
-
     def _track_quota(self, resp: httpx.Response) -> None:
         remaining = resp.headers.get("x-ratelimit-requests-remaining")
         if remaining is not None:
             self.quota_remaining = remaining
+            # 服务端口径是权威值，比本地累加更准（本地计数不含别处共用同一
+            # key 的消耗）。解析失败不覆盖：保持上一次已知值，避免一次异常
+            # 头就把闸门误开或误关。
             try:
-                self._quota_left = int(str(remaining).strip())
+                self._quota_left = int(remaining)
             except (TypeError, ValueError):
-                # 头部不是整数（部分网关返回带引号的字符串），保持未知
-                self._quota_left = None
-
-    @property
-    def quota_left(self) -> int | None:
-        """数据源上报的剩余请求次数；未知返回 None（不猜）。"""
-        return self._quota_left
-
-    @property
-    def quota_exhausted(self) -> bool:
-        """额度是否已被判定为不足。
-
-        只在**明确知道**剩余次数时才熔断；未知（None）一律不触发——
-        否则一次头部解析失败就会让整套系统拒发所有请求，
-        那比额度打光本身更糟。
-        """
-        left = self._quota_left
-        if left is None:
-            return False
-        return left <= int(getattr(self, "quota_floor", 0) or 0)
+                log.debug("剩余额度响应头无法解析为整数：%r", remaining)
 
     @staticmethod
     def _json(resp: httpx.Response) -> dict[str, Any]:
@@ -421,71 +320,20 @@ class FootballAPI:
         return str(errors)
 
     # ---- 业务接口 ---------------------------------------------------------
-    async def get_fixtures(self, league_id: int, season: int, date_from, date_to) -> list[dict[str, Any]]:
-        """指定日期范围（含）内的赛程。
-
-        两个端点同样走 ``_as_date`` 归一化——理由与 ``get_fixtures_by_date``
-        相同：``str`` 没有 ``.isoformat()``，而调用方传字符串是常态
-        （配置、CLI、数据库取出的都是字符串）。
-        """
-        params = {
-            "league": league_id, "season": season,
-            "from": _as_date(date_from).isoformat(),
-            "to": _as_date(date_to).isoformat(),
-        }
+    async def get_fixtures(self, league_id: int, season: int, date_from: date, date_to: date) -> list[dict[str, Any]]:
+        """指定日期范围（含）内的赛程。"""
+        params = {"league": league_id, "season": season, "from": date_from.isoformat(), "to": date_to.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
-    async def get_fixtures_by_date(self, day) -> list[dict[str, Any]]:
-        """某一天的全部赛程（不按联赛过滤）。
-
-        ⚠️ ``day`` 可以是 ``date``、``datetime`` 或 ISO 字符串
-        （``"2026-10-26"``），**在入口统一归一化**。
-
-        为什么必须在这里做而不是靠调用方自觉：这个坑历史上踩了两次——
-        - 结算回填（PR #112）：``stale_pending_days()`` 返回字符串，
-          ``"2026-10-26".isoformat()`` 抛 AttributeError，异常被内层
-          ``except Exception`` 吞成空列表，表现为「成功取数 17 天、
-          补回 0 场」——全程无报错却毫无进展。
-        - ``/oddsprobe``：同样的字符串，同样静默失败。
-
-        只在调用方改，下一个调用点还会再犯。归一化收到入口，
-        这一类 bug 整体消失。
-        """
-        d = _as_date(day)
-        params = {"date": d.isoformat()}
+    async def get_fixtures_by_date(self, day: date) -> list[dict[str, Any]]:
+        """某一天的全部赛程（不按联赛过滤）。"""
+        params = {"date": day.isoformat()}
         return await self._get("fixtures", params, ttl=TTL_FIXTURES)
 
     async def get_fixtures_by_season(self, league_id: int, season: int) -> list[dict[str, Any]]:
         """整季赛程（只按赛季拉取，不带日期范围）。"""
         params = {"league": league_id, "season": season}
         return await self._get("fixtures", params, ttl=TTL_SEASON_FIXTURES)
-
-    async def get_live_fixtures(self) -> list[dict[str, Any]]:
-        """正在进行的比赛（/fixtures?live=all）。
-
-        ⚠️ 套餐门槛：`live=all` 属于付费能力，免费层会直接拒绝。
-        因此这里与 get_injuries / get_lineups 一样按**可选数据**处理——
-        取不到一律返回空列表，绝不能让看板整页报错。
-
-        TTL 刻意设短（TTL_LIVE）：进行中比赛的比分分钟级变化，
-        沿用 TTL_FIXTURES（30 分钟）等于把实时数据伪装成实时。
-
-        空列表有三种含义，上层必须能区分，否则用户会把「套餐不支持」
-        误读成「现在没有比赛」——两者处置方式完全不同（前者要换套餐，
-        后者只需等待）。因此把失败原因留在 ``last_live_error`` 上：
-          1. 空列表 + last_live_error=None → 此刻确实没有进行中的比赛
-          2. 空列表 + 含 "套餐/订阅/permission" → 套餐不支持
-          3. 空列表 + 其他原因 → 限流或临时故障
-        """
-        try:
-            data = await self._get("fixtures", {"live": "all"}, ttl=TTL_LIVE)
-        except APIError as exc:
-            self.last_live_error = str(exc)
-            log.info("实时赛况不可用（live=all）：%s", exc)
-            return []
-        else:
-            self.last_live_error = None
-            return data
 
     async def get_injuries(self, fixture_id: int) -> list[dict[str, Any]]:
         """指定比赛的伤停名单。"""
