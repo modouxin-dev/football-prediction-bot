@@ -1,72 +1,62 @@
-"""额度账本：数出「一天真实请求数」（scripts/quota_ledger.py）。
+"""额度账本实测：把每个定时任务一天发多少次数据请求真数出来。
 
-用法：python3 scripts/quota_ledger.py
-不联网、不需要数据源密钥（网络层已替换为本地假响应）。
+方法：用一个"计数替身"替换 FootballAPI 的全部接口方法，让真实
+PredictionService / sync 逻辑照常跑，统计每个任务一轮的请求数。
+再乘任务的真实调度频率，得到一天的账本。
 
-v2 暴露了一个方法论问题：进程内一轮接一轮跑，TTL 都没过期，稳态恒为 0，
-测不出真实占用。真实情况是一天里缓存会反复过期。
-
-v3 的做法（可复核，不猜）：
-  1. 只 mock 网络层（_request），客户端 TTL 缓存真实生效——与生产一致；
-  2. 记录每个端点 **逻辑调用次数/轮** 与 **涉及的缓存键个数**；
-  3. 按各任务的真实调度频率折算到一天，再用 TTL 上限封顶：
-       每天请求 = min(逻辑调用/轮 × 每天轮次, 缓存键数 × 86400/TTL)
-     两个约束缺一不可：前者是访问频次，后者是缓存能把频次压到多低。
+不猜、不估算：所有数字来自本脚本实跑。
 """
 from __future__ import annotations
 
 import asyncio
 import os
-import pathlib
 import sys
 import tempfile
 import types
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-# 以脚本位置定位仓库根目录，保证 `python3 scripts/quota_ledger.py` 从任意
-# 工作目录都能导入顶层模块（顶层模块之间是直接 import 的）。
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-
-TMPDIR = tempfile.mkdtemp(prefix="quota_ledger_")
+TMPDIR = tempfile.mkdtemp(prefix="quotaledger_")
 os.environ["DATABASE_PATH"] = os.path.join(TMPDIR, "q.db")
 os.environ["DATA_DIR"] = TMPDIR
+os.environ["DATA_SOURCE_MODE"] = "primary"     # 只走主源，排除备用源干扰
 os.environ["FOOTBALL_DATA_ENABLED"] = "false"
-os.environ["PREMATCH_ENABLED"] = "1"
 os.environ["PREMATCH_REFRESH_MINUTES"] = "15"
-os.environ["PREMATCH_LINEUP_WINDOW"] = "3600"
-os.environ["PREMATCH_REFRESH_CAP"] = "10"
 os.environ["LOG_LEVEL"] = "ERROR"
-os.environ.setdefault("TELEGRAM_TOKEN", "dummy-token")
-os.environ.setdefault("API_FOOTBALL_KEY", "dummy-key")
+# 账本只测请求次数，不真连数据源；缺这两个变量会导致 load_settings 直接拒绝。
+os.environ.setdefault("TELEGRAM_TOKEN", "dummy-token-for-quota-ledger")
+os.environ.setdefault("API_FOOTBALL_KEY", "dummy-key-for-quota-ledger")
 
-import api_client  # noqa: E402
+import _tgstub  # noqa: E402,F401  （最小 telegram 替身，见文件内说明）
+
 import config  # noqa: E402
 import scheduler  # noqa: E402
 from service import PredictionService  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
 LEAGUES = (39, 40, 61, 71, 78, 88, 94, 135, 140, 2)
-FIX: list[tuple] = []
-_fid = 1000
-for lg in LEAGUES:
-    for i in range(3):
-        FIX.append((_fid, lg, NOW + timedelta(minutes=20 + i * 90)))
-        _fid += 1
-    for i in range(35):
-        FIX.append((_fid, lg, NOW + timedelta(hours=25 + i * 17)))
-        _fid += 1
+PER_LEAGUE = 38          # 30 天窗口内每联赛场次（项目实测 380 场 / 10 联赛）
+KICKOFF_SPAN_DAYS = 30
 
 
-def mk(fid, lg, k):
+def mk_fixture(fid: int, league: int, kickoff: datetime):
     return {
-        "fixture": {"id": fid, "date": k.isoformat(), "timestamp": int(k.timestamp()),
-                    "status": {"short": "NS", "long": "Not Started"},
-                    "venue": {"id": 1, "name": "V"}, "referee": None},
-        "league": {"id": lg, "name": f"L{lg}", "country": "X", "season": 2025,
-                   "round": "Regular Season - 1"},
-        "teams": {"home": {"id": fid * 2, "name": f"H{fid}", "logo": "", "winner": None},
-                  "away": {"id": fid * 2 + 1, "name": f"A{fid}", "logo": "", "winner": None}},
+        "fixture": {
+            "id": fid,
+            "date": kickoff.isoformat(),
+            "timestamp": int(kickoff.timestamp()),
+            "status": {"short": "NS", "long": "Not Started"},
+            "venue": {"id": 1, "name": "V"},
+            "referee": None,
+        },
+        "league": {
+            "id": league, "name": f"L{league}", "country": "X",
+            "season": 2025, "round": "Regular Season - 1",
+        },
+        "teams": {
+            "home": {"id": fid * 2, "name": f"H{fid}", "logo": "", "winner": None},
+            "away": {"id": fid * 2 + 1, "name": f"A{fid}", "logo": "", "winner": None},
+        },
         "goals": {"home": None, "away": None},
         "score": {"halftime": {"home": None, "away": None},
                   "fulltime": {"home": None, "away": None},
@@ -75,126 +65,175 @@ def mk(fid, lg, k):
     }
 
 
-TTL = {
-    "fixtures": api_client.TTL_FIXTURES,
-    "standings": api_client.TTL_STANDINGS,
-    "odds": api_client.TTL_ODDS,
-    "injuries": api_client.TTL_INJURIES,
-    "fixtures/lineups": api_client.TTL_LINEUPS,
-    "players/squads": api_client.TTL_SQUAD,
-    "players": api_client.TTL_PLAYER_STATS,
-    "leagues/seasons": api_client.TTL_SEASONS,
-    "fixtures/headtohead": api_client.TTL_H2H,
-    "fixtures/statistics": api_client.TTL_STATS,
-}
+ALL_FIXTURES: list[dict] = []
+_fid = 1000
+# 现实形态：10 个联赛里，当天各 3 场（共 30 场，落在赛前刷新窗口内），
+# 其余 350 场均匀铺满 30 天窗口。
+for lg in LEAGUES:
+    for i in range(3):
+        k = NOW + timedelta(minutes=20 + i * 7 * 60)
+        ALL_FIXTURES.append(mk_fixture(_fid, lg, k))
+        _fid += 1
+    for i in range(PER_LEAGUE - 3):
+        k = NOW + timedelta(hours=25 + i * (KICKOFF_SPAN_DAYS * 24 / PER_LEAGUE))
+        ALL_FIXTURES.append(mk_fixture(_fid, lg, k))
+        _fid += 1
 
 
-class NetStub(api_client.FootballAPI):
-    def __init__(self, *a, **kw):
-        kw["api_key"] = kw.get("api_key", "dummy")
-        super().__init__(*a, **kw)
-        self.net: Counter = Counter()
-        self.logical: Counter = Counter()
-        self.keys: dict[str, set] = defaultdict(set)
+class CountingAPI:
+    """计数替身：每个方法调用 = 一次真实数据请求。"""
 
-    async def _get(self, path, params, ttl=0.0, fresh=False):
-        self.logical[path] += 1
-        self.keys[path].add(tuple(sorted((k, str(v)) for k, v in params.items())))
-        return await super()._get(path, params, ttl=ttl, fresh=fresh)
+    def __init__(self) -> None:
+        self.calls: Counter = Counter()
 
-    async def _request(self, path, params):
-        self.net[path] += 1
-        if path == "fixtures":
-            if "league" in params:
-                return [mk(f, l, k) for f, l, k in FIX if l == int(params["league"])]
-            return [mk(f, l, k) for f, l, k in FIX]
-        if path == "standings":
-            return [{"league": {"standings": [[
-                {"rank": i + 1, "team": {"id": 1000 + i, "name": f"T{i}"},
-                 "points": 60 - i, "goalsDiff": 10 - i,
-                 "all": {"played": 20, "win": 10, "draw": 2, "lose": 8,
-                         "goals": {"for": 30, "against": 25}},
-                 "home": {"played": 10, "win": 6, "draw": 1, "lose": 3,
-                          "goals": {"for": 18, "against": 12}},
-                 "away": {"played": 10, "win": 4, "draw": 1, "lose": 5,
-                          "goals": {"for": 12, "against": 13}},
-                 "form": "WWDLW"} for i in range(20)]]}}]
-        if path == "leagues/seasons":
-            return [{"year": y} for y in (2025, 2024, 2023)]
-        if path == "status":
-            return {"requests": {"limit_day": 7500, "remaining": 7500}}
+    def _c(self, name):
+        self.calls[name] += 1
+
+    # ---- 赛程 ----
+    async def get_fixtures(self, league_id, season, date_from, date_to):
+        self._c("get_fixtures")
+        return [f for f in ALL_FIXTURES if f["league"]["id"] == int(league_id)]
+
+    async def get_fixtures_by_date(self, day):
+        self._c("get_fixtures_by_date")
+        return ALL_FIXTURES
+
+    async def get_fixtures_by_season(self, league_id, season):
+        self._c("get_fixtures_by_season")
+        return [f for f in ALL_FIXTURES if f["league"]["id"] == int(league_id)]
+
+    async def get_live_fixtures(self):
+        self._c("get_live_fixtures")
         return []
+
+    # ---- 单场附加数据 ----
+    async def get_injuries(self, fixture_id):
+        self._c("get_injuries")
+        return []
+
+    async def get_lineups(self, fixture_id):
+        self._c("get_lineups")
+        return []
+
+    async def get_squad(self, team_id):
+        self._c("get_squad")
+        return []
+
+    async def get_team_player_stats(self, team_id, season):
+        self._c("get_team_player_stats")
+        return []
+
+    async def get_standings(self, league_id, season):
+        self._c("get_standings")
+        return []
+
+    async def get_odds(self, fixture_id, fresh=False):
+        self._c("get_odds")
+        return []
+
+    async def get_h2h(self, home_id, away_id, last=5):
+        self._c("get_h2h")
+        return []
+
+    async def get_team_form(self, team_id, season, last=5):
+        self._c("get_team_form")
+        return []
+
+    async def get_fixture_statistics(self, fixture_id):
+        self._c("get_fixture_statistics")
+        return []
+
+    async def get_available_seasons(self):
+        self._c("get_available_seasons")
+        return [2025, 2024, 2023]
+
+    async def get_account_status(self):
+        self._c("get_account_status")
+        return {"requests": {"limit_day": 7500, "remaining": 7500}}
+
+    async def aclose(self):
+        pass
+
+    @property
+    def quota_left(self):
+        return 7500
+
+    @property
+    def quota_exhausted(self):
+        return False
+
+
+def build_service():
+    settings = config.load_settings()
+    api = CountingAPI()
+    svc = PredictionService(settings, api)
+    return settings, api, svc
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def measure(name: str, coro_factory, api: CountingAPI):
+    before = api.calls.copy()
+    try:
+        run(coro_factory())
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [{name}] 抛出异常（不影响计数）：{type(exc).__name__}: {exc}")
+    after = api.calls.copy()
+    delta = after - before
+    total = sum(delta.values())
+    return total, delta
 
 
 def main() -> int:
-    settings = config.load_settings()
-    api = NetStub(api_key="dummy", provider="rapidapi")
-    svc = PredictionService(settings, api)
+    settings, api, svc = build_service()
     app = types.SimpleNamespace(bot_data={"service": svc, "settings": settings})
     ctx = types.SimpleNamespace(application=app)
 
-    print(f"合成赛程 {len(FIX)} 场 / {len(LEAGUES)} 联赛；赛前窗口内 30 场")
+    print(f"合成赛程：{len(ALL_FIXTURES)} 场 / {len(LEAGUES)} 联赛 / "
+          f"{KICKOFF_SPAN_DAYS} 天窗口")
     print()
 
-    # 冷启动：填满缓存，同时记录各端点的缓存键
-    asyncio.run(scheduler.sync_job(ctx))
-    asyncio.run(scheduler.auto_predict_job(ctx))
-    asyncio.run(svc.prematch_refresh())
-    print(f"冷启动首轮真实请求：{sum(api.net.values())} 次")
-    for m, c in sorted(api.net.items(), key=lambda x: -x[1]):
-        print(f"      {m:<20} {c}")
+    jobs = [
+        ("sync_job（赛程同步）", lambda: scheduler.sync_job(ctx)),
+        ("auto_predict_job（自动预测）", lambda: scheduler.auto_predict_job(ctx)),
+        ("prematch_job（赛前刷新）", lambda: scheduler.prematch_job(ctx)),
+        ("history_job（历史回填）", lambda: scheduler.history_job(ctx)),
+        ("settle_job（赛果结算）", lambda: scheduler.settle_job(ctx)),
+    ]
 
-    # 稳态一轮：分别测三个任务的逻辑调用增量（缓存命中不计入 net）
-    def snap():
-        return (Counter(api.logical), {k: len(v) for k, v in api.keys.items()},
-                Counter(api.net))
+    # 每天运行次数（来自 scheduler.py 的注册参数）
+    per_day = {
+        "sync_job（赛程同步）": 24 / __import__("sync").SYNC_INTERVAL_HOURS,
+        "auto_predict_job（自动预测）": 24 / scheduler.AUTO_PREDICT_INTERVAL_HOURS,
+        "prematch_job（赛前刷新）": 24 * 60 / int(settings.prematch_refresh_minutes),
+        "history_job（历史回填）": 24 / scheduler.HISTORY_INTERVAL_HOURS,
+        "settle_job（赛果结算）": 24 / 6,
+    }
 
-    l0, k0, n0 = snap()
-    asyncio.run(scheduler.sync_job(ctx))
-    l1, k1, n1 = snap()
-    d_sync = l1 - l0
-    asyncio.run(scheduler.auto_predict_job(ctx))
-    l2, k2, n2 = snap()
-    d_auto = l2 - l1
-    asyncio.run(svc.prematch_refresh())
-    l3, k3, n3 = snap()
-    d_pm = l3 - l2
+    results = []
+    for name, factory in jobs:
+        total, delta = measure(name, factory, api)
+        results.append((name, total, delta))
+        print(f"{name}: 一轮 {total} 次")
+        for m, c in sorted(delta.items(), key=lambda x: -x[1]):
+            print(f"    {m}: {c}")
+        print()
 
-    print()
-    print("── 稳态一轮的逻辑调用（缓存命中也算调用，但未发请求）──")
-    for label, d in (("同步", d_sync), ("自动预测", d_auto), ("赛前刷新", d_pm)):
-        print(f"  {label}: {sum(d.values())} 次 → " +
-              ", ".join(f"{m}×{c}" for m, c in sorted(d.items(), key=lambda x: -x[1])))
-
-    sync_h = getattr(__import__("sync"), "SYNC_INTERVAL_HOURS", 6)
-    auto_h = scheduler.AUTO_PREDICT_INTERVAL_HOURS
-    pm_min = int(settings.prematch_refresh_minutes)
-    runs = {"同步": 24 / sync_h, "自动预测": 24 / auto_h, "赛前刷新": 24 * 60 / pm_min}
-
-    print()
-    print("=" * 74)
-    print(f"{'端点':<20}{'键数':>6}{'逻辑/天':>10}{'TTL上限/天':>12}{'取小值':>10}")
-    print("-" * 74)
-    per_job_day: dict[str, float] = {}
-    for label, d in (("同步", d_sync), ("自动预测", d_auto), ("赛前刷新", d_pm)):
-        job_total = 0.0
-        for path, cnt in d.items():
-            if not cnt:
-                continue
-            keys = len(api.keys.get(path, ()))
-            ttl = TTL.get(path, 0)
-            logical_day = cnt * runs[label]
-            ttl_cap = keys * (86400 / ttl) if ttl else logical_day
-            day = min(logical_day, ttl_cap)
-            job_total += day
-            print(f"{path:<20}{keys:>6}{logical_day:>10.0f}{ttl_cap:>12.0f}{day:>10.0f}")
-        per_job_day[label] = job_total
-    print("-" * 74)
-    for label, v in per_job_day.items():
-        print(f"{label:<12} 每天 {v:8.0f}    （{runs[label]:.0f} 轮/天）")
-    grand = sum(per_job_day.values())
-    print("-" * 74)
-    print(f"{'稳态合计':<12} 每天 {grand:8.0f} / 7500   占 {grand / 7500 * 100:.1f}%")
+    print("=" * 62)
+    print(f"{'任务':<28}{'一轮':>8}{'每天次数':>10}{'每天请求':>12}")
+    print("-" * 62)
+    grand = 0
+    for name, total, _ in results:
+        n = per_day[name]
+        day = total * n
+        grand += day
+        print(f"{name:<28}{total:>8}{n:>10.0f}{day:>12.0f}")
+    print("-" * 62)
+    print(f"{'合计':<28}{'':>8}{'':>10}{grand:>12.0f}")
+    print(f"{'免费套餐上限':<28}{'':>8}{'':>10}{7500:>12}")
+    print(f"{'超出':<28}{'':>8}{'':>10}{grand - 7500:>12.0f}")
     return 0
 
 
