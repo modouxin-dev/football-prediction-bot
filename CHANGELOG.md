@@ -12,6 +12,47 @@
 > 本文件是「改了什么」的唯一权威索引。README 描述当前能力，
 > CHANGELOG 描述**从哪个版本变成现在这样**。---
 
+## [ab1135e] 2026-10-29 · 运行时信息：/health 与 /status 暴露平台、启动时刻、运行时长
+
+### 为什么做
+
+要确认「部署到底更新了没有」，原先只有 version（`RAILWAY_GIT_COMMIT_SHA`）
+这一个抓手。但它**只能说明代码版本，区分不了旧容器是否真的被替换**——
+同一 commit 重新部署时版本号一模一样，看上去「已更新」，实际跑的还是老进程。
+
+多平台并存且共用同一个 API Key 时（仓库里同时有 `railway.toml` 与
+`fly.toml`），更无从分辨哪个实例在消耗额度。Fly.io 那份配置只跑
+`main.py`、**不监听端口**，没有 HTTP 端点可查，是彻底的盲区。
+
+### 改动
+
+- 新增 `runtime_info.py`：平台识别（railway / fly / render / local，依据各
+  平台注入的环境变量）、进程启动时刻（UTC）、运行时长（**单调时钟**，不受
+  NTP 校时或手动改表影响）。识别不出时退化为 `local`，不抛错。
+- `api.py` `/health` 增加 `platform` / `started_at` / `uptime_seconds`。
+- `commands/admin.py` `/status` 增加「平台」「运行时长」两行——这是 Fly
+  实例唯一可见的入口。
+- `README.md` 补充「如何确认部署到底更新了没有」。
+
+### 验证
+
+- 新增 `tests/test_runtime_info.py`：**18 passed**
+- **反向验证**：回退上述两处改动后 → `2 failed, 16 passed`，
+  失败的两条正对改动（`/health` 缺字段 KeyError、`/status` 缺调用），
+  通过的是防误伤守卫。恢复后 18 全绿。
+- 全量回归：**2096 passed, 5 skipped, 0 failed**（129.90s）
+
+> 关于 `/status` 那条测试：用 AST 而非字符串匹配。本项目此前真实踩过一次坑——
+> 测试断言源码含某标识符，而注释里恰好写了同一个词，改动回退后测试仍通过，
+> 等于空跑。AST 只认真实调用节点。
+
+### 改动文件
+
+`runtime_info.py`（新增）、`api.py`、`commands/admin.py`、
+`tests/test_runtime_info.py`（新增）、`README.md`
+
+---
+
 ## [2026-10-24] 修复：自动推送的预测，点卡片按钮仍报「已过期 / 不在今日赛程」
 
 ### 现象
